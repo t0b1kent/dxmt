@@ -1,3 +1,4 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 
 #include "dxbc_converter.hpp"
 #include "nt/dxbc_binding_map.hpp"
@@ -28,7 +29,7 @@ public:
     if (Iter == ConstantBuffers.end())
       return {};
     auto Pointer = GetArgument(Builder, ConstantBufferTableIndex, Iter->second.arg_index);
-    return ConstantBufferDescriptor{Pointer, nullptr};
+    return ConstantBufferDescriptor{Pointer, nullptr, Iter->second.size_in_vec4};
   }
 
   virtual llvm::Optional<SamplerDescriptor>

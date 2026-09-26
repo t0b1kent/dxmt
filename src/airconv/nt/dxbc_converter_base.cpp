@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -69,36 +70,53 @@ Converter::LoadOperand(const SrcOperandConstantBuffer &SrcOp, mask_t Mask) {
   if (!descriptor)
     return ApplySrcModifier(SrcOp._, llvm::ConstantAggregateZero::get(air.getIntTy(4)), Mask);
   auto Handle = descriptor->Pointer;
+  auto Index = LoadOperandIndex(SrcOp.regindex);
+  llvm::Value *InRange = nullptr;
+  if (ctx.shader_type == microsoft::D3D10_SB_GEOMETRY_SHADER && !std::holds_alternative<uint32_t>(SrcOp.regindex)) {
+    if (!descriptor->DeclaredVec4Count)
+      return ApplySrcModifier(SrcOp._, llvm::ConstantAggregateZero::get(air.getIntTy(4)), Mask);
+    // Select a safe address before loading; selecting only the result would still read out of bounds.
+    InRange = ir.CreateICmpULT(Index, ir.getInt32(descriptor->DeclaredVec4Count));
+    Index = ir.CreateSelect(InRange, Index, ir.getInt32(0));
+  }
 
   if (auto Comp = ComponentFromScalarMask(Mask, SrcOp._.swizzle); Comp >= 0) {
     auto TyInt = air.getIntTy();
-    auto Ptr = ir.CreateGEP(air.getIntTy(4), Handle, {LoadOperandIndex(SrcOp.regindex), ir.getInt32(Comp)});
+    auto Ptr = ir.CreateGEP(air.getIntTy(4), Handle, {Index, ir.getInt32(Comp)});
     auto ValueInt = ir.CreateLoad(TyInt, Ptr);
-    return ApplySrcModifier(SrcOp._, ValueInt, Mask);
+    return ApplySrcModifier(SrcOp._, InRange ? ir.CreateSelect(InRange, ValueInt, ir.getInt32(0)) : ValueInt, Mask);
   }
 
   auto TyIntVec4 = air.getIntTy(4);
-  auto Ptr = ir.CreateGEP(TyIntVec4, Handle, {LoadOperandIndex(SrcOp.regindex)});
+  auto Ptr = ir.CreateGEP(TyIntVec4, Handle, {Index});
   auto ValueIntVec4 = ir.CreateLoad(TyIntVec4, Ptr);
-  return ApplySrcModifier(SrcOp._, ValueIntVec4, Mask);
+  return ApplySrcModifier(SrcOp._, InRange ? ir.CreateSelect(InRange, ValueIntVec4, llvm::ConstantAggregateZero::get(TyIntVec4)) : ValueIntVec4, Mask);
 }
 
 llvm::Value *
 Converter::LoadOperand(const SrcOperandImmediateConstantBuffer &SrcOp, mask_t Mask) {
   auto Handle = res.icb;
   auto TyHandle = GetArrayType(Handle);
+  auto Index = LoadOperandIndex(SrcOp.regindex);
+  llvm::Value *InRange = nullptr;
+  if (ctx.shader_type == microsoft::D3D10_SB_GEOMETRY_SHADER && !std::holds_alternative<uint32_t>(SrcOp.regindex)) {
+    if (!TyHandle->getNumElements())
+      return ApplySrcModifier(SrcOp._, llvm::ConstantAggregateZero::get(air.getIntTy(4)), Mask);
+    InRange = ir.CreateICmpULT(Index, ir.getInt32(TyHandle->getNumElements()));
+    Index = ir.CreateSelect(InRange, Index, ir.getInt32(0));
+  }
 
   if (auto Comp = ComponentFromScalarMask(Mask, SrcOp._.swizzle); Comp >= 0) {
     auto TyInt = air.getIntTy();
-    auto Ptr = ir.CreateGEP(TyHandle, Handle, {ir.getInt32(0), LoadOperandIndex(SrcOp.regindex), ir.getInt32(Comp)});
+    auto Ptr = ir.CreateGEP(TyHandle, Handle, {ir.getInt32(0), Index, ir.getInt32(Comp)});
     auto ValueInt = ir.CreateLoad(TyInt, Ptr);
-    return ApplySrcModifier(SrcOp._, ValueInt, Mask);
+    return ApplySrcModifier(SrcOp._, InRange ? ir.CreateSelect(InRange, ValueInt, ir.getInt32(0)) : ValueInt, Mask);
   }
 
   auto TyIntVec4 = air.getIntTy(4);
-  auto Ptr = ir.CreateGEP(TyHandle, Handle, {ir.getInt32(0), LoadOperandIndex(SrcOp.regindex)});
+  auto Ptr = ir.CreateGEP(TyHandle, Handle, {ir.getInt32(0), Index});
   auto ValueIntVec4 = ir.CreateLoad(TyIntVec4, Ptr);
-  return ApplySrcModifier(SrcOp._, ValueIntVec4, Mask);
+  return ApplySrcModifier(SrcOp._, InRange ? ir.CreateSelect(InRange, ValueIntVec4, llvm::ConstantAggregateZero::get(TyIntVec4)) : ValueIntVec4, Mask);
 }
 
 llvm::Value *
@@ -331,24 +349,32 @@ Converter::LoadOperand(const SrcOperandIndexableInput &SrcOp, mask_t Mask) {
 
 llvm::Value *
 Converter::LoadOperand(const SrcOperandInputICP &SrcOp, mask_t Mask) {
-  /* applies to both hull and domain shader, in this case input is a "2d" array */
+  /* Hull, domain and geometry inputs use a per-vertex 2d array. */
   auto Handle = res.input.ptr_int4;
   auto TyHandle = GetArrayType(Handle);
 
   auto CPId = LoadOperandIndex(SrcOp.cpid);
   auto RegId = ir.getInt32(SrcOp.regid);
+  llvm::Value *InRange = nullptr;
+  if (ctx.shader_type == microsoft::D3D10_SB_GEOMETRY_SHADER && !std::holds_alternative<uint32_t>(SrcOp.cpid)) {
+    if (!TyHandle->getNumElements())
+      return ApplySrcModifier(SrcOp._, llvm::ConstantAggregateZero::get(air.getIntTy(4)), Mask);
+    // Bound the address before the load, then zero invalid vertex reads.
+    InRange = ir.CreateICmpULT(CPId, ir.getInt32(TyHandle->getNumElements()));
+    CPId = ir.CreateSelect(InRange, CPId, ir.getInt32(0));
+  }
 
   if (auto Comp = ComponentFromScalarMask(Mask, SrcOp._.swizzle); Comp >= 0) {
     auto TyInt = air.getIntTy();
     auto Ptr = ir.CreateGEP(TyHandle, Handle, {ir.getInt32(0), CPId, RegId, ir.getInt32(Comp)});
     auto ValueInt = ir.CreateLoad(TyInt, Ptr);
-    return ApplySrcModifier(SrcOp._, ValueInt, Mask);
+    return ApplySrcModifier(SrcOp._, InRange ? ir.CreateSelect(InRange, ValueInt, ir.getInt32(0)) : ValueInt, Mask);
   }
 
   auto TyIntVec4 = air.getIntTy(4);
   auto Ptr = ir.CreateGEP(TyHandle, Handle, {ir.getInt32(0), CPId, RegId});
   auto ValueIntVec4 = ir.CreateLoad(TyIntVec4, Ptr);
-  return ApplySrcModifier(SrcOp._, ValueIntVec4, Mask);
+  return ApplySrcModifier(SrcOp._, InRange ? ir.CreateSelect(InRange, ValueIntVec4, llvm::ConstantAggregateZero::get(TyIntVec4)) : ValueIntVec4, Mask);
 }
 
 llvm::Value *
@@ -1421,6 +1447,8 @@ Converter::operator()(const InstLoad &load) {
       air.CreateRead(Tex->Texture, Tex->Handle, Address, ArrayIndex, SampleIndex, LOD, Tex->GlobalCoherent);
 
   StoreOperand(load.dst, MaskSwizzle(Value, GetMask(load.dst), Tex->Swizzle));
+  if (load.feedback)
+    StoreOperand(*load.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 void
 Converter::operator()(const InstLoadUAVTyped &load) {
@@ -1475,6 +1503,8 @@ Converter::operator()(const InstLoadUAVTyped &load) {
       air.CreateRead(Tex->Texture, Tex->Handle, Address, ArrayIndex, SampleIndex, air.getInt(0), Tex->GlobalCoherent);
 
   StoreOperand(load.dst, MaskSwizzle(Value, GetMask(load.dst), Tex->Swizzle));
+  if (load.feedback)
+    StoreOperand(*load.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 
 void
@@ -1599,6 +1629,8 @@ Converter::operator()(const InstSample &sample) {
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  if (sample.feedback)
+    StoreOperand(*sample.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 
 void
@@ -1664,6 +1696,8 @@ Converter::operator()(const InstSampleLOD &sample) {
       air.CreateSample(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, sample.offsets, sample_level{LOD});
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  if (sample.feedback)
+    StoreOperand(*sample.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 
 void
@@ -1737,6 +1771,8 @@ Converter::operator()(const InstSampleBias &sample) {
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  if (sample.feedback)
+    StoreOperand(*sample.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 
 void
@@ -1827,6 +1863,8 @@ Converter::operator()(const InstSampleDerivative &sample) {
   );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  if (sample.feedback)
+    StoreOperand(*sample.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 
 void
@@ -1892,6 +1930,8 @@ Converter::operator()(const InstSampleCompare &sample) {
             );
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  if (sample.feedback)
+    StoreOperand(*sample.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 
 void
@@ -1949,6 +1989,8 @@ Converter::operator()(const InstGather &sample) {
       air.CreateGather(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, Offset, Component);
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  if (sample.feedback)
+    StoreOperand(*sample.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 
 void
@@ -2002,6 +2044,8 @@ Converter::operator()(const InstGatherCompare &sample) {
       air.CreateGatherCompare(Tex->Texture, Tex->Handle, SamplerHandle, Coord, ArrayIndex, Reference, Offset);
 
   StoreOperand(sample.dst, MaskSwizzle(Value, GetMask(sample.dst), Tex->Swizzle));
+  if (sample.feedback)
+    StoreOperand(*sample.feedback, ir.CreateZExt(Residency, air.getIntTy()));
 }
 
 void
@@ -2722,6 +2766,25 @@ Converter::HullGenerateWorkloadForTriangle(
 }
 
 void
+Converter::HullGenerateWorkloadForIsoline(
+    llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
+    llvm::Value *Density, llvm::Value *Detail
+) {
+  llvm::SmallVector<llvm::Value *> operands{PatchIndex, CountPtr, DataPtr, Density, Detail};
+  llvm::SmallVector<llvm::Type *> types;
+  for (auto *operand : operands) types.push_back(operand->getType());
+  std::string name = "dxmt.generate_workload.isoline";
+  switch (Partitioning) {
+  case TessellatorPartitioning::integer: name += ".integer"; break;
+  case TessellatorPartitioning::pow2: name += ".pow2"; break;
+  case TessellatorPartitioning::fractional_odd: name += ".odd"; break;
+  case TessellatorPartitioning::fractional_even: name += ".even"; break;
+  }
+  auto fn = air.getModule()->getOrInsertFunction(name, llvm::FunctionType::get(air.getVoidTy(), types, false));
+  ir.CreateCall(fn, operands);
+}
+
+void
 Converter::HullGenerateWorkloadForQuad(
     llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
     llvm::Value *TessFactorIn0, llvm::Value *TessFactorIn1, llvm::Value *TessFactorOut0, llvm::Value *TessFactorOut1,
@@ -2805,7 +2868,8 @@ Converter::DomainGetPatchIndex(llvm::Value *WorkloadIndex, llvm::Value *DataPtr)
 
 std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>
 Converter::DomainGetLocation(
-    llvm::Value *WorkloadIndex, llvm::Value *ThreadIndex, llvm::Value *DataPtr, TessellatorPartitioning Partitioning
+    llvm::Value *WorkloadIndex, llvm::Value *ThreadIndex, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
+    bool SplitWorkload
 ) {
   using namespace llvm;
 
@@ -2829,6 +2893,7 @@ Converter::DomainGetLocation(
   Ops.push_back(DataPtr);
 
   std::string FnName = "dxmt.get_domain_location";
+  if (SplitWorkload) FnName += ".split";
   switch (Partitioning) {
   case TessellatorPartitioning::integer:
     FnName += ".integer";
@@ -2859,7 +2924,7 @@ Converter::DomainGetLocation(
 
 void
 Converter::DomainGeneratePrimitives(
-    llvm::Value *WorkloadIndex, llvm::Value *DataPtr, TessellatorOutputPrimitive Primitive
+    llvm::Value *WorkloadIndex, llvm::Value *DataPtr, TessellatorOutputPrimitive Primitive, bool SplitWorkload
 ) {
   using namespace llvm;
 
@@ -2883,6 +2948,7 @@ Converter::DomainGeneratePrimitives(
   Ops.push_back(air.getMeshHandle());
 
   std::string FnName = "dxmt.domain_generate_primitives";
+  if (SplitWorkload) FnName += ".split";
   switch (Primitive) {
   case TessellatorOutputPrimitive::point:
     FnName += ".point";

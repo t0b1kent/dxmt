@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -370,6 +371,7 @@ class MTLD3D12RootSignatureImpl : public MTLD3D12DeviceChild<MTLD3D12RootSignatu
 
   std::vector<uint8_t> blob_;
   std::vector<uint32_t> qword_offsets_;
+  local_root::Layout local_layout_;
 
   std::vector<Rc<Sampler>> static_samplers_; // which is not really "static"
   /**
@@ -402,8 +404,37 @@ public:
 
     auto &desc = deserializer.desc_1_1_.Desc_1_1;
 
+    static_assert(D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE == unsigned(local_root::Table));
+    static_assert(D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS == unsigned(local_root::Constants));
+    static_assert(D3D12_ROOT_PARAMETER_TYPE_CBV == unsigned(local_root::CBV));
+    static_assert(D3D12_ROOT_PARAMETER_TYPE_SRV == unsigned(local_root::SRV));
+    static_assert(D3D12_ROOT_PARAMETER_TYPE_UAV == unsigned(local_root::UAV));
+    static_assert(D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE == 1);
+    static_assert(D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE == 2);
+    static_assert(D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE == 4);
+    static_assert(D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC == 8);
+    static_assert(D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS == 0x10000);
+    static_assert(D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE == 2);
+    static_assert(D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE == 4);
+    static_assert(D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC == 8);
+    IsLocal = (desc.Flags & D3D12_ROOT_SIGNATURE_FLAG_LOCAL_ROOT_SIGNATURE) != 0;
+    try {
+      RayBindingStatus = ray_binding::Build(desc, RayBindings);
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
+    if (IsLocal) {
+      try {
+        if (!local_root::Build(desc, local_layout_))
+          return E_INVALIDARG;
+      } catch (const std::bad_alloc &) {
+        return E_OUTOFMEMORY;
+      }
+      LocalRootLayout = &local_layout_;
+    }
+
     if (desc.NumParameters) {
-      if (desc.NumParameters > D3D12_MAX_ROOT_COST)
+      if (!IsLocal && desc.NumParameters > D3D12_MAX_ROOT_COST)
         return E_INVALIDARG;
 
       for (unsigned i = 0; i < desc.NumParameters; i++) {
@@ -442,6 +473,7 @@ public:
         PopulateWMTSamplerInfo(device_->GetMTLDevice(), info, desc.pStaticSamplers[i]);
 
         auto sampler = Sampler::createSampler(device_->GetMTLDevice(), info, desc.pStaticSamplers[i].MipLODBias);
+        if (!sampler) return E_OUTOFMEMORY;
         static_samplers_encoded_.push_back(sampler->sampler_state_handle);
         static_samplers_encoded_.push_back(sampler->sampler_state_cube_handle);
         static_samplers_encoded_.push_back((uint64_t)std::bit_cast<uint32_t>(sampler->lod_bias));
@@ -452,11 +484,14 @@ public:
       EncodedStaticSamplers = static_samplers_encoded_.data();
     }
 
-    auto [offsets, total_qwords] = CalculateRootSignatureQwordOffsets(desc);
-    qword_offsets_ = offsets;
-    UploadQwords = total_qwords;
-    ParameterSlots = qword_offsets_.size();
-    SlotQwordOffsets = qword_offsets_.data();
+    if (!IsLocal) {
+      if (!root_argument::Build(desc, ArgumentLayout)) return E_INVALIDARG;
+      auto [offsets, total_qwords] = CalculateRootSignatureQwordOffsets(desc);
+      qword_offsets_ = offsets;
+      UploadQwords = total_qwords;
+      ParameterSlots = qword_offsets_.size();
+      SlotQwordOffsets = qword_offsets_.data();
+    }
 
     return S_OK;
   }
@@ -470,7 +505,7 @@ public:
     *ppvObject = nullptr;
 
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
-        riid == __uuidof(ID3D12RootSignature)) {
+        riid == __uuidof(ID3D12RootSignature) || riid == kD3D12RootSignatureImplementationUUID) {
       *ppvObject = ref(this);
       return S_OK;
     }

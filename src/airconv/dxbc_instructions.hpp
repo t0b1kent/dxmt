@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -445,6 +446,7 @@ struct InstLoad {
   SrcOperandResource src_resource;
   std::optional<SrcOperand> src_sample_index;
   int32_t offsets[3];
+  std::optional<DstOperand> feedback;
 };
 
 struct InstLoadRaw {
@@ -468,6 +470,7 @@ struct InstLoadUAVTyped {
   DstOperand dst;
   SrcOperand src_address;
   SrcOperandUAV src_uav;
+  std::optional<DstOperand> feedback;
 };
 
 struct InstStoreUAVTyped {

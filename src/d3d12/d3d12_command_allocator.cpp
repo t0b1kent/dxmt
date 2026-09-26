@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,6 +19,7 @@
 
 #include "d3d12_command_allocator.hpp"
 #include "com/com_pointer.hpp"
+#include "d3d12_command_failure_trace.hpp"
 
 namespace dxmt {
 
@@ -108,14 +110,14 @@ MTLD3D12CommandAllocatorImpl::QueryInterface(REFIID riid, void **ppvObject) {
   return E_NOINTERFACE;
 }
 
-HRESULT STDMETHODCALLTYPE
-MTLD3D12CommandAllocatorImpl::Reset() {
-  if (encoder_last)
-    return E_FAIL;
-
+void
+MTLD3D12CommandAllocatorImpl::DestroyRecordedPasses() {
+  // Also retire an unfinished pass when the allocator itself is destroyed.
+  InvalidateCurrentPass();
   for (auto &encoder_list : encoder_lists_) {
     EncoderData *next = encoder_list.next;
     while (next) {
+      EncoderData *following = next->next;
       switch (next->type) {
       case EncoderType::Null:
         break;
@@ -131,11 +133,17 @@ MTLD3D12CommandAllocatorImpl::Reset() {
       case EncoderType::Compute:
         reinterpret_cast<ComputeEncoderData *>(next)->~ComputeEncoderData();
         break;
+      case EncoderType::ArgumentCompute:
+        reinterpret_cast<ArgumentComputeEncoderData *>(next)->~ArgumentComputeEncoderData();
+        break;
+      case EncoderType::AccelerationBuild:
+        reinterpret_cast<AccelerationBuildEncoderData *>(next)->~AccelerationBuildEncoderData();
+        break;
       case EncoderType::Resolve:
         reinterpret_cast<ResolveEncoderData *>(next)->~ResolveEncoderData();
         break;
       }
-      next = next->next;
+      next = following;
     }
   }
   encoder_lists_.clear();
@@ -143,8 +151,19 @@ MTLD3D12CommandAllocatorImpl::Reset() {
   for (auto ptr : spilled_cpu_heap_)
     free(ptr);
   spilled_cpu_heap_.clear();
+  encoder_last = nullptr;
+}
 
-  return Initialize();
+HRESULT STDMETHODCALLTYPE
+MTLD3D12CommandAllocatorImpl::Reset() {
+  if (encoder_last)
+    return TraceCommandFailure(CommandFailureOperation::AllocatorReset, "allocator.reset.failure", this,
+                               E_FAIL, "still_recording");
+  DestroyRecordedPasses();
+
+  const HRESULT hr = Initialize();
+  return TraceCommandFailure(CommandFailureOperation::AllocatorReset, "allocator.reset.failure", this,
+                             hr, "Initialize");
 };
 
 IndirectComputeCommandData *

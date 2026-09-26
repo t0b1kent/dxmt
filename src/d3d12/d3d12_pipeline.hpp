@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,6 +19,7 @@
 
 #pragma once
 #include "airconv_public.h"
+#include <vector>
 
 namespace dxmt {
 
@@ -77,5 +79,9 @@ public:
       SM50FreeError(sm50_error_);
   }
 };
+
+void TraceRejectedComputeBytecode(const void *owner, D3D12_SHADER_BYTECODE bytecode, HRESULT result);
+HRESULT LoadDiagnosticComputeArtifact(const void *owner, D3D12_SHADER_BYTECODE original,
+                                      std::vector<uint8_t> &storage, D3D12_SHADER_BYTECODE &result);
 
 } // namespace dxmt

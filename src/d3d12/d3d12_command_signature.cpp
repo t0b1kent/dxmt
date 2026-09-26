@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -19,6 +20,7 @@
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
+#include "indirect-mesh-resolver.hpp"
 
 namespace dxmt {
 
@@ -95,6 +97,8 @@ public:
 
   HRESULT
   Initialize(const D3D12_COMMAND_SIGNATURE_DESC *pDesc, ID3D12RootSignature *pRootSignature) {
+    if (!pDesc || (pRootSignature && static_cast<MTLD3D12RootSignature *>(pRootSignature)->IsLocal))
+      return E_INVALIDARG;
     std::stringstream source;
     D3D12_INDIRECT_ARGUMENT_TYPE side_effect = ~(D3D12_INDIRECT_ARGUMENT_TYPE){};
     UpdateRootArguments = false;
@@ -349,6 +353,22 @@ public:
       return E_FAIL;
     }
 
+    if (pDesc->NumArgumentDescs == 1 && (CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW ||
+        CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED)) {
+      const uint32_t bytes = CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED ? 20 : 16;
+      if (pDesc->ByteStride < bytes || pDesc->ByteStride % 4) return E_INVALIDARG;
+      auto mesh_lib = device_->GetMTLDevice().newLibraryWithSource(kMeshResolver, err);
+      if (!mesh_lib) return E_FAIL;
+      auto mesh_function = mesh_lib.newFunction("resolve_mesh_draws");
+      if (!mesh_function) return E_FAIL;
+      WMTRenderPipelineInfo mesh_info;
+      WMT::InitializeRenderPipelineInfo(mesh_info);
+      mesh_info.rasterization_enabled = false;
+      mesh_info.vertex_function = mesh_function;
+      mesh_resolver = device_->GetMTLDevice().newRenderPipelineState(mesh_info, err);
+      if (!mesh_resolver || err) return E_FAIL;
+      MeshDrawStride = pDesc->ByteStride;
+    }
     return S_OK;
   };
 

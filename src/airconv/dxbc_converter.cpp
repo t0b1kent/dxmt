@@ -1,3 +1,4 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 #include "dxbc_converter.hpp"
 #include "DXBCParser/BlobContainer.h"
 #include "DXBCParser/ShaderBinary.h"
@@ -332,6 +333,10 @@ llvm::Error convert_dxbc_pixel_shader(
   bool pso_disable_depth_output = false;
   uint32_t pso_unorm_output_reg_mask = 0;
   uint32_t *pso_pixel_formats = nullptr;
+  SM50_SHADER_PS_INPUT_LINKAGE_DATA *pixel_linkage = nullptr;
+  args_get_data<SM50_SHADER_PS_INPUT_LINKAGE, SM50_SHADER_PS_INPUT_LINKAGE_DATA>(pArgs, &pixel_linkage);
+  if (!PixelInputLinkage(pixel_linkage).valid())
+    return llvm::make_error<UnsupportedFeature>("Invalid pixel input linkage");
   SM50_SHADER_PSO_PIXEL_SHADER_DATA *pso_data = nullptr;
   if (args_get_data<SM50_SHADER_PSO_PIXEL_SHADER, SM50_SHADER_PSO_PIXEL_SHADER_DATA>(pArgs, &pso_data)) {
     pso_dual_source_blending = pso_data->dual_source_blending;
@@ -368,11 +373,21 @@ llvm::Error convert_dxbc_pixel_shader(
     sig_ctx.disable_depth_output = pso_disable_depth_output;
     sig_ctx.pull_mode_reg_mask = shader_info->pull_mode_reg_mask;
     sig_ctx.unorm_output_reg_mask = pso_unorm_output_reg_mask;
+    sig_ctx.pixel_input_linkage = PixelInputLinkage(pixel_linkage);
+    for (const auto &input : pShaderInternal->input_signature)
+      if (!input.isSystemValue())
+        sig_ctx.pixel_input_linkage.signature(input.reg(), input.mask(), input.usageMask());
     if (pso_pixel_formats)
       memcpy(sig_ctx.pixel_formats, pso_pixel_formats, sizeof(sig_ctx.pixel_formats));
     for (auto &p : pShaderInternal->signature_handlers) {
       p(sig_ctx);
     }
+    if (!sig_ctx.pixel_input_linkage.complete())
+      return llvm::make_error<UnsupportedFeature>("Incomplete or unsupported pixel input linkage");
+    // Acknowledge the optional argument so the caller can tell this provider
+    // apart from one that silently ignored an unknown argument type.
+    if (pixel_linkage)
+      pixel_linkage->applied = SM50_SHADER_PS_INPUT_LINKAGE_APPLIED;
   }
   if (pso_sample_mask != 0xffffffff) {
     auto assigned_index =
@@ -1041,6 +1056,9 @@ AIRCONV_API int SM50Initialize(
 
   {
     const D3D11_SIGNATURE_PARAMETER *parameters;
+    inputParser.GetParameters(&parameters);
+    for (unsigned i = 0; i < inputParser.GetNumParameters(); ++i)
+      sm50_shader->input_signature.push_back(Signature(parameters[i]));
     outputParser.RastSignature()->GetParameters(&parameters);
     for (unsigned i = 0; i < outputParser.RastSignature()->GetNumParameters(); i++) {
       sm50_shader->output_signature.push_back(Signature(parameters[i]));
@@ -1292,7 +1310,17 @@ AIRCONV_API int SM50Initialize(
         max_potential_tess_factor = tess_factor;
       }
 
-      pRefl->PostTessellator = {.MaxPotentialTessFactor = max_potential_tess_factor};
+      uint32_t max_split_factor = 0;
+      for (uint32_t factor = 1; factor <= 64; ++factor) {
+        const size_t vertices = (2 * (factor + 1) + 7) & ~7u;
+        if (vertices * size_t(sm50_shader->max_output_register) * 16 > 32768)
+          break;
+        max_split_factor = factor;
+      }
+      pRefl->PostTessellator = {
+          .MaxPotentialTessFactor = max_potential_tess_factor,
+          .MaxPotentialSplitTessFactor = max_split_factor,
+      };
     }
     if (sm50_shader->shader_type == microsoft::D3D10_SB_GEOMETRY_SHADER) {
       if (binding_cbuffer_mask || binding_sampler_mask || binding_uav_mask ||

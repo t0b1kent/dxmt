@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -107,17 +108,17 @@ public:
     auto DescriptorOffset = Iter->second.second;
     if (DescriptorOffset == ~0u - 1) {
       auto Pointer = GetRootConstantPointer(Builder, RootSignatureArgumentIndex, CBuf.arg_index);
-      return ConstantBufferDescriptor{Pointer, nullptr};
+      return ConstantBufferDescriptor{Pointer, nullptr, CBuf.size_in_vec4};
     }
     if (DescriptorOffset == ~0u) {
       auto Pointer = GetArgument(Builder, RootSignatureArgumentIndex, CBuf.arg_index);
-      return ConstantBufferDescriptor{Pointer, nullptr};
+      return ConstantBufferDescriptor{Pointer, nullptr, CBuf.size_in_vec4};
     }
     auto HeapPointer = GetArgument(Builder, RootSignatureArgumentIndex, CBuf.arg_index);
     auto [Pointer, Metadata] = GetBufferDescriptor(
         Builder, HeapPointer, Index, Builder.getIntTy(4)->getPointerTo(2), CBuf.range.lower_bound, DescriptorOffset
     );
-    return ConstantBufferDescriptor{Pointer, Metadata};
+    return ConstantBufferDescriptor{Pointer, Metadata, CBuf.size_in_vec4};
   }
 
   std::tuple<llvm::Value *, llvm::Value *, llvm::Value *>

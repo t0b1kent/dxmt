@@ -1,3 +1,4 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 #pragma once
 
 #include "./winemetal.h"
@@ -219,6 +220,8 @@ public:
 class Resource : public Allocation {
 public:
 };
+
+class AccelerationStructure : public Resource {};
 
 class Texture : public Resource {
 public:
@@ -534,6 +537,16 @@ public:
 
 class ComputeCommandEncoder : public CommandEncoder {
 public:
+  bool setAccelerationStructure(AccelerationStructure resource, uint8_t index) {
+    if (!resource || index > 30) return false;
+    wmtcmd_compute_setaccelerationstructure cmd{};
+    cmd.type = WMTComputeCommandSetAccelerationStructure;
+    cmd.acceleration_structure = resource;
+    cmd.index = index;
+    MTLComputeCommandEncoder_encodeCommands(handle, (const wmtcmd_base *)&cmd);
+    return true;
+  }
+
   void
   encodeCommands(const wmtcmd_compute_nop *cmd_head) {
     MTLComputeCommandEncoder_encodeCommands(handle, (const wmtcmd_base *)cmd_head);
@@ -635,10 +648,25 @@ public:
   commit() {
     MTLResidencySet_commit(handle);
   }
+
+  bool
+  requestResidency() {
+    return MTLResidencySet_requestResidency(handle) != 0;
+  }
+
+  bool
+  endResidency() {
+    return MTLResidencySet_endResidency(handle) != 0;
+  }
 };
 
 class CommandBuffer : public Object {
 public:
+  WMTArgumentStatus buildAccelerationStructure(const WMTASBuildDesc &desc,
+      AccelerationStructure target, Buffer scratch, uint64_t offset, Fence fence) {
+    return MTLCommandBuffer_buildAccelerationStructure(handle, &desc, target, scratch, offset, fence);
+  }
+
   void
   commit() {
     return MTLCommandBuffer_commit(handle);
@@ -736,7 +764,47 @@ public:
   }
 };
 
-class Function : public Object {};
+// Mapping-only queue. The caller owns cross-queue event ordering and in-flight resource residency/lifetime.
+class MappingCommandQueue : public Object {
+public:
+  bool
+  waitForEvent(SharedEvent event, uint64_t value) {
+    return MTL4CommandQueue_waitForEvent(handle, event.handle, value) != 0;
+  }
+
+  bool
+  signalEvent(SharedEvent event, uint64_t value) {
+    return MTL4CommandQueue_signalEvent(handle, event.handle, value) != 0;
+  }
+
+  bool
+  addResidencySet(ResidencySet residency_set) {
+    return MTL4CommandQueue_addResidencySet(handle, residency_set.handle) != 0;
+  }
+
+  bool
+  updateBufferMappings(
+      Buffer buffer, Heap heap, const WMT4UpdateSparseBufferMappingOperation *operations, uint64_t count
+  ) {
+    return MTL4CommandQueue_updateBufferMappings(handle, buffer.handle, heap.handle, operations, count) != 0;
+  }
+
+  bool
+  copyBufferMappings(
+      Buffer source, Buffer destination, const WMT4CopySparseBufferMappingOperation *operations, uint64_t count
+  ) {
+    return MTL4CommandQueue_copyBufferMappings(handle, source.handle, destination.handle, operations, count) != 0;
+  }
+};
+
+class Function : public Object {
+public:
+  Reference<Buffer>
+  newArgumentBuffer(uint64_t index, const WMTArgumentBinding *bindings, uint64_t count,
+                    WMTBufferInfo &info, WMTArgumentStatus &status) const {
+    return Reference<Buffer>(MTLFunction_newArgumentBuffer(handle, index, bindings, count, &info, &status));
+  }
+};
 
 class Library : public Object {
 public:
@@ -769,6 +837,13 @@ public:
 
 class Device : public Object {
 public:
+  WMTArgumentStatus accelerationStructureSizes(const WMTASBuildDesc &desc, WMTASSizeInfo &info) {
+    return MTLDevice_accelerationStructureSizes(handle, &desc, &info);
+  }
+  Reference<AccelerationStructure> newAccelerationStructure(uint64_t size, WMTArgumentStatus &status) {
+    return Reference<AccelerationStructure>(MTLDevice_newAccelerationStructure(handle, size, &status));
+  }
+
   uint64_t
   recommendedMaxWorkingSetSize() const {
     return MTLDevice_recommendedMaxWorkingSetSize(handle);
@@ -792,6 +867,31 @@ public:
   Reference<CommandQueue>
   newCommandQueue(uint64_t maxCommandBufferCount) {
     return Reference<CommandQueue>(MTLDevice_newCommandQueue(handle, maxCommandBufferCount));
+  }
+
+  bool
+  supportsPlacementSparse() const {
+    return MTLDevice_supportsPlacementSparse(handle) != 0;
+  }
+
+  Reference<MappingCommandQueue>
+  newMappingCommandQueue() {
+    return Reference<MappingCommandQueue>(MTLDevice_newMappingCommandQueue(handle));
+  }
+
+  Reference<Buffer>
+  newPlacementSparseBuffer(WMTBufferInfo &info) {
+    return Reference<Buffer>(MTLDevice_newPlacementSparseBuffer(handle, &info));
+  }
+
+  Reference<Buffer>
+  newPlacementSparseBuffer(uint64_t length, uint64_t *gpu_address = nullptr) {
+    WMTBufferInfo info = {};
+    info.length = length;
+    auto buffer = newPlacementSparseBuffer(info);
+    if (gpu_address)
+      *gpu_address = info.gpu_address;
+    return buffer;
   }
 
   Reference<SharedEvent>
@@ -916,6 +1016,11 @@ public:
   Reference<Heap>
   newHeap(const WMTHeapInfo &info) {
     return Reference<Heap>(MTLDevice_newHeap(handle, &info));
+  }
+
+  Reference<Heap>
+  newPlacementSparseHeap(const WMTHeapInfo &info) {
+    return Reference<Heap>(MTLDevice_newPlacementSparseHeap(handle, &info));
   }
 
   WMTSizeAndAlign

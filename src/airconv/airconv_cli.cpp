@@ -1,5 +1,8 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 #include "airconv_context.hpp"
 #include "airconv_public.h"
+#include "DXBCParser/BlobContainer.h"
+#include "dxbc_root_signature.hpp"
 #include "metallib_writer.hpp"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
@@ -10,6 +13,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/Passes/OptimizationLevel.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Endian.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/InitLLVM.h"
@@ -29,6 +33,15 @@ static cl::opt<std::string>
 
 static cl::opt<std::string> OutputFilename(
   "o", cl::desc("Override output filename"), cl::value_desc("filename")
+);
+
+static cl::opt<std::string> RootSignatureFilename(
+  "root-signature", cl::desc("DXBC container containing an RTS0 root signature"), cl::value_desc("filename")
+);
+static cl::opt<SM50_SHADER_METAL_VERSION> MetalVersion(
+  "metal-version", cl::desc("Target Metal version (default: 320)"), cl::init(SM50_SHADER_METAL_320),
+  cl::values(clEnumValN(SM50_SHADER_METAL_310, "310", "Metal 3.1"),
+             clEnumValN(SM50_SHADER_METAL_320, "320", "Metal 3.2"))
 );
 
 static cl::opt<std::string>
@@ -122,6 +135,31 @@ llvm::Error convertDXBC(
 
 static ExitOnError ExitOnErr;
 
+static bool isRootSignatureContainer(StringRef Bytes) {
+  using namespace microsoft;
+  if (Bytes.size() < sizeof(DXBCHeader) || Bytes.size() > UINT32_MAX)
+    return false;
+  auto Read32 = [&](size_t Offset) { return support::endian::read32le(Bytes.data() + Offset); };
+  uint32_t Count = Read32(offsetof(DXBCHeader, BlobCount));
+  if (Count > (Bytes.size() - sizeof(DXBCHeader)) / sizeof(uint32_t))
+    return false;
+  // Bound the index and every chunk before invoking the existing container parser.
+  for (size_t I = 0; I < Count; ++I) {
+    size_t Offset = Read32(sizeof(DXBCHeader) + I * sizeof(uint32_t));
+    if (Offset > Bytes.size() || Bytes.size() - Offset < sizeof(DXBCBlobHeader) ||
+        Read32(Offset + offsetof(DXBCBlobHeader, BlobSize)) > Bytes.size() - Offset - sizeof(DXBCBlobHeader))
+      return false;
+  }
+  CDXBCParser Parser;
+  if (FAILED(Parser.ReadDXBC(Bytes.data(), static_cast<uint32_t>(Bytes.size()))))
+    return false;
+  auto Index = Parser.FindNextMatchingBlob(DXBC_RootSignature);
+  if (Index == DXBC_BLOB_NOT_FOUND || Parser.GetBlobSize(Index) < sizeof(dxmt::RawRootSignatureDesc))
+    return false;
+  auto Version = support::endian::read32le(Parser.GetBlob(Index));
+  return Version == D3D_ROOT_SIGNATURE_VERSION_1_0 || Version == D3D_ROOT_SIGNATURE_VERSION_1_1;
+}
+
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
 
@@ -202,6 +240,23 @@ int main(int argc, char **argv) {
 #endif
   }
 
+  std::unique_ptr<MemoryBuffer> RootSignatureBuffer;
+  if (RootSignatureFilename.getNumOccurrences()) {
+    auto RootFileOrErr = MemoryBuffer::getFile(RootSignatureFilename, /*IsText=*/false);
+    if (std::error_code EC = RootFileOrErr.getError()) {
+      SMDiagnostic(RootSignatureFilename, SourceMgr::DK_Error,
+                   "Could not open root-signature file: " + EC.message()).print(argv[0], errs());
+      return 1;
+    }
+    RootSignatureBuffer = std::move(*RootFileOrErr);
+    if (!isRootSignatureContainer(RootSignatureBuffer->getBuffer())) {
+      SMDiagnostic(RootSignatureFilename, SourceMgr::DK_Error,
+                   "Malformed or unsupported root-signature DXBC container (expected RTS0 version 1.0 or 1.1)")
+        .print(argv[0], errs());
+      return 1;
+    }
+  }
+
   Module M("default", Context);
   dxmt::initializeModule(M);
 
@@ -216,10 +271,20 @@ int main(int argc, char **argv) {
   }
 
   SM50_SHADER_COMMON_DATA data;
-  data.metal_version = SM50_SHADER_METAL_320;
+  data.metal_version = MetalVersion;
   data.flags = {};
   data.next = 0;
   data.type = SM50_SHADER_COMMON;
+
+  SM50_SHADER_ROOT_SIGNATURE_DATA RootSignature{};
+  auto *Args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&data);
+  if (RootSignatureBuffer) {
+    RootSignature.next = Args;
+    RootSignature.type = SM50_SHADER_ROOT_SIGNATURE;
+    RootSignature.bytecode = RootSignatureBuffer->getBufferStart();
+    RootSignature.bytecode_length = RootSignatureBuffer->getBufferSize();
+    Args = reinterpret_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(&RootSignature);
+  }
 
   if (!HullBeforeDomain.getValue().empty()) {
     ErrorOr<std::unique_ptr<MemoryBuffer>> FileOrErr =
@@ -244,7 +309,7 @@ int main(int argc, char **argv) {
     }
     if (auto err = dxmt::dxbc::convert_dxbc_tesselator_domain_shader(
           (dxmt::dxbc::SM50ShaderInternal *)sm50, "shader_main",
-          (dxmt::dxbc::SM50ShaderInternal *)sm50_hull, Context, M, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&data
+          (dxmt::dxbc::SM50ShaderInternal *)sm50_hull, Context, M, Args
         )) {
       errs() << err << '\n';
       return 1;
@@ -272,7 +337,7 @@ int main(int argc, char **argv) {
     }
     if (auto err = dxmt::dxbc::convert_dxbc_vertex_hull_shader(
           (dxmt::dxbc::SM50ShaderInternal *)sm50_vertex, (dxmt::dxbc::SM50ShaderInternal *)sm50,
-          "shader_main", Context, M, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&data
+          "shader_main", Context, M, Args
         )) {
       errs() << err << '\n';
       return 1;
@@ -300,7 +365,7 @@ int main(int argc, char **argv) {
     }
     if (auto err = dxmt::dxbc::convert_dxbc_vertex_hull_shader(
           (dxmt::dxbc::SM50ShaderInternal *)sm50, (dxmt::dxbc::SM50ShaderInternal *)sm50_hull,
-          "shader_main", Context, M, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&data
+          "shader_main", Context, M, Args
         )) {
       errs() << err << '\n';
       return 1;
@@ -328,7 +393,7 @@ int main(int argc, char **argv) {
     }
     if (auto err = dxmt::dxbc::convert_dxbc_geometry_shader(
           (dxmt::dxbc::SM50ShaderInternal *)sm50, "shader_main",
-          (dxmt::dxbc::SM50ShaderInternal *)sm50_vertex, Context, M, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&data
+          (dxmt::dxbc::SM50ShaderInternal *)sm50_vertex, Context, M, Args
         )) {
       errs() << err << '\n';
       return 1;
@@ -356,14 +421,14 @@ int main(int argc, char **argv) {
     }
     if (auto err = dxmt::dxbc::convert_dxbc_vertex_for_geometry_shader(
           (dxmt::dxbc::SM50ShaderInternal *)sm50, "shader_main",
-          (dxmt::dxbc::SM50ShaderInternal *)sm50_geometry, Context, M, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&data
+          (dxmt::dxbc::SM50ShaderInternal *)sm50_geometry, Context, M, Args
         )) {
       errs() << err << '\n';
       return 1;
     }
   } else {
     if (auto err =
-          dxmt::dxbc::convertDXBC(sm50, "shader_main", Context, M, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&data)) {
+          dxmt::dxbc::convertDXBC(sm50, "shader_main", Context, M, Args)) {
       errs() << err << '\n';
       return 1;
     }

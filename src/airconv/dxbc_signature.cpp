@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -436,13 +437,27 @@ void handle_signature_ps(
     auto sig = findInputElement([=](Signature sig) {
       return (sig.reg() == reg) && ((sig.mask() & mask) != 0);
     });
+    uint32_t overlapping = 0, register_rows = 0;
+    for (const auto &input : sm50_shader->input_signature) {
+      if (input.reg() != reg) continue;
+      ++register_rows;
+      overlapping += bool(input.mask() & mask);
+    }
     max_input_register = std::max(reg + 1, max_input_register);
     if (sig.mask() == 0) break;
     signature_handlers.push_back([=, type = sig.componentType(), name = sig.consistentAttributeName()]
     (SignatureContext &ctx) {
       bool pull_mode = bool(ctx.pull_mode_reg_mask & (1 << reg)) && interpolation != air::Interpolation::flat;
+      // Pull-mode lookup is per register, so multiple packed interpolants cannot
+      // be silently represented by whichever semantic happened to be last.
+      if (ctx.pixel_input_linkage.active() &&
+          (overlapping != 1 || (pull_mode && register_rows > 1))) {
+        ctx.pixel_input_linkage.invalidate();
+        return;
+      }
+      const auto linked_name = ctx.pixel_input_linkage.attribute(reg, mask, sig.mask(), sig.isSystemValue(), name);
       auto assigned_index = ctx.func_signature.DefineInput(InputFragmentStageIn{
-        .user = name, .type = to_msl_type(type), .interpolation = interpolation, .pull_mode = pull_mode
+        .user = linked_name, .type = to_msl_type(type), .interpolation = interpolation, .pull_mode = pull_mode
       });
       if (pull_mode) {
         assert(type == RegisterComponentType::Float && "otherwise the input register contains mixed data type");

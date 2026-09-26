@@ -1,6 +1,8 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 #include "air_signature.hpp"
 #include "airconv_error.hpp"
 #include "dxbc_converter.hpp"
+#include "stage_linkage.hpp"
 #include "nt/air_builder.hpp"
 #include "nt/dxbc_converter_base.hpp"
 #include "llvm/IR/Constants.h"
@@ -10,6 +12,13 @@
 #include "llvm/Support/AtomicOrdering.h"
 
 namespace dxmt::dxbc {
+
+static SM50_SHADER_TESS_SPLIT_WORKLOAD_DATA *
+get_split_workload(SM50_SHADER_COMPILATION_ARGUMENT_DATA *args) {
+  SM50_SHADER_TESS_SPLIT_WORKLOAD_DATA *split = nullptr;
+  args_get_data<SM50_SHADER_TESS_SPLIT_WORKLOAD, SM50_SHADER_TESS_SPLIT_WORKLOAD_DATA>(args, &split);
+  return split;
+}
 
 struct TessMeshWorkload {
   short inner0[2];
@@ -21,7 +30,7 @@ struct TessMeshWorkload {
   char inner_factor_i;
   char outer_factor_i;
   bool has_complement;
-  bool padding;
+  bool isoline;
   short inner2[2];
   short inner3[2];
   short outer2[2];
@@ -106,12 +115,13 @@ get_integer_factor(float factor, SM50ShaderInternal *pHullStage) {
 }
 
 uint32_t
-get_max_potential_workload_count(uint32_t max_tess_factor, SM50ShaderInternal *pHullStage) {
+get_max_potential_workload_count(uint32_t max_tess_factor, SM50ShaderInternal *pHullStage, float max_density_factor) {
 
   switch (pHullStage->tessellation_domain) {
   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_UNDEFINED:
-  case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
     return 0;
+  case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
+    return uint32_t(std::ceil(std::clamp(max_density_factor, 1.0f, 64.0f)));
   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_TRI:
     return std::ceil((max_tess_factor - 1) / 4.0) * 3 + (max_tess_factor & 1);
   case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_QUAD:
@@ -130,7 +140,7 @@ estimate_payload_size(SM50ShaderInternal *pHullStage, float factor, uint32_t pat
   auto pc_size_per_group = pc_size_per_patch * patch_per_group;
 
   auto factor_int = get_integer_factor(factor, pHullStage);
-  uint32_t max_workload_count = get_max_potential_workload_count(factor_int, pHullStage);
+  uint32_t max_workload_count = get_max_potential_workload_count(factor_int, pHullStage, factor);
   constexpr uint32_t size_workload_info = sizeof(TessMeshWorkload);
 
   return cp_size_per_group + pc_size_per_group + sizeof(uint32_t) +
@@ -197,6 +207,23 @@ convert_dxbc_vertex_hull_shader(
   }
   uint32_t max_hs_output_register = pHullStage->max_output_register;
   uint32_t max_patch_constant_output_register = pHullStage->max_patch_constant_output_register;
+
+  const auto link_rows = [](const std::vector<Signature> &signatures) {
+    std::vector<stage_linkage::Row> rows;
+    for (const auto &s : signatures)
+      rows.push_back({s.semanticName(), s.semanticIndex(), s.systemValue(), uint32_t(s.componentType()),
+                     s.reg(), s.mask(), s.usageMask(), s.stream(), s.precision()});
+    return rows;
+  };
+  stage_linkage::VertexHullPlan vertex_link;
+  if (!stage_linkage::vertex_hull(link_rows(pVertexStage->output_signature),
+                                 link_rows(pHullStage->input_signature), vertex_link))
+    return llvm::make_error<UnsupportedFeature>("Invalid VS-HS semantic linkage");
+  SM50_SHADER_TESS_VERTEX_LINKAGE_DATA *vertex_link_arg = nullptr;
+  args_get_data<SM50_SHADER_TESS_VERTEX_LINKAGE, SM50_SHADER_TESS_VERTEX_LINKAGE_DATA>(pArgs, &vertex_link_arg);
+  if (vertex_link_arg) vertex_link_arg->applied = 0;
+  if (!vertex_link.identity && !vertex_link_arg)
+    return llvm::make_error<UnsupportedFeature>("VS-HS relocation requires an acknowledged linkage argument");
 
   auto [final_maxtessfactor, factor_int] = get_final_maxtessfactor(pHullStage, pArgs);
 
@@ -278,9 +305,13 @@ convert_dxbc_vertex_hull_shader(
   auto hs_pcout_per_patch_scaler_type = llvm::ArrayType::get(types._int, pHullStage->patch_constant_scalars.size());
   auto hs_pcout_per_group_scaler_type = llvm::ArrayType::get(hs_pcout_per_patch_scaler_type, patch_per_group);
 
-  uint32_t max_workload_count = get_max_potential_workload_count(factor_int, pHullStage);
+  uint32_t max_workload_count = get_max_potential_workload_count(factor_int, pHullStage, final_maxtessfactor);
 
-  func_signature.UseMaxMeshWorkgroupSize(max_workload_count);
+  auto *split_workload = get_split_workload(pArgs);
+  if (split_workload && pHullStage->tessellator_output_primitive != D3D11_SB_TESSELLATOR_OUTPUT_TRIANGLE_CW &&
+      pHullStage->tessellator_output_primitive != D3D11_SB_TESSELLATOR_OUTPUT_TRIANGLE_CCW)
+    return llvm::make_error<UnsupportedFeature>("Split tessellation requires triangle output");
+  func_signature.UseMaxMeshWorkgroupSize(max_workload_count * patch_per_group * (split_workload ? 2 : 1));
 
   constexpr uint32_t size_workload_info = sizeof(TessMeshWorkload);
 
@@ -349,11 +380,11 @@ convert_dxbc_vertex_hull_shader(
   setup_immediate_constant_buffer(&vertex_shader_info, resource_map_vs, types, module, builder);
   setup_immediate_constant_buffer(&hull_shader_info, resource_map_hs, types, module, builder);
 
-  auto output_reg_per_point_type = llvm::ArrayType::get(types._int4, max_vs_output_register);
+  auto output_reg_per_point_type = llvm::ArrayType::get(types._int4, vertex_link.registers);
   auto output_reg_per_patch_type =
       llvm::ArrayType::get(output_reg_per_point_type, pHullStage->input_control_point_count);
   auto output_reg_per_group_type = llvm::ArrayType::get(output_reg_per_patch_type, patch_per_group);
-  auto output_reg_per_point_type_float = llvm::ArrayType::get(types._float4, max_vs_output_register);
+  auto output_reg_per_point_type_float = llvm::ArrayType::get(types._float4, vertex_link.registers);
   auto output_reg_per_patch_type_float =
       llvm::ArrayType::get(output_reg_per_point_type_float, pHullStage->input_control_point_count);
 
@@ -409,11 +440,16 @@ convert_dxbc_vertex_hull_shader(
     resource_map.input_element_count = max_input_register;
 
     // of type "output_reg_per_point_type"
-    resource_map.output.ptr_int4 = builder.CreateGEP(
+    auto shared_output = builder.CreateGEP(
         output_reg_per_group_type, vertex_out, {builder.getInt32(0), patch_offset_in_group, control_point_id_in_patch}
     );
+    // Keep the producer's register layout private while relocating scalar bits.
+    // In-place copies could overwrite another semantic before it is read.
+    resource_map.output.ptr_int4 = vertex_link.identity ? shared_output :
+        builder.CreateAlloca(output_reg_per_point_type, nullptr, "vertex_link_source");
     resource_map.output.ptr_float4 = builder.CreateBitCast(
-        resource_map.output.ptr_int4, output_reg_per_point_type_float->getPointerTo(vertex_out->getAddressSpace())
+        resource_map.output.ptr_int4, output_reg_per_point_type_float->getPointerTo(
+            resource_map.output.ptr_int4->getType()->getPointerAddressSpace())
     );
 
     resource_map.output_element_count = max_output_register;
@@ -480,6 +516,17 @@ convert_dxbc_vertex_hull_shader(
       return err;
     }
 
+    if (!vertex_link.identity) {
+      for (uint32_t i = 0; i < vertex_link.count; ++i) {
+        const auto &lane = vertex_link.lanes[i];
+        auto source = builder.CreateGEP(output_reg_per_point_type, resource_map.output.ptr_int4,
+            {builder.getInt32(0), builder.getInt32(lane.source_register), builder.getInt32(lane.source_component)});
+        auto target = builder.CreateGEP(output_reg_per_point_type, shared_output,
+            {builder.getInt32(0), builder.getInt32(lane.target_register), builder.getInt32(lane.target_component)});
+        builder.CreateStore(builder.CreateLoad(types._int, source), target);
+      }
+    }
+
     builder.CreateBr(vertex_stage_end);
     builder.SetInsertPoint(vertex_stage_end);
 
@@ -496,7 +543,7 @@ convert_dxbc_vertex_hull_shader(
 
     auto epilogue_bb = llvm::BasicBlock::Create(context, "epilogue_hull", function);
 
-    uint32_t vertex_max_output_register = max_vs_output_register;
+    uint32_t vertex_max_output_register = vertex_link.registers;
 
     auto payload = builder.CreateBitCast(function->getArg(payload_idx), payload_struct_type->getPointerTo(6));
 
@@ -623,12 +670,21 @@ convert_dxbc_vertex_hull_shader(
     /* populate patch constant output */
 
     auto write_patch_constant = llvm::BasicBlock::Create(context, "write_patch_constant", function);
+    auto workload_ready = llvm::BasicBlock::Create(context, "workload_ready", function);
     auto dispatch_mesh = llvm::BasicBlock::Create(context, "dispatch_mesh", function);
     auto real_return = llvm::BasicBlock::Create(context, "real_return", function);
 
+    llvm::GlobalVariable *workload_count = new llvm::GlobalVariable(
+        module, types._int, false, llvm::GlobalValue::InternalLinkage, llvm::UndefValue::get(types._int),
+        "workload_count", nullptr, llvm::GlobalValue::NotThreadLocal, (uint32_t)air::AddressSpace::threadgroup
+    );
+    workload_count->setAlignment(llvm::Align(4));
+    // All lanes, including inactive final patches, initialize and rendezvous before producers diverge.
+    air.CreateAtomicRMW(llvm::AtomicRMWInst::And, workload_count, builder.getInt32(0));
+    air.CreateBarrier(llvm::air::MemFlags::Threadgroup);
     builder.CreateCondBr(
         builder.CreateICmp(llvm::CmpInst::ICMP_EQ, resource_map.thread_id_in_patch, builder.getInt32(0)),
-        write_patch_constant, real_return
+        write_patch_constant, workload_ready
     );
 
     builder.SetInsertPoint(write_patch_constant);
@@ -657,6 +713,8 @@ convert_dxbc_vertex_hull_shader(
       if (pc_scalar.tess_factor_index >= 0 && pc_scalar.tess_factor_index < 6) {
         auto value = builder.CreateBitCast(builder.CreateLoad(types._int, src_ptr), types._float);
         auto value_clamp = air.CreateFPBinOp(llvm::air::AIRBuilder::fmin, value, max_tess_factor_value);
+        // fmin selects the numeric operand for NaN, but a NaN edge must cull the patch.
+        value_clamp = builder.CreateSelect(builder.CreateFCmpUNO(value, value), value, value_clamp);
         tess_factors[pc_scalar.tess_factor_index] = value_clamp;
         builder.CreateStore(builder.CreateBitCast(value_clamp, types._int), dst_ptr);
       } else {
@@ -664,18 +722,13 @@ convert_dxbc_vertex_hull_shader(
       }
     };
 
-    llvm::GlobalVariable *workload_count = new llvm::GlobalVariable(
-        module, types._int, false, llvm::GlobalValue::InternalLinkage, llvm::UndefValue::get(types._int),
-        "workload_count", nullptr, llvm::GlobalValue::NotThreadLocal, (uint32_t)air::AddressSpace::threadgroup
-    );
-    workload_count->setAlignment(llvm::Align(4));
-
-    // clear value
-    air.CreateAtomicRMW(llvm::AtomicRMWInst::And, workload_count, builder.getInt32(0));
-
     switch (pHullStage->tessellation_domain) {
     case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_ISOLINE:
-      // TESS TODO
+      dxbc.HullGenerateWorkloadForIsoline(
+          patch_offset_in_group, workload_count,
+          builder.CreateGEP(payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(3), builder.getInt32(0)}),
+          get_partitioning(pHullStage), tess_factors[1], tess_factors[0]
+      );
       break;
     case microsoft::D3D11_SB_TESSELLATOR_DOMAIN_QUAD:
       dxbc.HullGenerateWorkloadForQuad(
@@ -698,17 +751,22 @@ convert_dxbc_vertex_hull_shader(
     }
     }
 
+    builder.CreateBr(workload_ready);
+    builder.SetInsertPoint(workload_ready);
+    // Publish every patch's payload and count before the unique dispatch lane reads either.
+    air.CreateBarrier(llvm::air::MemFlags(uint32_t(llvm::air::MemFlags::Threadgroup) |
+                                       uint32_t(llvm::air::MemFlags::ObjectData)));
     builder.CreateCondBr(
-        builder.CreateICmp(llvm::CmpInst::ICMP_EQ, patch_offset_in_group, builder.getInt32(0)), dispatch_mesh,
+        builder.CreateICmp(llvm::CmpInst::ICMP_EQ, builder.CreateExtractElement(function->getArg(thread_id_idx), 0ull), builder.getInt32(0)), dispatch_mesh,
         real_return
     );
 
     builder.SetInsertPoint(dispatch_mesh);
 
     llvm::Value *meshgroup_to_dispatch = air.getInt3(1, 1, 1);
-    meshgroup_to_dispatch = builder.CreateInsertElement(
-        meshgroup_to_dispatch, builder.CreateLoad(types._int, workload_count), (uint64_t)0
-    );
+    auto *mesh_count = builder.CreateLoad(types._int, workload_count);
+    llvm::Value *dispatch_count = split_workload ? builder.CreateMul(mesh_count, builder.getInt32(2)) : mesh_count;
+    meshgroup_to_dispatch = builder.CreateInsertElement(meshgroup_to_dispatch, dispatch_count, (uint64_t)0);
 
     air.CreateSetMeshProperties(meshgroup_to_dispatch);
 
@@ -725,6 +783,8 @@ convert_dxbc_vertex_hull_shader(
   builder.CreateRetVoid();
 
   module.getOrInsertNamedMetadata("air.object")->addOperand(function_metadata);
+  if (split_workload) split_workload->applied = SM50_TESS_SPLIT_OBJECT_APPLIED;
+  if (vertex_link_arg) vertex_link_arg->applied = SM50_TESS_VERTEX_LINKAGE_APPLIED;
   return llvm::Error::success();
 }
 
@@ -756,6 +816,13 @@ convert_dxbc_tesselator_domain_shader(
 
   auto [final_maxtessfactor, factor_int] = get_final_maxtessfactor(pHullStage, pArgs);
 
+  auto *split_workload = get_split_workload(pArgs);
+  if (split_workload &&
+      ((pHullStage->tessellator_output_primitive != D3D11_SB_TESSELLATOR_OUTPUT_TRIANGLE_CW &&
+        pHullStage->tessellator_output_primitive != D3D11_SB_TESSELLATOR_OUTPUT_TRIANGLE_CCW) ||
+       (gs_passthrough && (gs_passthrough->Data.RenderTargetArrayIndexReg != 255 ||
+                           gs_passthrough->Data.ViewportArrayIndexReg != 255))))
+    return llvm::make_error<UnsupportedFeature>("Split tessellation requires plain triangle output");
   IREffect prologue([](auto) { return std::monostate(); });
   IRValue epilogue([](struct context ctx) -> pvalue {
     return nullptr; // a mesh shader...
@@ -809,7 +876,7 @@ convert_dxbc_tesselator_domain_shader(
 
   // n segments has n + 1 points
   uint32_t max_edge_point = factor_int + 1;
-  uint32_t max_workload_count = get_max_potential_workload_count(factor_int, pHullStage);
+  uint32_t max_workload_count = get_max_potential_workload_count(factor_int, pHullStage, final_maxtessfactor);
   constexpr uint32_t size_workload_info = sizeof(TessMeshWorkload);
   auto payload_struct_type = llvm::StructType::create(
       context,
@@ -832,16 +899,17 @@ convert_dxbc_tesselator_domain_shader(
     break;
   }
   case microsoft::D3D11_SB_TESSELLATOR_OUTPUT_LINE: {
-    // TESS TODO
     func_signature.DefineInput(
         air::InputMesh{(uint32_t)max_edge_point, (uint32_t)max_edge_point - 1, air::MeshOutputTopology::Line}
     );
     break;
   }
   default: {
+    const uint32_t mesh_vertices = split_workload ? 2 * max_edge_point :
+        (max_edge_point + 2 - (max_edge_point & 1)) * 2 + 1;
     func_signature.DefineInput(air::InputMesh{
-        (uint32_t)(max_edge_point + 2 - (max_edge_point & 1)) * 2 + 1,
-        (uint32_t)(max_edge_point + 2 - (max_edge_point & 1)) * 2 + 1,
+        mesh_vertices,
+        split_workload ? 2 * factor_int : mesh_vertices,
         air::MeshOutputTopology::Triangle
     });
     break;
@@ -910,7 +978,8 @@ convert_dxbc_tesselator_domain_shader(
       types._int, builder.CreateGEP(payload_struct_type, payload, {builder.getInt32(0), builder.getInt32(2)})
   );
 
-  auto patch_index = dxbc.DomainGetPatchIndex(workload_index, data);
+  auto patch_index = dxbc.DomainGetPatchIndex(
+      split_workload ? builder.CreateLShr(workload_index, 1) : workload_index, data);
 
   resource_map.patch_id = builder.CreateAdd(batched_patch_start, patch_index);
 
@@ -967,7 +1036,7 @@ convert_dxbc_tesselator_domain_shader(
   auto actual_thread_index = builder.CreateAdd(phi_thread_index_base, thread_index);
 
   auto [location, active, iterate] = dxbc.DomainGetLocation(
-      workload_index, actual_thread_index, data, get_partitioning(pHullStage)
+      workload_index, actual_thread_index, data, get_partitioning(pHullStage), split_workload != nullptr
   );
 
   // It accidentally works on quad as well
@@ -1044,13 +1113,14 @@ convert_dxbc_tesselator_domain_shader(
   );
   builder.SetInsertPoint(generate_primitive);
 
-  dxbc.DomainGeneratePrimitives(workload_index, data, get_output_primitive(pHullStage));
+  dxbc.DomainGeneratePrimitives(workload_index, data, get_output_primitive(pHullStage), split_workload != nullptr);
 
   builder.CreateBr(real_return);
   builder.SetInsertPoint(real_return);
   builder.CreateRetVoid();
 
   module.getOrInsertNamedMetadata("air.mesh")->addOperand(function_metadata);
+  if (split_workload) split_workload->applied = SM50_TESS_SPLIT_DOMAIN_APPLIED;
   return llvm::Error::success();
 }
 

@@ -1,3 +1,4 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 #include <metal_stdlib>
 
 using namespace metal;
@@ -136,7 +137,7 @@ struct TessMeshWorkload {
   char inner_factor_i;
   char outer_factor_i;
   bool has_complement;
-  bool padding;
+  bool isoline;
   fxp16v2 inner0_c;
   fxp16v2 inner1_c;
   fxp16v2 outer0_c;
@@ -582,6 +583,41 @@ gen_workload_quad_even(
   );
 }
 
+template <partitioning partition>
+void
+gen_workload_isoline_impl(
+    int patch_index, threadgroup int *out_count, object_data int *out_buffer, float density, float detail
+) {
+  if (isnan(density) || isnan(detail) || density <= 0 || detail <= 0) return;
+  // Density is always integer partitioned, independently of detail (D3D11 11.7.8).
+  const uint lines = uint(ceil(clamp(density, 1.0f, 64.0f)));
+  const fxp32 factor = regularize_factor<partition>(detail);
+  object_data TessMeshWorkload *workloads = (object_data TessMeshWorkload *)out_buffer;
+  for (uint line = 0; line < lines; ++line) {
+    TessMeshWorkload workload{};
+    const fxp16 v = fxp16((line * uint(fxp16_1)) / lines);
+    workload.inner0 = fxp16v2(fxp16_0, v);
+    workload.inner1 = fxp16v2(fxp16_1, v);
+    workload.inner_factor = factor;
+    workload.inner_factor_i = get_int_factor<partition>(factor);
+    workload.isoline = true;
+    workload.patch_index = short(patch_index);
+    workloads[get_next_index(out_count)] = workload;
+  }
+}
+
+#define ISOLINE_WORKLOAD(NAME, PARTITION) \
+void gen_workload_isoline_##NAME(int p, threadgroup int *c, object_data int *b, float d, float t) \
+    asm("dxmt.generate_workload.isoline." #NAME); \
+void gen_workload_isoline_##NAME(int p, threadgroup int *c, object_data int *b, float d, float t) { \
+  gen_workload_isoline_impl<partitioning::PARTITION>(p, c, b, d, t); \
+}
+ISOLINE_WORKLOAD(integer, integer)
+ISOLINE_WORKLOAD(pow2, pow2)
+ISOLINE_WORKLOAD(odd, fractional_odd)
+ISOLINE_WORKLOAD(even, fractional_even)
+#undef ISOLINE_WORKLOAD
+
 struct domain_location {
   float2 uv;
   bool active;
@@ -590,7 +626,7 @@ struct domain_location {
 
 template <partitioning partition>
 float2
-get_domain_point(object_data TessMeshWorkload &workload, ushort tid) {
+get_domain_point(TessMeshWorkload workload, ushort tid) {
   bool point_at_out = tid > workload.inner_factor_i;
   bool point_at_in_c = tid > workload.inner_factor_i + workload.outer_factor_i + 1;
   bool point_at_out_c = tid > workload.inner_factor_i + workload.outer_factor_i + workload.inner_factor_c_i + 2;
@@ -634,6 +670,46 @@ int get_domain_patch_index(int workload_index, object_data int *data) {
   return workload.patch_index;  
 }
 
+// Two mesh groups read one unchanged payload entry. Each evaluates only its
+// own vertices; absent complements produce no DS invocations or primitives.
+bool select_split_workload(int index, object_data int *data, thread TessMeshWorkload &selected) {
+  object_data TessMeshWorkload &source = ((object_data TessMeshWorkload *)data)[index >> 1];
+  selected = source;
+  if (index & 1) {
+    if (!source.has_complement) return false;
+    selected.inner0 = source.inner0_c; selected.inner1 = source.inner1_c;
+    selected.outer0 = source.outer0_c; selected.outer1 = source.outer1_c;
+    selected.inner_factor = source.inner_factor_c; selected.outer_factor = source.outer_factor_c;
+    selected.inner_factor_i = source.inner_factor_c_i; selected.outer_factor_i = source.outer_factor_c_i;
+  }
+  selected.has_complement = false;
+  return true;
+}
+
+template <partitioning partition>
+domain_location get_domain_location_split_impl(int index, int tid, object_data int *data) {
+  simdgroup_barrier(mem_flags::mem_none);
+  TessMeshWorkload selected;
+  const bool valid = select_split_workload(index, data, selected);
+  const int count = valid ? selected.inner_factor_i + selected.outer_factor_i + 2 : 0;
+  domain_location ret{float2(0), tid < count, false};
+  if (ret.active) ret.uv = get_domain_point<partition>(selected, tid);
+  simdgroup_barrier(mem_flags::mem_none);
+  ret.iterate = simd_all(ret.active);
+  return ret;
+}
+#define SPLIT_LOCATION(NAME, PART) \
+domain_location get_domain_location_split_##NAME(int i, int t, object_data int *d) \
+  asm("dxmt.get_domain_location.split." #NAME); \
+domain_location get_domain_location_split_##NAME(int i, int t, object_data int *d) { \
+  return get_domain_location_split_impl<partitioning::PART>(i, t, d); \
+}
+SPLIT_LOCATION(integer, integer)
+SPLIT_LOCATION(pow2, pow2)
+SPLIT_LOCATION(odd, fractional_odd)
+SPLIT_LOCATION(even, fractional_even)
+#undef SPLIT_LOCATION
+
 template <partitioning partition>
 domain_location
 get_domain_location_impl(int workload_index, int thread_index, object_data int *data) {
@@ -642,7 +718,7 @@ get_domain_location_impl(int workload_index, int thread_index, object_data int *
   domain_location ret{float2(0), false, false};
   object_data TessMeshWorkload &workload = ((object_data TessMeshWorkload *)data)[workload_index];
 
-  int count = workload.inner_factor_i + workload.outer_factor_i + 2;
+  int count = workload.isoline ? workload.inner_factor_i + 1 : workload.inner_factor_i + workload.outer_factor_i + 2;
   if (workload.has_complement)
     count += workload.inner_factor_c_i + workload.outer_factor_c_i + 2;
 
@@ -698,6 +774,19 @@ struct dummy_vertex {
 };
 
 using MeshTri = metal::mesh<dummy_vertex, void, 130, 128, topology::triangle>;
+using MeshLine = metal::mesh<dummy_vertex, void, 65, 64, topology::line>;
+
+void generatePrimitiveLine(int workload_index, object_data int *data, MeshLine mesh)
+    asm("dxmt.domain_generate_primitives.line");
+void generatePrimitiveLine(int workload_index, object_data int *data, MeshLine mesh) {
+  object_data TessMeshWorkload &workload = ((object_data TessMeshWorkload *)data)[workload_index];
+  const uint count = workload.isoline ? uint(workload.inner_factor_i) : 0u;
+  for (uint segment = 0; segment < count; ++segment) {
+    mesh.set_index(segment * 2, segment);
+    mesh.set_index(segment * 2 + 1, segment + 1);
+  }
+  mesh.set_primitive_count(count);
+}
 
 void generatePrimitiveTriangle(int workload_index, object_data int *data, MeshTri mesh) asm(
     "dxmt.domain_generate_primitives.triangle"
@@ -752,6 +841,24 @@ generatePrimitiveTriangle(int workload_index, object_data int *data, MeshTri mes
   }
 
   mesh.set_primitive_count(primitive_count);
+}
+
+void generatePrimitiveTriangleSplit(int index, object_data int *data, MeshTri mesh)
+    asm("dxmt.domain_generate_primitives.split.triangle");
+void generatePrimitiveTriangleSplitCCW(int index, object_data int *data, MeshTri mesh)
+    asm("dxmt.domain_generate_primitives.split.triangle_ccw");
+void generate_split_triangle(int index, object_data int *data, MeshTri mesh, short ccw_xor) {
+  TessMeshWorkload selected;
+  if (!select_split_workload(index, data, selected)) { mesh.set_primitive_count(0); return; }
+  generate_triangle_for_edges(mesh, 0, selected.inner_factor_i + 1,
+      selected.inner_factor_i, selected.outer_factor_i, 0, ccw_xor);
+  mesh.set_primitive_count(selected.inner_factor_i + selected.outer_factor_i);
+}
+void generatePrimitiveTriangleSplit(int index, object_data int *data, MeshTri mesh) {
+  generate_split_triangle(index, data, mesh, 0);
+}
+void generatePrimitiveTriangleSplitCCW(int index, object_data int *data, MeshTri mesh) {
+  generate_split_triangle(index, data, mesh, 3);
 }
 
 void generatePrimitiveTriangleCCW(int workload_index, object_data int *data, MeshTri mesh) asm(

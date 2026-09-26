@@ -1,3 +1,4 @@
+/* Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md */
 
 #ifndef __WINEMETAL_THUNKS_H
 #define __WINEMETAL_THUNKS_H
@@ -434,6 +435,87 @@ struct unixcall_mtldevice_newicb {
   uint64_t options;
   obj_handle_t ret;
 };
+
+struct unixcall_mtl4commandqueue_event {
+  obj_handle_t queue;
+  obj_handle_t event;
+  uint64_t value;
+  uint64_t ret;
+};
+
+struct unixcall_mtl4commandqueue_addresidencyset {
+  obj_handle_t queue;
+  obj_handle_t residency_set;
+  uint64_t ret;
+};
+
+struct unixcall_mtl4commandqueue_buffermappings {
+  obj_handle_t queue;
+  obj_handle_t buffer;
+  obj_handle_t heap_or_destination;
+  struct WMTConstMemoryPointer operations;
+  uint64_t count;
+  uint64_t ret;
+};
+
+STATIC_ASSERT(sizeof(unixcall_mtl4commandqueue_event) == 32);
+STATIC_ASSERT(sizeof(unixcall_mtl4commandqueue_addresidencyset) == 24);
+STATIC_ASSERT(sizeof(unixcall_mtl4commandqueue_buffermappings) == 48);
+
+
+struct unixcall_mtlfunction_newargumentbuffer {
+  obj_handle_t function;
+  uint64_t index;
+  struct WMTConstMemoryPointer bindings;
+  uint64_t count;
+  struct WMTMemoryPointer info;
+  obj_handle_t ret;
+  enum WMTArgumentStatus status;
+};
+STATIC_ASSERT(sizeof(unixcall_mtlfunction_newargumentbuffer) == 56);
+
+
+struct unixcall_mtl_reflected_compute {
+  obj_handle_t device;
+  obj_handle_t function;
+  struct WMTMemoryPointer layout;
+  obj_handle_t ret;
+  enum WMTArgumentStatus status;
+};
+struct unixcall_mtl_validate_compute {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer requirements;
+  struct WMTConstMemoryPointer bindings;
+  uint64_t count;
+  enum WMTArgumentStatus status;
+};
+STATIC_ASSERT(sizeof(unixcall_mtl_reflected_compute) == 40);
+STATIC_ASSERT(sizeof(unixcall_mtl_validate_compute) == 40);
+
+
+struct unixcall_mtl_as_sizes {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer desc;
+  struct WMTMemoryPointer info;
+  enum WMTArgumentStatus status;
+};
+struct unixcall_mtl_as_new {
+  obj_handle_t device;
+  uint64_t size;
+  obj_handle_t ret;
+  enum WMTArgumentStatus status;
+};
+struct unixcall_mtl_as_build {
+  obj_handle_t command_buffer;
+  struct WMTConstMemoryPointer desc;
+  obj_handle_t target, scratch;
+  uint64_t scratch_offset;
+  obj_handle_t fence;
+  enum WMTArgumentStatus status;
+};
+STATIC_ASSERT(sizeof(unixcall_mtl_as_sizes) == 32);
+STATIC_ASSERT(sizeof(unixcall_mtl_as_new) == 32);
+STATIC_ASSERT(sizeof(unixcall_mtl_as_build) == 56);
 
 #pragma pack(pop)
 

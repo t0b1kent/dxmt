@@ -1,3 +1,4 @@
+# Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 winemetal_unix_src = [
   'winemetal_unix.c',
   'cache.c',
@@ -28,7 +29,7 @@ shared_library('winemetal', winemetal_unix_src,
   name_prefix         : '',
   dependencies        : [ airconv_dep_darwin ],
   include_directories : dxmt_include_path,
-  c_args              : ['-ObjC'],
+  c_args              : ['-x', 'objective-c'],
   link_args           : winemetal_unix_ld_args,
   native              : true,
   name_suffix         : 'so',

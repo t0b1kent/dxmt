@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -17,6 +18,7 @@
  */
 
 #pragma once
+#include "d3d12_resource_shape.hpp"
 #include "d3d12.h"
 #include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
@@ -84,6 +86,7 @@ enum class ShaderVisibleDescriptorType {
   UAVBuffer,
   SRVTexelBuffer,
   SRVBuffer,
+  Sampler,
 };
 
 struct SRVTextureCPUStorage {
@@ -115,6 +118,7 @@ using SRVBufferCPUStorage = UAVBufferCPUStorage;
 
 struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorType type;
+  resource_shape::View shape;
   union {
     SRVTextureCPUStorage SRVTexture;
     CBVCommonStorage ConstantBuffer;
@@ -128,24 +132,29 @@ struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null) {}
 };
 
+struct D3D12DescriptorCapture;
+inline constexpr GUID kD3D12ResourceHeapCaptureUUID = {0x6f6f5a8c, 0x47eb, 0x4d8e, {0x87, 0xe0, 0x92, 0x4a, 0x2d, 0x01, 0x21, 0x46}};
+inline constexpr GUID kD3D12SamplerHeapCaptureUUID = {0x08c6bf12, 0xea50, 0x416e, {0xa6, 0x6b, 0x6a, 0xd8, 0x1f, 0xa3, 0xe1, 0x46}};
+
 class MTLD3D12DescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual HRESULT CaptureDescriptor(UINT index, D3D12DescriptorCapture &out) = 0;
   virtual HRESULT
-  AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
+  AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp, resource_shape::View Shape) = 0;
 
   virtual HRESULT AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) = 0;
 
-  virtual HRESULT AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) = 0;
+  virtual HRESULT AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View, resource_shape::View Shape) = 0;
 
-  virtual HRESULT AddUnorderedAccessView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) = 0;
+  virtual HRESULT AddUnorderedAccessView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice, resource_shape::View Shape) = 0;
 
   virtual HRESULT AddUnorderedAccessView(
-      UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes
+      UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes, resource_shape::View Shape
   ) = 0;
 
-  virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) = 0;
+  virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice, resource_shape::View Shape) = 0;
 
-  virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferSlice Slice) = 0;
+  virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferSlice Slice, resource_shape::View Shape) = 0;
 
   virtual HRESULT AddShaderResourceView(UINT Index, D3D12_SHADER_RESOURCE_VIEW_DESC const *pDesc) = 0;
 
@@ -158,6 +167,7 @@ public:
 
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual HRESULT CaptureDescriptor(UINT index, D3D12DescriptorCapture &out) = 0;
   virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
 
   virtual void CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;

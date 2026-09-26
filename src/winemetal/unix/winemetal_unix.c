@@ -1,4 +1,6 @@
+/* Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md */
 #include <stdatomic.h>
+#include <stddef.h>
 #include <dlfcn.h>
 #import <Cocoa/Cocoa.h>
 #import <ColorSync/ColorSync.h>
@@ -16,6 +18,10 @@
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
 #define STATUS_UNSUCCESSFUL 0xC0000001
+
+#include "winemetal_arguments.inc"
+#include "winemetal_compute_entry.inc"
+#include "winemetal_acceleration.inc"
 
 void
 execute_on_main(dispatch_block_t block) {
@@ -849,6 +855,11 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
     case WMTComputeCommandSetBytes: {
       struct wmtcmd_compute_setbytes *body = (struct wmtcmd_compute_setbytes *)next;
       [encoder setBytes:body->bytes.ptr length:body->length atIndex:body->index];
+      break;
+    }
+    case WMTComputeCommandSetAccelerationStructure: {
+      struct wmtcmd_compute_setaccelerationstructure *body = (struct wmtcmd_compute_setaccelerationstructure *)next;
+      [encoder setAccelerationStructure:(id<MTLAccelerationStructure>)body->acceleration_structure atBufferIndex:body->index];
       break;
     }
     case WMTComputeCommandSetTexture: {
@@ -1916,6 +1927,12 @@ struct SM50_SHADER_PSO_TESSELLATOR_DATA32 {
   uint32_t max_potential_tess_factor;
 };
 
+struct SM50_SHADER_TESS_SPLIT_WORKLOAD_DATA32 {
+  uint32_t next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t applied;
+};
+
 struct SM50_SHADER_ROOT_SIGNATURE_DATA32 {
   uint32_t next;
   enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
@@ -2020,6 +2037,14 @@ sm50_compilation_argument32_convert(
       data->max_potential_tess_factor = src->max_potential_tess_factor;
       break;
     }
+    case SM50_SHADER_TESS_SPLIT_WORKLOAD: {
+      struct SM50_SHADER_TESS_SPLIT_WORKLOAD_DATA *data = calloc(1, sizeof(*data));
+      if (!data) break; // No acknowledgement: the caller rejects this pipeline.
+      last_arg->next = data;
+      last_arg = (void *)data;
+      data->type = SM50_SHADER_TESS_SPLIT_WORKLOAD;
+      break;
+    }
     case SM50_SHADER_ROOT_SIGNATURE:
     case SM50_SHADER_ROOT_SIGNATURE2: {
       struct SM50_SHADER_ROOT_SIGNATURE_DATA32 *src = (void *)args32;
@@ -2047,6 +2072,21 @@ sm50_compilation_argument32_free(struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *f
     struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *next = arg->next;
     free(arg);
     arg = next;
+  }
+}
+
+static void
+sm50_split_ack32(struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *first,
+                 struct SM50_SHADER_COMPILATION_ARGUMENT_DATA32 *original) {
+  for (; original; original = UInt32ToPtr(original->next)) {
+    if (original->type != SM50_SHADER_TESS_SPLIT_WORKLOAD) continue;
+    struct SM50_SHADER_TESS_SPLIT_WORKLOAD_DATA32 *dst = (void *)original;
+    dst->applied = 0;
+    for (struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *p = first->next; p; p = p->next)
+      if (p->type == SM50_SHADER_TESS_SPLIT_WORKLOAD) {
+        dst->applied = ((struct SM50_SHADER_TESS_SPLIT_WORKLOAD_DATA *)p)->applied;
+        break;
+      }
   }
 }
 
@@ -2097,6 +2137,7 @@ thunk32_SM50CompileTessellationPipelineHull(void *args) {
       UInt32ToPtr(params->error)
   );
 
+  sm50_split_ack32(&first_arg, args32);
   sm50_compilation_argument32_free(&first_arg);
 
   return STATUS_SUCCESS;
@@ -2114,6 +2155,7 @@ thunk32_SM50CompileTessellationPipelineDomain(void *args) {
       UInt32ToPtr(params->error)
   );
 
+  sm50_split_ack32(&first_arg, args32);
   sm50_compilation_argument32_free(&first_arg);
 
   return STATUS_SUCCESS;
@@ -3121,6 +3163,280 @@ _MTLTexture_getBytes(void *obj) {
   return STATUS_SUCCESS;
 }
 
+static BOOL
+supports_placement_sparse(id<MTLDevice> device) {
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    @try {
+      return [device respondsToSelector:@selector(supportsPlacementSparse)] && device.supportsPlacementSparse;
+    } @catch (NSException *exception) {
+      // Some advertised Metal selectors have throwing inherited implementations.
+      (void)exception;
+    }
+  }
+#endif
+  return NO;
+}
+
+static NTSTATUS
+_MTLDevice_supportsPlacementSparse(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = supports_placement_sparse((id<MTLDevice>)params->handle);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newPlacementSparseBuffer(void *obj) {
+  struct unixcall_mtldevice_newbuffer *params = obj;
+  struct WMTBufferInfo *info = params->info.ptr;
+  params->ret = 0;
+  if (!info)
+    return STATUS_SUCCESS;
+  info->memory.ptr = NULL;
+  info->gpu_address = 0;
+  info->options = WMTResourceStorageModePrivate | WMTResourceHazardTrackingModeUntracked;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    id<MTLDevice> device = (id<MTLDevice>)params->device;
+    id<MTLBuffer> buffer = nil;
+    @try {
+      if (!supports_placement_sparse(device) || !info->length || info->length % 65536 ||
+          info->length > device.maxBufferLength ||
+          ![device respondsToSelector:@selector(newBufferWithLength:options:placementSparsePageSize:)])
+        return STATUS_SUCCESS;
+      buffer = [device newBufferWithLength:info->length
+                                  options:(MTLResourceOptions)info->options
+                  placementSparsePageSize:MTLSparsePageSize64];
+      info->gpu_address = buffer.gpuAddress;
+      params->ret = (obj_handle_t)buffer;
+    } @catch (NSException *exception) {
+      (void)exception;
+      [buffer release];
+    }
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newPlacementSparseHeap(void *obj) {
+  struct unixcall_mtldevice_newheap *params = obj;
+  const struct WMTHeapInfo *info = params->info.ptr;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    id<MTLDevice> device = (id<MTLDevice>)params->device;
+    if (!info || !supports_placement_sparse(device) || !info->size || info->size % 65536 ||
+        info->type != WMTHeapTypePlacement ||
+        info->options != (WMTResourceStorageModePrivate | WMTResourceHazardTrackingModeUntracked))
+      return STATUS_SUCCESS;
+    MTLHeapDescriptor *desc = nil;
+    @try {
+      desc = [[MTLHeapDescriptor alloc] init];
+      if ([desc respondsToSelector:@selector(setMaxCompatiblePlacementSparsePageSize:)]) {
+        desc.resourceOptions = (MTLResourceOptions)info->options;
+        desc.type = MTLHeapTypePlacement;
+        desc.size = info->size;
+        // sparse_page_size is intentionally unused: it configures sparse heaps, not placement heaps.
+        desc.maxCompatiblePlacementSparsePageSize = MTLSparsePageSize64;
+        params->ret = (obj_handle_t)[device newHeapWithDescriptor:desc];
+      }
+    } @catch (NSException *exception) {
+      (void)exception;
+    }
+    [desc release];
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLDevice_newMappingCommandQueue(void *obj) {
+  struct unixcall_generic_obj_obj_ret *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    id<MTLDevice> device = (id<MTLDevice>)params->handle;
+    id<MTL4CommandQueue> queue = nil;
+    @try {
+      if (!supports_placement_sparse(device) || ![device respondsToSelector:@selector(newMTL4CommandQueue)])
+        return STATUS_SUCCESS;
+      queue = [device newMTL4CommandQueue];
+      if ([queue respondsToSelector:@selector(waitForEvent:value:)] &&
+          [queue respondsToSelector:@selector(signalEvent:value:)] &&
+          [queue respondsToSelector:@selector(addResidencySet:)] &&
+          [queue respondsToSelector:@selector(updateBufferMappings:heap:operations:count:)] &&
+          [queue respondsToSelector:@selector(copyBufferMappingsFromBuffer:toBuffer:operations:count:)]) {
+        params->ret = (obj_handle_t)queue;
+        return STATUS_SUCCESS;
+      }
+    } @catch (NSException *exception) {
+      (void)exception;
+    }
+    [queue release];
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_waitForEvent(void *obj) {
+  struct unixcall_mtl4commandqueue_event *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+    @try {
+      if (params->event && [queue respondsToSelector:@selector(waitForEvent:value:)]) {
+        [queue waitForEvent:(id<MTLSharedEvent>)params->event value:params->value];
+        params->ret = 1;
+      }
+    } @catch (NSException *exception) { (void)exception; }
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_signalEvent(void *obj) {
+  struct unixcall_mtl4commandqueue_event *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+    @try {
+      if (params->event && [queue respondsToSelector:@selector(signalEvent:value:)]) {
+        [queue signalEvent:(id<MTLSharedEvent>)params->event value:params->value];
+        params->ret = 1;
+      }
+    } @catch (NSException *exception) { (void)exception; }
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_addResidencySet(void *obj) {
+  struct unixcall_mtl4commandqueue_addresidencyset *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+    @try {
+      if (params->residency_set && [queue respondsToSelector:@selector(addResidencySet:)]) {
+        [queue addResidencySet:(id<MTLResidencySet>)params->residency_set];
+        params->ret = 1;
+      }
+    } @catch (NSException *exception) { (void)exception; }
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+// The same descriptors cross the PE/native boundary, including WoW64 callers.
+_Static_assert(sizeof(struct WMT4SparseBufferRange) == sizeof(NSRange), "sparse range ABI");
+_Static_assert(offsetof(struct WMT4SparseBufferRange, location) == offsetof(NSRange, location), "range origin ABI");
+_Static_assert(offsetof(struct WMT4SparseBufferRange, length) == offsetof(NSRange, length), "range length ABI");
+_Static_assert(sizeof(struct WMT4UpdateSparseBufferMappingOperation) == sizeof(MTL4UpdateSparseBufferMappingOperation), "update ABI");
+_Static_assert(offsetof(struct WMT4UpdateSparseBufferMappingOperation, mode) == offsetof(MTL4UpdateSparseBufferMappingOperation, mode), "mapping mode ABI");
+_Static_assert(offsetof(struct WMT4UpdateSparseBufferMappingOperation, buffer_range) == offsetof(MTL4UpdateSparseBufferMappingOperation, bufferRange), "buffer range ABI");
+_Static_assert(offsetof(struct WMT4UpdateSparseBufferMappingOperation, heap_offset) == offsetof(MTL4UpdateSparseBufferMappingOperation, heapOffset), "heap offset ABI");
+_Static_assert(sizeof(struct WMT4CopySparseBufferMappingOperation) == sizeof(MTL4CopySparseBufferMappingOperation), "copy ABI");
+_Static_assert(offsetof(struct WMT4CopySparseBufferMappingOperation, source_range) == offsetof(MTL4CopySparseBufferMappingOperation, sourceRange), "source range ABI");
+_Static_assert(offsetof(struct WMT4CopySparseBufferMappingOperation, destination_offset) == offsetof(MTL4CopySparseBufferMappingOperation, destinationOffset), "destination offset ABI");
+_Static_assert(WMTSparseTextureMappingModeMap == MTLSparseTextureMappingModeMap, "map enum ABI");
+_Static_assert(WMTSparseTextureMappingModeUnmap == MTLSparseTextureMappingModeUnmap, "unmap enum ABI");
+#endif
+
+static NTSTATUS
+_MTL4CommandQueue_updateBufferMappings(void *obj) {
+  struct unixcall_mtl4commandqueue_buffermappings *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+    const struct WMT4UpdateSparseBufferMappingOperation *ops = params->operations.ptr;
+    @try {
+      if (!params->buffer || (params->count && !ops) || params->count > SIZE_MAX / sizeof(*ops) ||
+          ![queue respondsToSelector:@selector(updateBufferMappings:heap:operations:count:)])
+        return STATUS_SUCCESS;
+      for (uint64_t i = 0; i < params->count; i++) {
+        if ((ops[i].mode != WMTSparseTextureMappingModeMap && ops[i].mode != WMTSparseTextureMappingModeUnmap) ||
+            (ops[i].mode == WMTSparseTextureMappingModeMap && !params->heap_or_destination))
+          return STATUS_SUCCESS;
+      }
+      if (params->count)
+        [queue updateBufferMappings:(id<MTLBuffer>)params->buffer
+                               heap:(id<MTLHeap>)params->heap_or_destination
+                         operations:(const MTL4UpdateSparseBufferMappingOperation *)ops count:params->count];
+      params->ret = 1;
+    } @catch (NSException *exception) { (void)exception; }
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTL4CommandQueue_copyBufferMappings(void *obj) {
+  struct unixcall_mtl4commandqueue_buffermappings *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260400
+  if (@available(macOS 26.4, *)) {
+    id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)params->queue;
+    const struct WMT4CopySparseBufferMappingOperation *ops = params->operations.ptr;
+    @try {
+      if (!params->buffer || !params->heap_or_destination || (params->count && !ops) ||
+          params->count > SIZE_MAX / sizeof(*ops) ||
+          ![queue respondsToSelector:@selector(copyBufferMappingsFromBuffer:toBuffer:operations:count:)])
+        return STATUS_SUCCESS;
+      if (params->count)
+        [queue copyBufferMappingsFromBuffer:(id<MTLBuffer>)params->buffer
+                                  toBuffer:(id<MTLBuffer>)params->heap_or_destination
+                                operations:(const MTL4CopySparseBufferMappingOperation *)ops count:params->count];
+      params->ret = 1;
+    } @catch (NSException *exception) { (void)exception; }
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLResidencySet_requestResidency(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+  if (@available(macOS 15, *)) {
+    id<MTLResidencySet> set = (id<MTLResidencySet>)params->handle;
+    @try {
+      if ([set respondsToSelector:@selector(requestResidency)]) {
+        [set requestResidency];
+        params->ret = 1;
+      }
+    } @catch (NSException *exception) { (void)exception; }
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+_MTLResidencySet_endResidency(void *obj) {
+  struct unixcall_generic_obj_uint64_ret *params = obj;
+  params->ret = 0;
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
+  if (@available(macOS 15, *)) {
+    id<MTLResidencySet> set = (id<MTLResidencySet>)params->handle;
+    @try {
+      if ([set respondsToSelector:@selector(endResidency)]) {
+        [set endResidency];
+        params->ret = 1;
+      }
+    } @catch (NSException *exception) { (void)exception; }
+  }
+#endif
+  return STATUS_SUCCESS;
+}
+
 /*
  * Definition from cache.c
  */
@@ -3278,6 +3594,23 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_newIndirectCommandBuffer,
     &_MTLDevice_newLibraryWithSource,
     &_MTLTexture_getBytes,
+    &_MTLDevice_supportsPlacementSparse,
+    &_MTLDevice_newPlacementSparseBuffer,
+    &_MTLDevice_newPlacementSparseHeap,
+    &_MTLDevice_newMappingCommandQueue,
+    &_MTL4CommandQueue_waitForEvent,
+    &_MTL4CommandQueue_signalEvent,
+    &_MTL4CommandQueue_addResidencySet,
+    &_MTL4CommandQueue_updateBufferMappings,
+    &_MTL4CommandQueue_copyBufferMappings,
+    &_MTLResidencySet_requestResidency,
+    &_MTLResidencySet_endResidency,
+    &_MTLFunction_newArgumentBuffer,
+    &_MTLDevice_newReflectedComputePipeline,
+    &_MTLDevice_validateComputeBindings,
+    &_MTLDevice_accelerationStructureSizes,
+    &_MTLDevice_newAccelerationStructure,
+    &_MTLCommandBuffer_buildAccelerationStructure,
 };
 
 #ifndef DXMT_NATIVE
@@ -3428,5 +3761,22 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_newIndirectCommandBuffer,
     &_MTLDevice_newLibraryWithSource,
     &_MTLTexture_getBytes,
+    &_MTLDevice_supportsPlacementSparse,
+    &_MTLDevice_newPlacementSparseBuffer,
+    &_MTLDevice_newPlacementSparseHeap,
+    &_MTLDevice_newMappingCommandQueue,
+    &_MTL4CommandQueue_waitForEvent,
+    &_MTL4CommandQueue_signalEvent,
+    &_MTL4CommandQueue_addResidencySet,
+    &_MTL4CommandQueue_updateBufferMappings,
+    &_MTL4CommandQueue_copyBufferMappings,
+    &_MTLResidencySet_requestResidency,
+    &_MTLResidencySet_endResidency,
+    &_MTLFunction_newArgumentBuffer,
+    &_MTLDevice_newReflectedComputePipeline,
+    &_MTLDevice_validateComputeBindings,
+    &_MTLDevice_accelerationStructureSizes,
+    &_MTLDevice_newAccelerationStructure,
+    &_MTLCommandBuffer_buildAccelerationStructure,
 };
 #endif

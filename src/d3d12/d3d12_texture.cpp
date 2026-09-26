@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -222,10 +223,22 @@ public:
       device_->RegisterResidency(texture->current()->texture());
     }
 
+    if (!pHeap) {
+      try {
+        capture_source = std::make_shared<D3D12ResourceCaptureSource>(static_cast<ID3D12Device *>(device_), texture, device_->GetResidencyOwner());
+        device_->RegisterCaptureSource(capture_source);
+      } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+    }
+
     return S_OK;
   };
 
   ~MTLD3D12Texture() {
+    if (capture_source) {
+      capture_source->live.store(false, std::memory_order_release);
+      device_->UnregisterCaptureSource(*capture_source);
+      capture_source.reset();
+    }
     if (texture && texture->current() && !texture->current()->flags().test(TextureAllocationFlag::AllocatedOnHeap))
       device_->UnregisterResidency(texture->current()->texture());
   }
@@ -239,7 +252,8 @@ public:
     *ppvObject = nullptr;
 
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
-        riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12Resource)) {
+        riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12Resource) ||
+        riid == kD3D12ResourceCaptureImplementationUUID) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -519,7 +533,8 @@ public:
 
     ResourceMinLODClamp = FLOAT((INT)ResourceMinLODClamp - view_descriptor.firstMiplevel);
 
-    return Heap->AddShaderResourceView(Index, texture.ptr(), View, ResourceMinLODClamp);
+    return Heap->AddShaderResourceView(Index, texture.ptr(), View, ResourceMinLODClamp,
+        {resource_shape::TextureKind(UINT(ViewDesc.ViewDimension), false), 0, UINT(ViewDesc.Format), desc_.SampleDesc.Count});
   };
 
   virtual HRESULT STDMETHODCALLTYPE
@@ -608,7 +623,8 @@ public:
       return E_INVALIDARG;
     }
 
-    return Heap->AddUnorderedAccessView(Index, texture.ptr(), View);
+    return Heap->AddUnorderedAccessView(Index, texture.ptr(), View,
+        {resource_shape::TextureKind(UINT(ViewDesc.ViewDimension), true), 0, UINT(ViewDesc.Format), desc_.SampleDesc.Count});
   };
 
   virtual HRESULT STDMETHODCALLTYPE

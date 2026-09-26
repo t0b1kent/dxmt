@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -45,7 +46,7 @@ BufferAllocation::BufferAllocation(WMT::Device device, const WMTBufferInfo &info
     placed_buffer = wsi::aligned_malloc(info_.length, DXMT_PAGE_SIZE);
     info_.memory.set(placed_buffer);
   }
-  obj_ = device.newBuffer(info_);
+  obj_ = flags_.test(BufferAllocationFlag::PlacementSparse) ? device.newPlacementSparseBuffer(info_) : device.newBuffer(info_);
   gpuAddress_ = info_.gpu_address;
   mappedMemory_ = info_.memory.get_accessible_or_null();
 };

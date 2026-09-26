@@ -1,3 +1,4 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 #pragma once
 
 #include "air_builder.hpp"
@@ -8,6 +9,7 @@ namespace dxmt::dxbc {
 struct ConstantBufferDescriptor {
   llvm::Value *Pointer;
   llvm::Value *Metadata; // may be null
+  uint32_t DeclaredVec4Count = 0;
 };
 
 struct SamplerDescriptor {

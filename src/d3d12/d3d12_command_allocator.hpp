@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -17,6 +18,7 @@
  */
 
 #pragma once
+#include "gpu-heap-bounds.hpp"
 
 #include "d3d12_pageable.hpp"
 #include "dxmt_command_clear.hpp"
@@ -82,8 +84,8 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   size_t gpu_heap_offset_;
   uint64_t gpu_heap_buffer_address_;
 
-  EncoderData *encoder_last;
-  EncoderData *encoder_current;
+  EncoderData *encoder_last = nullptr;
+  EncoderData *encoder_current = nullptr;
   size_t encoder_count_;
 
   small_vector<EncoderData, 64> encoder_lists_;
@@ -96,10 +98,13 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   RingBumpState<GpuPrivateBufferBlockAllocator> copy_temp_allocator_;
   uint64_t copy_temp_version_;
 
+  void DestroyRecordedPasses();
+
 public:
   MTLD3D12CommandAllocatorImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type);
 
   ~MTLD3D12CommandAllocatorImpl() {
+    DestroyRecordedPasses();
     free(cpu_heap_);
     cpu_heap_ = nullptr;
     gpu_heap_buffer_ = {};
@@ -223,10 +228,7 @@ public:
   AllocateGPUHeap(size_t Length, size_t Alignment) {
     if (!Length)
       return {nullptr, 0};
-    std::size_t adjustment = align_forward_adjustment((void *)gpu_heap_offset_, Alignment);
-    auto aligned = gpu_heap_offset_ + adjustment;
-    gpu_heap_offset_ = aligned + Length;
-    assert(gpu_heap_offset_ < kGPUHeapSize);
+    const auto aligned = ReserveGPUHeap(gpu_heap_offset_, Length, Alignment, kGPUHeapSize);
     return {ptr_add(gpu_heap_, aligned), aligned};
   }
 

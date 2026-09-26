@@ -1,3 +1,4 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 #pragma once
 
 #include <cstdint>
@@ -320,12 +321,76 @@ struct PatchConstantScalarInfo {
   int8_t tess_factor_index;
 };
 
+class PixelInputLinkage {
+  const SM50_SHADER_PS_INPUT_LINKAGE_DATA *data_ = nullptr;
+  uint32_t seen_ = 0;
+  uint32_t signatures_ = 0;
+  uint32_t required_[32] = {};
+  uint32_t declared_[32] = {};
+  bool valid_ = true;
+public:
+  PixelInputLinkage() = default;
+  explicit PixelInputLinkage(const SM50_SHADER_PS_INPUT_LINKAGE_DATA *data) : data_(data) {
+    if (!data_) return;
+    if (data_->count > 32) { valid_ = false; return; }
+    for (uint32_t i = 0; i < data_->count; ++i) {
+      const auto &a = data_->entries[i];
+      if (a.input_register >= 32 || a.output_register >= 32 || !a.input_mask ||
+          (a.input_mask & ~15u) || a.input_mask != a.output_mask) valid_ = false;
+      for (uint32_t j = 0; j < i; ++j) {
+        const auto &b = data_->entries[j];
+        if ((a.input_register == b.input_register && (a.input_mask & b.input_mask)) ||
+            (a.output_register == b.output_register && (a.output_mask & b.output_mask))) valid_ = false;
+      }
+    }
+  }
+  bool valid() const { return valid_; }
+  bool active() const { return data_ != nullptr; }
+  void signature(uint32_t reg, uint32_t mask, uint32_t reads) {
+    if (!data_ || !valid_) return;
+    if (reads & ~mask) { valid_ = false; return; }
+    for (uint32_t i = 0; i < data_->count; ++i) {
+      const auto &entry = data_->entries[i];
+      if (entry.input_register != reg || entry.input_mask != mask) continue;
+      if (signatures_ & (1u << i)) { valid_ = false; return; }
+      signatures_ |= 1u << i;
+      required_[i] = reads;
+      return;
+    }
+    valid_ = false;
+  }
+  void invalidate() { valid_ = false; }
+  bool complete() const {
+    if (!valid_) return false;
+    if (!data_) return true;
+    if (signatures_ != (data_->count == 32 ? ~0u : (1u << data_->count) - 1)) return false;
+    for (uint32_t i = 0; i < data_->count; ++i)
+      if (required_[i] & ~declared_[i]) return false;
+    return true;
+  }
+  std::string attribute(uint32_t reg, uint32_t mask, uint32_t signature_mask, bool system, std::string name) {
+    if (!data_) return name;
+    if (!valid_ || system || !mask || (mask & ~signature_mask)) { valid_ = false; return name; }
+    for (uint32_t i = 0; i < data_->count; ++i) {
+      const auto &entry = data_->entries[i];
+      if (entry.input_register != reg || entry.input_mask != signature_mask) continue;
+      if (seen_ & (1u << i)) { valid_ = false; return name; }
+      seen_ |= 1u << i;
+      declared_[i] = mask;
+      return "reg" + std::to_string(entry.output_register) + "_" + std::to_string(std::countr_zero(entry.output_mask));
+    }
+    valid_ = false;
+    return name;
+  }
+};
+
 struct SignatureContext {
   IREffect &prologue;
   IRValue &epilogue;
   air::FunctionSignatureBuilder &func_signature;
   io_binding_map &resource;
   SM50_SHADER_IA_INPUT_LAYOUT_DATA *ia_layout;
+  PixelInputLinkage pixel_input_linkage;
   bool dual_source_blending;
   bool disable_depth_output;
   bool skip_vertex_output;
@@ -366,7 +431,9 @@ public:
       semantic_index_(parameter.SemanticIndex),
       stream_(parameter.Stream),
       mask_(parameter.Mask),
+      usage_mask_(parameter.AlwaysReads_Mask),
       register_(parameter.Register),
+      precision_(parameter.MinPrecision),
       system_value_(parameter.SystemValue),
       component_type_((RegisterComponentType)parameter.ComponentType) {
     std::transform(semantic_name_.begin(), semantic_name_.end(), semantic_name_.begin(), [](auto c) {
@@ -375,8 +442,8 @@ public:
   }
 
   Signature()
-      : semantic_name_("INVALID"), semantic_index_(0), stream_(0), mask_(0),
-        register_(0), system_value_(microsoft::D3D10_SB_NAME_UNDEFINED),
+      : semantic_name_("INVALID"), semantic_index_(0), stream_(0), mask_(0), usage_mask_(0),
+        register_(0), precision_(0), system_value_(microsoft::D3D10_SB_NAME_UNDEFINED),
         component_type_(RegisterComponentType::Unknown) {}
 
   std::string_view semanticName() const { return semantic_name_; }
@@ -394,6 +461,9 @@ public:
   uint32_t stream() const { return stream_; }
 
   uint32_t mask() const { return mask_; }
+  uint32_t usageMask() const { return usage_mask_; }
+  uint32_t precision() const { return precision_; }
+  uint32_t systemValue() const { return system_value_; }
 
   uint32_t reg() const { return register_; }
 
@@ -407,10 +477,12 @@ public:
 
 private:
   std::string semantic_name_;
-  uint8_t semantic_index_;
-  uint8_t stream_;
-  uint8_t mask_;
-  uint8_t register_;
+  uint32_t semantic_index_;
+  uint32_t stream_;
+  uint32_t mask_;
+  uint32_t usage_mask_;
+  uint32_t register_;
+  uint32_t precision_;
   microsoft::D3D10_SB_NAME system_value_;
   RegisterComponentType component_type_;
 };
@@ -420,6 +492,7 @@ public:
   dxmt::dxbc::ShaderInfo shader_info;
   dxmt::air::FunctionSignatureBuilder func_signature;
   std::vector<Signature> output_signature;
+  std::vector<Signature> input_signature;
   std::vector<std::unique_ptr<BasicBlock>> bbs;
   std::vector<std::function<void(SignatureContext &)>> signature_handlers;
   microsoft::D3D10_SB_TOKENIZED_PROGRAM_TYPE shader_type;

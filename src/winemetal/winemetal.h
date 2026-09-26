@@ -1,3 +1,4 @@
+/* Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md */
 #ifndef _WINEMETAL_H
 #define _WINEMETAL_H
 
@@ -1069,6 +1070,7 @@ enum WMTComputeCommandType : uint16_t {
   WMTComputeCommandUpdateFence,
   WMTComputeCommandMemoryBarrier,
   WMTComputeCommandExecuteCommandsInBuffer,
+  WMTComputeCommandSetAccelerationStructure,
 };
 
 struct wmtcmd_compute_nop {
@@ -1145,6 +1147,14 @@ struct wmtcmd_compute_settexture {
   uint16_t reserved[3];
   struct WMTMemoryPointer next;
   obj_handle_t texture;
+  uint8_t index;
+};
+
+struct wmtcmd_compute_setaccelerationstructure {
+  enum WMTComputeCommandType type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t acceleration_structure;
   uint8_t index;
 };
 
@@ -2147,5 +2157,168 @@ WINEMETAL_API void MTLTexture_getBytes(
     obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,
     struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
 );
+
+// Placement-sparse buffers only. This capability does not establish unmapped read/write behavior.
+WINEMETAL_API uint32_t MTLDevice_supportsPlacementSparse(obj_handle_t device);
+
+// Private, untracked, 64 KiB pages; length must be a nonzero multiple of 64 KiB.
+// Only info.length is input; options, null CPU memory and gpu_address are returned.
+WINEMETAL_API obj_handle_t
+MTLDevice_newPlacementSparseBuffer(obj_handle_t device, struct WMTBufferInfo *info);
+
+// Requires a placement heap, private/untracked options, and nonzero 64 KiB-aligned size.
+// Separate entrypoint preserves WMTHeapInfo and the existing heap path; compatibility is fixed at 64 KiB.
+WINEMETAL_API obj_handle_t MTLDevice_newPlacementSparseHeap(obj_handle_t device, const struct WMTHeapInfo *info);
+
+WINEMETAL_API obj_handle_t MTLDevice_newMappingCommandQueue(obj_handle_t device);
+
+enum WMTSparseTextureMappingMode : uint64_t {
+  WMTSparseTextureMappingModeMap = 0,
+  WMTSparseTextureMappingModeUnmap = 1,
+};
+
+// Fixed-width mirrors of the MTL4 buffer mapping descriptors. All ranges/offsets are in tiles.
+struct WMT4SparseBufferRange {
+  uint64_t location;
+  uint64_t length;
+};
+
+struct WMT4UpdateSparseBufferMappingOperation {
+  enum WMTSparseTextureMappingMode mode;
+  struct WMT4SparseBufferRange buffer_range;
+  uint64_t heap_offset;
+};
+
+struct WMT4CopySparseBufferMappingOperation {
+  struct WMT4SparseBufferRange source_range;
+  uint64_t destination_offset;
+};
+
+STATIC_ASSERT(sizeof(WMT4SparseBufferRange) == 16);
+STATIC_ASSERT(sizeof(WMT4UpdateSparseBufferMappingOperation) == 32);
+STATIC_ASSERT(sizeof(WMT4CopySparseBufferMappingOperation) == 24);
+
+// Return enqueue success, not GPU completion. Serialize calls and retain resources/events until completion.
+// A failure does not undo earlier enqueues; callers must not continue a dependent event chain on failure.
+WINEMETAL_API uint32_t MTL4CommandQueue_waitForEvent(obj_handle_t queue, obj_handle_t event, uint64_t value);
+WINEMETAL_API uint32_t MTL4CommandQueue_signalEvent(obj_handle_t queue, obj_handle_t event, uint64_t value);
+WINEMETAL_API uint32_t MTL4CommandQueue_addResidencySet(obj_handle_t queue, obj_handle_t residency_set);
+WINEMETAL_API uint32_t MTL4CommandQueue_updateBufferMappings(
+    obj_handle_t queue, obj_handle_t buffer, obj_handle_t heap,
+    const struct WMT4UpdateSparseBufferMappingOperation *operations, uint64_t count
+);
+WINEMETAL_API uint32_t MTL4CommandQueue_copyBufferMappings(
+    obj_handle_t queue, obj_handle_t source, obj_handle_t destination,
+    const struct WMT4CopySparseBufferMappingOperation *operations, uint64_t count
+);
+
+WINEMETAL_API uint32_t MTLResidencySet_requestResidency(obj_handle_t residency_set);
+WINEMETAL_API uint32_t MTLResidencySet_endResidency(obj_handle_t residency_set);
+
+// Flat argument-buffer resources. Byte layout comes only from the compiled function.
+// All handles must be live objects from its device; caller retains resources/residency.
+enum WMTArgumentKind : uint64_t {
+  WMTArgumentKindBuffer = 0, WMTArgumentKindTexture = 1, WMTArgumentKindSampler = 2,
+  WMTArgumentKindPrimitiveAccelerationStructure = 3, WMTArgumentKindInstanceAccelerationStructure = 4,
+};
+enum WMTArgumentStatus : uint64_t {
+  WMTArgumentStatusReady = 0, WMTArgumentStatusInvalid = 1, WMTArgumentStatusUnsupported = 2,
+  WMTArgumentStatusOutOfMemory = 3, WMTArgumentStatusFailed = 4,
+};
+struct WMTArgumentBinding {
+  uint64_t index;
+  enum WMTArgumentKind kind;
+  obj_handle_t resource;
+  uint64_t offset;
+  uint64_t length; // Proven buffer range, not a bound enforced on shader indexing.
+};
+STATIC_ASSERT(sizeof(WMTArgumentBinding) == 40);
+
+// Returns a fresh owned shared buffer, fully encoded, or zero. info is output only.
+// No cached mutable encoder, no GPU commands. info.memory is always null (WoW64 safe).
+WINEMETAL_API obj_handle_t MTLFunction_newArgumentBuffer(
+    obj_handle_t function, uint64_t index, const struct WMTArgumentBinding *bindings, uint64_t count,
+    struct WMTBufferInfo *info, enum WMTArgumentStatus *status
+);
+
+enum WMTComputeBindingKind : uint64_t {
+  WMTComputeBindingBuffer = 0, WMTComputeBindingTexture = 1, WMTComputeBindingArgumentBuffer = 2,
+  WMTComputeBindingPrimitiveAccelerationStructure = 3, WMTComputeBindingInstanceAccelerationStructure = 4,
+};
+enum { WMTMaxComputeBindings = 159 };
+struct WMTComputeBinding {
+  uint64_t index;
+  enum WMTComputeBindingKind kind;
+  uint64_t access;
+  uint64_t alignment;
+  uint64_t minimum_size;
+  uint64_t texture_type;
+  uint64_t texture_data_type;
+  uint64_t depth;
+};
+struct WMTComputeBindingLayout {
+  uint64_t count;
+  uint64_t max_threads;
+  struct WMTComputeBinding bindings[WMTMaxComputeBindings];
+};
+STATIC_ASSERT(sizeof(WMTComputeBinding) == 64);
+STATIC_ASSERT(sizeof(WMTComputeBindingLayout) == 10192);
+
+// Entire active entry interface; unsupported kinds return no PSO and a zero layout.
+WINEMETAL_API obj_handle_t MTLDevice_newReflectedComputePipeline(
+    obj_handle_t device, obj_handle_t function, struct WMTComputeBindingLayout *layout,
+    enum WMTArgumentStatus *status
+);
+// Direct inputs only; argument-buffer members use MTLFunction_newArgumentBuffer.
+// Resources and requirement arrays are caller-owned for this synchronous check.
+WINEMETAL_API enum WMTArgumentStatus MTLDevice_validateComputeBindings(
+    obj_handle_t device, const struct WMTComputeBinding *requirements,
+    const struct WMTArgumentBinding *bindings, uint64_t count
+);
+
+// Normalized native build input, not a byte-compatible D3D12 geometry/instance layout.
+// Buffers must already exist. Only committed resources, float3 triangles and Metal
+// UserID instances are supported. GPU index/instance contents are caller validated.
+enum WMTASBuildKind : uint64_t { WMTASBuildTriangles = 0, WMTASBuildInstances = 1 };
+enum WMTASIndexType : uint64_t { WMTASIndexNone = 0, WMTASIndexUInt16 = 1, WMTASIndexUInt32 = 2 };
+struct WMTASUserIDInstance {
+  float column_major_transform[12];
+  uint32_t options, mask, intersection_function_offset, acceleration_structure_index, user_id;
+};
+STATIC_ASSERT(sizeof(WMTASUserIDInstance) == 68);
+struct WMTASTriangleGeometry {
+  obj_handle_t vertex_buffer;
+  uint64_t vertex_offset, vertex_stride, vertex_count;
+  obj_handle_t index_buffer;
+  uint64_t index_offset, triangle_count;
+  enum WMTASIndexType index_type;
+  uint64_t opaque, intersection_function_offset;
+};
+struct WMTASBuildDesc {
+  enum WMTASBuildKind kind;
+  struct WMTConstMemoryPointer geometries;
+  uint64_t geometry_count;
+  obj_handle_t instance_buffer;
+  uint64_t instance_offset, instance_count, instance_stride;
+  struct WMTConstMemoryPointer acceleration_structures;
+  uint64_t acceleration_structure_count;
+  uint64_t flags; // Must be zero: update/refit/motion/compaction are not implemented.
+};
+struct WMTASSizeInfo {
+  uint64_t structure_size, build_scratch_size, refit_scratch_size;
+};
+STATIC_ASSERT(sizeof(WMTASTriangleGeometry) == 80);
+STATIC_ASSERT(sizeof(WMTASBuildDesc) == 80);
+STATIC_ASSERT(sizeof(WMTASSizeInfo) == 24);
+WINEMETAL_API enum WMTArgumentStatus MTLDevice_accelerationStructureSizes(
+    obj_handle_t device, const struct WMTASBuildDesc *desc, struct WMTASSizeInfo *info);
+WINEMETAL_API obj_handle_t MTLDevice_newAccelerationStructure(
+    obj_handle_t device, uint64_t size, enum WMTArgumentStatus *status);
+// Ready means encoded, not GPU complete. On failure discard the uncommitted command buffer.
+// Native inputs are retained through completion. A TLAS owner must retain its BLAS children
+// through all later traversal; neither this call nor Metal's TLAS retains them indefinitely.
+WINEMETAL_API enum WMTArgumentStatus MTLCommandBuffer_buildAccelerationStructure(
+    obj_handle_t command_buffer, const struct WMTASBuildDesc *desc, obj_handle_t target,
+    obj_handle_t scratch, uint64_t scratch_offset, obj_handle_t fence);
 
 #endif

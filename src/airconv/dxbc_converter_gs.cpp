@@ -1,7 +1,10 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
 #include "air_operations.hpp"
 #include "air_signature.hpp"
 #include "airconv_error.hpp"
 #include "dxbc_converter.hpp"
+#include "../shared/point_root_contract.hpp"
+#include "DXBCParser/DXBCUtils.h"
 #include "nt/air_builder.hpp"
 #include "llvm/IR/Constants.h"
 #include "llvm/Support/Alignment.h"
@@ -9,12 +12,52 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
+#include <bit>
 #include <format>
 #include <utility>
 
 namespace dxmt::dxbc {
 
 using namespace microsoft;
+
+static bool list_geometry(D3D10_SB_PRIMITIVE primitive) {
+  return primitive == D3D10_SB_PRIMITIVE_POINT || primitive == D3D10_SB_PRIMITIVE_LINE || primitive == D3D10_SB_PRIMITIVE_TRIANGLE;
+}
+
+static bool list_geometry_capacity(const SM50ShaderInternal &vs, const SM50ShaderInternal &gs) {
+  const uint32_t group = gs.gs_input_primitive == D3D10_SB_PRIMITIVE_TRIANGLE ? 30 : 32;
+  if (!list_geometry(gs.gs_input_primitive) || !vs.max_output_register || 16ull + uint64_t(group) * vs.max_output_register * 16ull > 16256ull ||
+      gs.gs_instance_count != 1 || !gs.gs_max_vertex_output || gs.gs_max_vertex_output > 256 ||
+      !gs.max_output_register || gs.max_output_register > 32) return false;
+  std::array<uint32_t, 32> masks{};
+  uint32_t scalars = 0;
+  for (const auto &s : gs.output_signature) {
+    if (s.stream() || s.reg() >= masks.size() || !s.mask() || (s.mask() & ~15u) || (masks[s.reg()] & s.mask())) return false;
+    masks[s.reg()] |= s.mask();
+    scalars += std::popcount(s.mask());
+  }
+  // D3D's 1024-scalar limit counts declared lanes, not padding in sparse registers.
+  return scalars && uint64_t(scalars) * gs.gs_max_vertex_output <= 1024;
+}
+
+static bool point_root_resources(const ShaderInfo &info, D3D12_SHADER_VISIBILITY stage,
+                                 const SM50_SHADER_ROOT_SIGNATURE_DATA &root) {
+  const void *raw = nullptr; UINT size = 0;
+  RootSignatureDeserializer parsed;
+  if (FAILED(DXBCGetRootSignature(root.bytecode, &raw, &size)) ||
+      FAILED(parsed.Deserialize(raw, size))) return false;
+  const auto require = [&](const ResourceRange &r, D3D12_DESCRIPTOR_RANGE_TYPE type, uint32_t bytes = 0, bool root_descriptor = true) {
+    return r.size && uint64_t(r.lower_bound) + r.size <= UINT32_MAX &&
+      point_root::covers(parsed.desc_1_1_.Desc_1_1, stage,
+                         {type,r.lower_bound,r.lower_bound+r.size-1,r.space,bytes,false,root_descriptor});
+  };
+  for (const auto &[_, b] : info.cbufferMap)
+    if (b.size_in_vec4 > 4096 || !require(b.range,D3D12_DESCRIPTOR_RANGE_TYPE_CBV,b.size_in_vec4*16)) return false;
+  for (const auto &[_, b] : info.srvMap) if (!require(b.range,D3D12_DESCRIPTOR_RANGE_TYPE_SRV,0,b.resource_type==shader::common::ResourceType::NonApplicable)) return false;
+  for (const auto &[_, b] : info.uavMap) if (!require(b.range,D3D12_DESCRIPTOR_RANGE_TYPE_UAV,0,b.resource_type==shader::common::ResourceType::NonApplicable)) return false;
+  for (const auto &[_, b] : info.samplerMap) if (!require(b.range,D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)) return false;
+  return true;
+}
 
 std::tuple<uint32_t, uint32_t, uint32_t>
 get_vertex_primitive_count_in_warp(D3D10_SB_PRIMITIVE primitive, bool strip) {
@@ -101,6 +144,9 @@ convert_dxbc_geometry_shader(
     SM50ShaderInternal *pShaderInternal, const char *name, SM50ShaderInternal *pVertexStage, llvm::LLVMContext &context,
     llvm::Module &module, SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs
 ) {
+  if (list_geometry(pShaderInternal->gs_input_primitive) &&
+      !list_geometry_capacity(*pVertexStage, *pShaderInternal))
+    return llvm::make_error<UnsupportedFeature>("list geometry payload/output capacity exceeded");
   auto func_signature = pShaderInternal->func_signature; // copy
   auto shader_info = &(pShaderInternal->shader_info);
 
@@ -120,6 +166,10 @@ convert_dxbc_geometry_shader(
   }
   SM50_SHADER_ROOT_SIGNATURE_DATA *rootsig = nullptr;
   args_get_data<SM50_SHADER_ROOT_SIGNATURE, SM50_SHADER_ROOT_SIGNATURE_DATA>(pArgs, &rootsig);
+
+  if (list_geometry(pShaderInternal->gs_input_primitive) && rootsig &&
+      !point_root_resources(*shader_info, D3D12_SHADER_VISIBILITY_GEOMETRY, *rootsig))
+    return llvm::make_error<UnsupportedFeature>("point GS root resource visibility/capacity mismatch");
 
   IREffect prologue([](auto) { return std::monostate(); });
   IRValue epilogue([](struct context ctx) -> pvalue { return nullptr; });
@@ -235,6 +285,24 @@ convert_dxbc_geometry_shader(
       }
       emit_clip_distances(current_vertex_with_offset);
 
+      if (list_geometry(pShaderInternal->gs_input_primitive)) {
+        // A strip triangle exists only after its third vertex. Do not write
+        // speculative future vertex indices beyond the declared mesh capacity.
+        auto complete = llvm::BasicBlock::Create(context, "list_triangle_complete", function);
+        auto resume = llvm::BasicBlock::Create(context, "list_emit_continue", function);
+        builder.CreateCondBr(builder.CreateICmpUGE(current_write_vertex, two_const), complete, resume);
+        builder.SetInsertPoint(complete);
+        auto primitive = builder.CreateSub(current_primitive_idx, two_const);
+        auto first = builder.CreateSub(current_vertex_with_offset, two_const);
+        auto triple = builder.CreateMul(primitive, builder.getInt32(3));
+        air.CreateSetMeshIndex(triple, first);
+        air.CreateSetMeshIndex(builder.CreateAdd(triple, one_const),
+                              builder.CreateSub(current_vertex_with_offset, even_winding));
+        air.CreateSetMeshIndex(builder.CreateAdd(triple, two_const),
+                              builder.CreateAdd(builder.CreateSub(current_vertex_with_offset, one_const), even_winding));
+        builder.CreateBr(resume);
+        builder.SetInsertPoint(resume);
+      } else {
       auto triple_primitive_idx = builder.CreateMul(current_primitive_idx, builder.getInt32(3));
       air.CreateSetMeshIndex(
           builder.CreateAdd(triple_primitive_idx, zero_const), current_vertex_with_offset
@@ -247,6 +315,7 @@ convert_dxbc_geometry_shader(
           builder.CreateAdd(triple_primitive_idx, two_const),
           builder.CreateAdd(builder.CreateAdd(current_vertex_with_offset, one_const), even_winding)
       );
+      }
 
       builder.CreateStore(builder.CreateAdd(one_const, current_write_vertex), next_write_vertex);
 
@@ -286,14 +355,22 @@ convert_dxbc_geometry_shader(
       }
       emit_clip_distances(current_vertex_with_offset);
 
-      auto double_primitive_idx = builder.CreateMul(current_primitive_idx, builder.getInt32(2));
-      air.CreateSetMeshIndex(
-          builder.CreateAdd(double_primitive_idx, zero_const), current_vertex_with_offset
-      );
-      air.CreateSetMeshIndex(
-          builder.CreateAdd(double_primitive_idx, one_const),
-          builder.CreateAdd(current_vertex_with_offset, one_const)
-      );
+      if (list_geometry(pShaderInternal->gs_input_primitive)) {
+        auto complete = llvm::BasicBlock::Create(context, "list_line_complete", function);
+        auto resume = llvm::BasicBlock::Create(context, "list_line_continue", function);
+        builder.CreateCondBr(builder.CreateICmpUGE(current_write_vertex, one_const), complete, resume);
+        builder.SetInsertPoint(complete);
+        auto pair = builder.CreateMul(builder.CreateSub(current_primitive_idx, one_const), two_const);
+        air.CreateSetMeshIndex(pair, builder.CreateSub(current_vertex_with_offset, one_const));
+        air.CreateSetMeshIndex(builder.CreateAdd(pair, one_const), current_vertex_with_offset);
+        builder.CreateBr(resume);
+        builder.SetInsertPoint(resume);
+      } else {
+        auto double_primitive_idx = builder.CreateMul(current_primitive_idx, two_const);
+        air.CreateSetMeshIndex(double_primitive_idx, current_vertex_with_offset);
+        air.CreateSetMeshIndex(builder.CreateAdd(double_primitive_idx, one_const),
+                              builder.CreateAdd(current_vertex_with_offset, one_const));
+      }
 
       co_return {};
     };
@@ -509,7 +586,9 @@ convert_dxbc_geometry_shader(
   if (auto err = resource_map.call_cut().build(ctx).takeError()) {
     return err;
   }
-  air.CreateSetMeshPrimitiveCount(builder.CreateLoad(types._int, primitive_count));
+  // Point output has no strip cuts; its vertex accumulator is the primitive count.
+  air.CreateSetMeshPrimitiveCount(builder.CreateLoad(
+      types._int, topology == air::MeshOutputTopology::Point ? next_write_vertex : primitive_count));
 
   builder.CreateRetVoid();
   module.getOrInsertNamedMetadata("air.mesh")->addOperand(function_metadata);
@@ -522,6 +601,9 @@ convert_dxbc_vertex_for_geometry_shader(
     const SM50ShaderInternal *pShaderInternal, const char *name, const SM50ShaderInternal *pGeometryStage,
     llvm::LLVMContext &context, llvm::Module &module, SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs
 ) {
+  if (list_geometry(pGeometryStage->gs_input_primitive) &&
+      !list_geometry_capacity(*pShaderInternal, *pGeometryStage))
+    return llvm::make_error<UnsupportedFeature>("list geometry payload/output capacity exceeded");
   auto func_signature = pShaderInternal->func_signature; // copy
   auto shader_info = &(pShaderInternal->shader_info);
 
@@ -544,6 +626,10 @@ convert_dxbc_vertex_for_geometry_shader(
   }
   SM50_SHADER_ROOT_SIGNATURE_DATA *rootsig = nullptr;
   args_get_data<SM50_SHADER_ROOT_SIGNATURE, SM50_SHADER_ROOT_SIGNATURE_DATA>(pArgs, &rootsig);
+
+  if (list_geometry(pGeometryStage->gs_input_primitive) && rootsig &&
+      !point_root_resources(*shader_info, D3D12_SHADER_VISIBILITY_VERTEX, *rootsig))
+    return llvm::make_error<UnsupportedFeature>("point VS root resource visibility/capacity mismatch");
 
   bool is_triadj_strip = is_strip && pGeometryStage->gs_input_primitive == D3D10_SB_PRIMITIVE_TRIANGLE_ADJ;
   bool is_indexed_draw = ia_layout && ia_layout->index_buffer_format > 0;
@@ -729,6 +815,7 @@ convert_dxbc_vertex_for_geometry_shader(
 
   // explicit initialization
   air.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::And, valid_vertex_mask, builder.getInt32(0));
+  air.CreateBarrier(llvm::air::MemFlags::Threadgroup);
 
   builder.CreateCondBr(
       builder.CreateICmp(llvm::CmpInst::ICMP_ULT, global_index_id, vertex_count), index_check, will_dispatch
@@ -743,20 +830,21 @@ convert_dxbc_vertex_for_geometry_shader(
         index_buffer_element_type,
         builder.CreateGEP(index_buffer_element_type, index_buffer, {builder.CreateAdd(start_index, global_index_id)})
     );
-    // so 0xFFFF is mapped to 0xFFFFFFFF, other values are zero-extended
-    resource_map.vertex_id = builder.CreateSub(
-      builder.CreateZExt(
-        builder.CreateAdd(
-          vertex_id, llvm::ConstantInt::get(index_buffer_element_type, 1)
-        ),
-        types._int
-      ),
-      llvm::ConstantInt::get(types._int, 1)
-    );
-
-    builder.CreateCondBr(
-        builder.CreateICmp(llvm::CmpInst::ICMP_NE, builder.getInt32(-1), resource_map.vertex_id), active, will_dispatch
-    );
+    // All-ones is a restart marker only for strips, not for indexed lists.
+    if (is_strip) {
+      resource_map.vertex_id = builder.CreateSub(
+          builder.CreateZExt(
+              builder.CreateAdd(vertex_id, llvm::ConstantInt::get(index_buffer_element_type, 1)), types._int
+          ),
+          llvm::ConstantInt::get(types._int, 1)
+      );
+      builder.CreateCondBr(
+          builder.CreateICmp(llvm::CmpInst::ICMP_NE, builder.getInt32(-1), resource_map.vertex_id), active, will_dispatch
+      );
+    } else {
+      resource_map.vertex_id = builder.CreateZExt(vertex_id, types._int);
+      builder.CreateBr(active);
+    }
   } else {
     resource_map.vertex_id = global_index_id;
     builder.CreateBr(active);

@@ -1,3 +1,4 @@
+/* Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md */
 #include "stddef.h"
 #include "stdint.h"
 #include "stdbool.h"
@@ -5,7 +6,7 @@
 #ifndef __AIRCONV_H
 #define __AIRCONV_H
 
-#define AIRCONV_VERSION 26
+#define AIRCONV_VERSION 27
 
 #ifdef __cplusplus
 #include <string>
@@ -92,6 +93,7 @@ struct MTL_GEOMETRY_SHADER_REFLECTION {
 
 struct MTL_POST_TESSELLATOR_REFLECTION {
   uint32_t MaxPotentialTessFactor;
+  uint32_t MaxPotentialSplitTessFactor;
 };
 
 struct MTL_PIXEL_SHADER_REFLECTION {
@@ -204,12 +206,55 @@ enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE {
   SM50_SHADER_PSO_TESSELLATOR = 7,
   SM50_SHADER_ROOT_SIGNATURE = 8,
   SM50_SHADER_ROOT_SIGNATURE2 = 9,
+  SM50_SHADER_PS_INPUT_LINKAGE = 10,
+  SM50_SHADER_TESS_SPLIT_WORKLOAD = 11,
+  SM50_SHADER_TESS_VERTEX_LINKAGE = 12,
   SM50_SHADER_ARGUMENT_TYPE_MAX = 0xffffffff,
 };
 
 struct SM50_SHADER_COMPILATION_ARGUMENT_DATA {
   void *next;
   enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+};
+
+/* Separate node preserves the existing tessellator argument ABI. Each compiler
+   must acknowledge it so a stale provider cannot silently emit unsplit meshes. */
+#define SM50_TESS_SPLIT_OBJECT_APPLIED 0x54535031u
+#define SM50_TESS_SPLIT_DOMAIN_APPLIED 0x54535032u
+struct SM50_SHADER_TESS_SPLIT_WORKLOAD_DATA {
+  void *next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t applied;
+};
+
+/* A stale provider must not accept a relocated VS->HS interface unchanged. */
+#define SM50_TESS_VERTEX_LINKAGE_APPLIED 0x54564c31u
+struct SM50_SHADER_TESS_VERTEX_LINKAGE_DATA {
+  void *next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t applied;
+};
+
+/* Rename AIR user attributes only; register contents and component lanes do not move. */
+struct SM50_SHADER_PS_INPUT_LINK {
+  uint32_t input_register, input_mask;
+  uint32_t output_register, output_mask;
+};
+
+/* Written by the compiler, never by the caller. A provider that predates
+   SM50_SHADER_PS_INPUT_LINKAGE walks past the unknown node and still reports
+   success, so the caller would otherwise accept the original unlinked AIR. The
+   caller zeroes this field, passes the node and requires the acknowledgement
+   after a successful compile; a stale provider then fails the pipeline instead
+   of rendering with a mismatched fragment input. */
+#define SM50_SHADER_PS_INPUT_LINKAGE_APPLIED 0x50534c31u /* 'PSL1' */
+
+struct SM50_SHADER_PS_INPUT_LINKAGE_DATA {
+  void *next;
+  enum SM50_SHADER_COMPILATION_ARGUMENT_TYPE type;
+  uint32_t count;
+  struct SM50_SHADER_PS_INPUT_LINK entries[32];
+  uint32_t applied;
 };
 
 struct SM50_STREAM_OUTPUT_ELEMENT {

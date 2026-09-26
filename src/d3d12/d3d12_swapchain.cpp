@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -17,6 +18,8 @@
  */
 
 #include "d3d12_device.hpp"
+#include "d3d12_frame_trace.hpp"
+#include "d3d12_present_timing.hpp"
 #include "dxgi_interfaces.h"
 #include "dxgi_object.hpp"
 #include "dxmt_hud_state.hpp"
@@ -121,10 +124,31 @@ public:
   };
 };
 
+D3D12PresentState::D3D12PresentState(
+    WMT::Device device, HWND window, float scale_factor, uint8_t sample_count, UINT frame_latency
+) : device(device), library(device) {
+  native_view = WMT::CreateMetalViewFromHWND((intptr_t)window, device, layer);
+  if (!native_view) {
+    ERR("Failed to create metal view, it seems like your Wine has no exported symbols needed by DXMT.");
+    abort();
+  }
+  presenter = Rc(new Presenter(device, layer, library, scale_factor, sample_count));
+  semaphore = CreateSemaphore(nullptr, frame_latency, DXGI_MAX_SWAP_CHAIN_BUFFERS, nullptr);
+}
+
+D3D12PresentState::~D3D12PresentState() {
+  // Presenter borrows the library and layer; destroy it before releasing either.
+  presenter = nullptr;
+  if (native_view)
+    WMT::ReleaseMetalView(native_view);
+  if (semaphore)
+    CloseHandle(semaphore);
+}
+
 class MTLD3D12SwapChain final : public MTLDXGISubObject<IDXGISwapChain4, MTLD3D12Device> {
 
   Com<IDXGIFactory1> factory_;
-  MTLD3D12CommandQueue *queue_;
+  Com<MTLD3D12CommandQueue> queue_;
   HWND hWnd;
   HMONITOR monitor_;
   Com<IDXGIOutput1> target_;
@@ -133,11 +157,8 @@ class MTLD3D12SwapChain final : public MTLDXGISubObject<IDXGISwapChain4, MTLD3D1
   DXGI_SWAP_CHAIN_DESC1 desc_;
   D3D12_RESOURCE_DESC backbuffer_desc_;
   DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc_;
-  HANDLE present_semaphore_;
+  std::shared_ptr<D3D12PresentState> present_state_;
   std::unique_ptr<CpuFence> frame_latency_fence_;
-  WMT::Object native_view_;
-  WMT::MetalLayer layer_weak_;
-  Rc<Presenter> presenter;
   uint32_t frame_latency;
   DXGI_COLOR_SPACE_TYPE colorspace_ = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
   float scale_factor = 1.0;
@@ -152,11 +173,9 @@ class MTLD3D12SwapChain final : public MTLDXGISubObject<IDXGISwapChain4, MTLD3D1
   bool
   LayerSupportEDR() {
     WMTEDRValue edr_value;
-    MetalLayer_getEDRValue(layer_weak_, &edr_value);
+    MetalLayer_getEDRValue(present_state_->layer, &edr_value);
     return edr_value.maximum_potential_edr_color_component_value > 1.0f;
   };
-
-  InternalCommandLibrary lib;
 
 public:
   MTLD3D12SwapChain(
@@ -169,20 +188,12 @@ public:
       hWnd(hWnd),
       monitor_(wsi::getWindowMonitor(hWnd)),
       desc_(*pDesc),
-      hud(WMT::DeveloperHUDProperties::instance()),
-      lib(pDevice->GetMTLDevice()) {
-
-    native_view_ = WMT::CreateMetalViewFromHWND((intptr_t)hWnd, pDevice->GetMTLDevice(), layer_weak_);
-
-    if (!native_view_) {
-      ERR("Failed to create metal view, it seems like your Wine has no exported symbols needed by DXMT.");
-      abort();
-    }
-
-    presenter = Rc(new Presenter(pDevice->GetMTLDevice(), layer_weak_, lib, scale_factor, desc_.SampleDesc.Count));
+      hud(WMT::DeveloperHUDProperties::instance()) {
 
     frame_latency = kSwapchainLatency;
-    present_semaphore_ = CreateSemaphore(nullptr, frame_latency, DXGI_MAX_SWAP_CHAIN_BUFFERS, nullptr);
+    present_state_ = std::make_shared<D3D12PresentState>(
+        pDevice->GetMTLDevice(), hWnd, scale_factor, desc_.SampleDesc.Count, frame_latency
+    );
 
     if (desc_.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) {
       frame_latency_fence_ = std::make_unique<CpuFence>();
@@ -227,11 +238,7 @@ public:
       backbuffer_desc_.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
   }
 
-  ~MTLD3D12SwapChain() {
-    WMT::ReleaseMetalView(native_view_);
-    native_view_ = {};
-    CloseHandle(present_semaphore_);
-  };
+  ~MTLD3D12SwapChain() = default;
 
   HRESULT
   STDMETHODCALLTYPE
@@ -380,7 +387,7 @@ public:
       return DXGI_ERROR_NOT_CURRENTLY_AVAILABLE;
     }
 
-    presenter->changeGammaRamp(nullptr);
+    present_state_->presenter->changeGammaRamp(nullptr);
 
     return S_OK;
   }
@@ -579,7 +586,7 @@ public:
         desc_.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : colorspace_,
         LayerSupportEDR()
     );
-    if (presenter->changeLayerProperties(
+    if (present_state_->presenter->changeLayerProperties(
             ConvertSwapChainFormat(desc_.Format), target_color_space, desc_.Width * scale_factor,
             desc_.Height * scale_factor, desc_.SampleDesc.Count
         )) {
@@ -697,11 +704,26 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
+    const uint64_t timing_begin = present_timing::Get().Begin();
+    static FrameTraceResultCounters trace;
+    static std::atomic<uint32_t> trace_queue_result{0};
+    TraceFrame(trace.enter, "present1.enter", this, "sync=%u flags=%08x width=%u height=%u hwnd=%p queue=%p",
+               SyncInterval, PresentFlags, desc_.Width, desc_.Height, static_cast<const void *>(hWnd),
+               static_cast<const void *>(queue_.ptr()));
+    const auto trace_result = [&](HRESULT result) {
+      present_timing::Get().End(timing_begin, this, PresentFlags, SyncInterval, desc_.Width, desc_.Height, result);
+      TraceFrame(trace.result, "present1.return", this, "hr=%08x flags=%08x width=%u height=%u",
+                 unsigned(result), PresentFlags, desc_.Width, desc_.Height);
+      if (FAILED(result))
+        TraceFrame(trace.failure, "present1.failure", this, "hr=%08x flags=%08x width=%u height=%u",
+                   unsigned(result), PresentFlags, desc_.Width, desc_.Height);
+      return result;
+    };
     HRESULT hr = S_OK;
     if (desc_.Width == 0 || desc_.Height == 0)
       hr = DXGI_STATUS_OCCLUDED;
     if (PresentFlags & DXGI_PRESENT_TEST)
-      return hr;
+      return trace_result(hr);
 
     double vsync_duration = std::max(
         SyncInterval * 1.0 / (preferred_max_frame_rate ? preferred_max_frame_rate : init_refresh_rate_),
@@ -709,11 +731,14 @@ public:
     );
 
     auto &backbuffer = backbuffers_[presentation_count_ % backbuffers_.size()];
-    hr = queue_->Present(this->presenter.ptr(), backbuffer.ptr(), present_semaphore_, vsync_duration);
+    hr = queue_->Present(present_state_, backbuffer.ptr(), vsync_duration);
+    TraceFrame(trace_queue_result, "queue_present.result", queue_.ptr(), "swapchain=%p backbuffer=%p hr=%08x flags=%08x width=%u height=%u",
+               static_cast<const void *>(this), static_cast<const void *>(backbuffer.ptr()), unsigned(hr),
+               PresentFlags, desc_.Width, desc_.Height);
 
     presentation_count_ += 1;
 
-    return hr;
+    return trace_result(hr);
   };
 
   BOOL STDMETHODCALLTYPE
@@ -769,7 +794,7 @@ public:
       return E_INVALIDARG;
     }
     if (max_latency > frame_latency) {
-      ReleaseSemaphore(present_semaphore_, max_latency - frame_latency, nullptr);
+      ReleaseSemaphore(present_state_->semaphore, max_latency - frame_latency, nullptr);
     }
     frame_latency = max_latency;
 
@@ -793,7 +818,7 @@ public:
     HANDLE result = nullptr;
     HANDLE processHandle = GetCurrentProcess();
 
-    if (!DuplicateHandle(processHandle, present_semaphore_, processHandle, &result, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+    if (!DuplicateHandle(processHandle, present_state_->semaphore, processHandle, &result, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
       return nullptr;
     }
 
@@ -837,7 +862,7 @@ public:
   HRESULT STDMETHODCALLTYPE
   SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace) override {
     auto target_color_space = ConvertColorSpace(ColorSpace, LayerSupportEDR());
-    if (presenter->changeLayerColorSpace(target_color_space)) {
+    if (present_state_->presenter->changeLayerColorSpace(target_color_space)) {
       // TODO(d3d12): flush command queue
     }
     colorspace_ = ColorSpace;
@@ -848,13 +873,13 @@ public:
   SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void *pMetaData) override {
     return S_OK;
     if (Type == DXGI_HDR_METADATA_TYPE_NONE) {
-      presenter->changeHDRMetadata(nullptr);
+      present_state_->presenter->changeHDRMetadata(nullptr);
       return S_OK;
     }
     if (Type == DXGI_HDR_METADATA_TYPE_HDR10) {
       if (Size != sizeof(WMTHDRMetadata))
         return E_INVALIDARG;
-      presenter->changeHDRMetadata(reinterpret_cast<const WMTHDRMetadata *>(pMetaData));
+      present_state_->presenter->changeHDRMetadata(reinterpret_cast<const WMTHDRMetadata *>(pMetaData));
       return S_OK;
     }
     return DXGI_ERROR_UNSUPPORTED;
@@ -867,11 +892,13 @@ CreateSwapChain(
     const DXGI_SWAP_CHAIN_DESC1 *pDesc, const DXGI_SWAP_CHAIN_FULLSCREEN_DESC *pFullscreenDesc,
     IDXGISwapChain1 **ppSwapChain
 ) {
-  auto swapchain = Com(new MTLD3D12SwapChain(pFactory, pDevice, pQueue, hWnd, pDesc, pFullscreenDesc));
+  auto swapchain = new MTLD3D12SwapChain(pFactory, pDevice, pQueue, hWnd, pDesc, pFullscreenDesc);
   HRESULT hr = swapchain->ResizeBuffers(0, pDesc->Width, pDesc->Height, DXGI_FORMAT_UNKNOWN, 0);
-  if (FAILED(hr))
-    return hr;
-  return swapchain->QueryInterface(IID_PPV_ARGS(ppSwapChain));
+  if (SUCCEEDED(hr))
+    hr = swapchain->QueryInterface(IID_PPV_ARGS(ppSwapChain));
+  // DXGI objects start with one reference; do not add a second factory owner.
+  swapchain->Release();
+  return hr;
 }
 
 }; // namespace dxmt

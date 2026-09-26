@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -81,13 +82,21 @@ public:
     if (!size_aligned)
       return E_INVALIDARG;
 
-    WMTHeapInfo info;
+    WMTHeapInfo info{};
     info.options = {}; // FIXME: ensure this agrees with {Buffer|Texture}AllocationFlag?
     info.size = size_aligned;
     info.sparse_page_size = WMTSparsePageSize16;
     info.type = WMTHeapTypePlacement;
 
-    heap = device_->GetMTLDevice().newHeap(info);
+    placement_sparse_compatible = desc_.Properties.Type == D3D12_HEAP_TYPE_DEFAULT &&
+        desc_.Flags == D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS && device_->GetMTLDevice().supportsPlacementSparse();
+    if (placement_sparse_compatible) {
+      info.options = WMTResourceStorageModePrivate | WMTResourceHazardTrackingModeUntracked;
+      heap = device_->GetMTLDevice().newPlacementSparseHeap(info);
+    } else {
+      heap = device_->GetMTLDevice().newHeap(info);
+    }
+    if (!heap) return E_OUTOFMEMORY;
 
     device_->RegisterResidency(heap);
 

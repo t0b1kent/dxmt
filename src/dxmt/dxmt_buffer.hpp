@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -41,6 +42,7 @@ enum class BufferAllocationFlag : uint32_t {
   SuballocateFromOnePage = 5,
   CpuPlaced = 6,
   AllocatedOnHeap = 7,
+  PlacementSparse = 8,
 };
 
 struct BufferViewKey {

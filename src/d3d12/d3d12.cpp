@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -30,12 +31,17 @@ Logger Logger::s_instance("d3d12.log");
 extern "C" HRESULT WINAPI
 D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid, void **ppDevice) {
 
+  if (ppDevice)
+    *ppDevice = nullptr;
+
   Com<IDXGIAdapter> dxgi_adapter = nullptr;
   Com<IDXGIFactory> dxgi_factory = nullptr;
   Com<IMTLDXGIAdapter> dxgi_adapter_mtl = nullptr;
 
   if (MinimumFeatureLevel < D3D_FEATURE_LEVEL_11_0)
     return E_INVALIDARG;
+  if (MinimumFeatureLevel > kD3D12ExperimentalFeatureLevel)
+    return DXGI_ERROR_UNSUPPORTED;
 
   HRESULT hr;
 
@@ -54,6 +60,9 @@ D3D12CreateDevice(IUnknown *pAdapter, D3D_FEATURE_LEVEL MinimumFeatureLevel, REF
   } else {
     dxgi_adapter = com_cast<IDXGIAdapter>(pAdapter);
   }
+
+  if (!dxgi_adapter)
+    return E_INVALIDARG;
 
   if (FAILED(hr = dxgi_adapter->QueryInterface(IID_PPV_ARGS(&dxgi_adapter_mtl)))) {
     ERR("D3D12CreateDevice: Not a DXMT adapter");

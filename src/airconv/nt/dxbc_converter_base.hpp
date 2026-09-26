@@ -1,5 +1,6 @@
 /*
  * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -481,6 +482,11 @@ public:
       llvm::Value *TessFactorIn, llvm::Value *TessFactorOut0, llvm::Value *TessFactorOut1, llvm::Value *TessFactorOut2
   );
 
+  void HullGenerateWorkloadForIsoline(
+      llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
+      llvm::Value *Density, llvm::Value *Detail
+  );
+
   void HullGenerateWorkloadForQuad(
       llvm::Value *PatchIndex, llvm::Value *CountPtr, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
       llvm::Value *TessFactorIn0, llvm::Value *TessFactorIn1, llvm::Value *TessFactorOut0, llvm::Value *TessFactorOut1,
@@ -490,11 +496,13 @@ public:
   llvm::Value *DomainGetPatchIndex(llvm::Value *WorkloadIndex, llvm::Value *DataPtr);
 
   std::tuple<llvm::Value *, llvm::Value *, llvm::Value *> DomainGetLocation(
-      llvm::Value *WorkloadIndex, llvm::Value *ThreadIndex, llvm::Value *DataPtr, TessellatorPartitioning Partitioning
+      llvm::Value *WorkloadIndex, llvm::Value *ThreadIndex, llvm::Value *DataPtr, TessellatorPartitioning Partitioning,
+      bool SplitWorkload = false
   );
 
   void
-  DomainGeneratePrimitives(llvm::Value *WorkloadIndex, llvm::Value *DataPtr, TessellatorOutputPrimitive Primitive);
+  DomainGeneratePrimitives(llvm::Value *WorkloadIndex, llvm::Value *DataPtr, TessellatorOutputPrimitive Primitive,
+                           bool SplitWorkload = false);
 
   llvm::Value * CreateGEPInt32WithBoundCheck(BufferResourceHandle &Buffer, llvm::Value* Index);
 
