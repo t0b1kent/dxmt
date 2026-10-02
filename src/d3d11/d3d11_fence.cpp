@@ -91,48 +91,64 @@ public:
 HRESULT
 CreateFence(MTLD3D11Device *pDevice, UINT64 InitialValue, D3D11_FENCE_FLAG Flags, REFIID riid, void **ppFence) {
   bool shared = !!(Flags & (D3D11_FENCE_FLAG_SHARED | D3D11_FENCE_FLAG_SHARED_CROSS_ADAPTER));
+  fprintf(stderr, "macrunner-dxmt-fence: CreateFence ENTER InitialValue=%llu Flags=0x%x shared=%d\n",
+          (unsigned long long)InitialValue, (unsigned)Flags, (int)shared);
   auto event = pDevice->GetMTLDevice().newSharedEvent();
+  if (!event) {
+    fprintf(stderr, "macrunner-dxmt-fence: newSharedEvent FAILED\n");
+  } else {
+    fprintf(stderr, "macrunner-dxmt-fence: newSharedEvent OK\n");
+  }
   D3DKMT_HANDLE local_kmt = 0;
   if (shared) {
-    if (!(pDevice->GetLocalD3DKMT() & 0xc0000000)) {
-      ERR("D3D11Fence: Invalid device handle");
-      return E_FAIL;
-    }
-    D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create = {};
-    create.hDevice = pDevice->GetLocalD3DKMT();
-    create.Info.Type = D3DDDI_FENCE;
-    create.Info.Flags.Shared = 1;
-    create.Info.Flags.NtSecuritySharing = 1;
-    if (D3DKMTCreateSynchronizationObject2(&create)) {
-      ERR("D3D11Fence: Failed to create D3DKMT handle");
-      return E_FAIL;
-    }
-    local_kmt = create.hSyncObject;
+    /* MacRunner 2026-06-18: WDDM/D3DKMT shared-fence handles are unavailable
+     * under Wine/MacRunner (D3DKMTCreateSynchronizationObject2/Escape fail), so
+     * the cross-process sharing path can't be built. DEGRADE to a local
+     * (non-shared) MTLSharedEvent-backed fence rather than failing CreateFence
+     * outright — returning E_FAIL here broke Unity's GpuFence::Create at
+     * first-frame init. The fence still works for in-process GPU<->CPU
+     * signal/wait; only CreateSharedHandle (cross-process) stays unavailable. */
+    local_kmt = [&]() -> D3DKMT_HANDLE {
+      if (!(pDevice->GetLocalD3DKMT() & 0xc0000000))
+        return 0;
+      D3DKMT_CREATESYNCHRONIZATIONOBJECT2 create = {};
+      create.hDevice = pDevice->GetLocalD3DKMT();
+      create.Info.Type = D3DDDI_FENCE;
+      create.Info.Flags.Shared = 1;
+      create.Info.Flags.NtSecuritySharing = 1;
+      if (D3DKMTCreateSynchronizationObject2(&create))
+        return 0;
+      D3DKMT_HANDLE kmt = create.hSyncObject;
 
-    mach_port_t mach_port = event.createMachPort();
-    if (!mach_port) {
-      ERR("D3D11Fence: Failed to create mach port for shared fence");
-      return E_FAIL;
-    }
-    char mach_port_name[54];
-    MakeUniqueSharedName(mach_port_name);
-    if (!WMTBootstrapRegister(mach_port_name, mach_port)) {
-      ERR("D3D11Fence: Failed to register mach port for shared fence");
-      return E_FAIL;
-    }
-    D3DKMT_ESCAPE escape = {};
-    escape.Type = D3DKMT_ESCAPE_UPDATE_RESOURCE_WINE;
-    escape.pPrivateDriverData = mach_port_name;
-    escape.PrivateDriverDataSize = sizeof(mach_port_name);
-    escape.hContext = local_kmt;
-    if (!D3DKMTEscape(&escape)) {
-      ERR("D3D11Fence: Failed to escape mach port for shared fence");
-      return E_FAIL;
-    }
+      mach_port_t mach_port = event.createMachPort();
+      if (!mach_port)
+        return 0;
+      char mach_port_name[54];
+      MakeUniqueSharedName(mach_port_name);
+      if (!WMTBootstrapRegister(mach_port_name, mach_port))
+        return 0;
+      D3DKMT_ESCAPE escape = {};
+      escape.Type = D3DKMT_ESCAPE_UPDATE_RESOURCE_WINE;
+      escape.pPrivateDriverData = mach_port_name;
+      escape.PrivateDriverDataSize = sizeof(mach_port_name);
+      escape.hContext = kmt;
+      if (!D3DKMTEscape(&escape))
+        return 0;
+      return kmt;
+    }();
+    if (!local_kmt)
+      fprintf(stderr, "macrunner-dxmt-fence: shared fence DEGRADED to local (D3DKMT unavailable)\n");
+    else
+      fprintf(stderr, "macrunner-dxmt-fence: shared fence kept shared kmt=0x%x\n", (unsigned)local_kmt);
+  } else {
+    fprintf(stderr, "macrunner-dxmt-fence: shared=false, local fence\n");
   }
   event.signalValue(InitialValue);
   auto fence = new MTLD3D11FenceImpl(pDevice, std::move(event), local_kmt);
-  return fence->QueryInterface(riid, ppFence);
+  HRESULT hr = fence->QueryInterface(riid, ppFence);
+  fprintf(stderr, "macrunner-dxmt-fence: CreateFence EXIT hr=0x%08x local_kmt=0x%x\n",
+          (unsigned)hr, (unsigned)local_kmt);
+  return hr;
 }
 
 HRESULT

@@ -1,4 +1,6 @@
 #pragma once
+#include <utility>
+
 #include "d3d11_device_child.hpp"
 
 #include "com/com_pointer.hpp"
@@ -182,15 +184,91 @@ struct D3D11ContextState {
   BOOL predicate_value = FALSE;
 };
 
-// TODO: implement it properly
+template <typename Element, size_t NumElements>
+static BindingSet<Element, NumElements>
+CloneBindingSet(const BindingSet<Element, NumElements> &src) {
+  BindingSet<Element, NumElements> dst;
+  for (const auto &[slot, binding] : src) {
+    bool replacement = false;
+    dst.bind(slot, Element(binding), replacement);
+  }
+  return dst;
+}
+
+static D3D11ContextState
+CloneD3D11ContextState(const D3D11ContextState &src) {
+  D3D11ContextState dst = {};
+
+  for (size_t i = 0; i < dst.ShaderStages.size(); i++) {
+    dst.ShaderStages.data()[i].SRVs =
+        CloneBindingSet(src.ShaderStages.data()[i].SRVs);
+    dst.ShaderStages.data()[i].Samplers =
+        CloneBindingSet(src.ShaderStages.data()[i].Samplers);
+    dst.ShaderStages.data()[i].ConstantBuffers =
+        CloneBindingSet(src.ShaderStages.data()[i].ConstantBuffers);
+    dst.ShaderStages.data()[i].Shader = src.ShaderStages.data()[i].Shader;
+  }
+
+  dst.ComputeStageUAV.UAVs = CloneBindingSet(src.ComputeStageUAV.UAVs);
+  dst.StreamOutput.Targets = CloneBindingSet(src.StreamOutput.Targets);
+
+  dst.InputAssembler.InputLayout = src.InputAssembler.InputLayout;
+  dst.InputAssembler.VertexBuffers =
+      CloneBindingSet(src.InputAssembler.VertexBuffers);
+  dst.InputAssembler.IndexBuffer = src.InputAssembler.IndexBuffer;
+  dst.InputAssembler.IndexBufferFormat = src.InputAssembler.IndexBufferFormat;
+  dst.InputAssembler.IndexBufferOffset = src.InputAssembler.IndexBufferOffset;
+  dst.InputAssembler.Topology = src.InputAssembler.Topology;
+
+  for (size_t i = 0; i < D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT; i++)
+    dst.OutputMerger.RTVs[i] = src.OutputMerger.RTVs[i];
+  dst.OutputMerger.DSV = src.OutputMerger.DSV;
+  dst.OutputMerger.NumRTVs = src.OutputMerger.NumRTVs;
+  dst.OutputMerger.UAVs = CloneBindingSet(src.OutputMerger.UAVs);
+  dst.OutputMerger.MinUAVBinding = src.OutputMerger.MinUAVBinding;
+  dst.OutputMerger.MaxUAVBinding = src.OutputMerger.MaxUAVBinding;
+  dst.OutputMerger.DepthStencilState = src.OutputMerger.DepthStencilState;
+  dst.OutputMerger.StencilRef = src.OutputMerger.StencilRef;
+  dst.OutputMerger.BlendState = src.OutputMerger.BlendState;
+  for (size_t i = 0; i < 4; i++)
+    dst.OutputMerger.BlendFactor[i] = src.OutputMerger.BlendFactor[i];
+  dst.OutputMerger.SampleMask = src.OutputMerger.SampleMask;
+  dst.OutputMerger.SampleCount = src.OutputMerger.SampleCount;
+  dst.OutputMerger.ArrayLength = src.OutputMerger.ArrayLength;
+  dst.OutputMerger.RenderTargetWidth = src.OutputMerger.RenderTargetWidth;
+  dst.OutputMerger.RenderTargetHeight = src.OutputMerger.RenderTargetHeight;
+
+  for (size_t i = 0; i < D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+       i++) {
+    dst.Rasterizer.scissor_rects[i] = src.Rasterizer.scissor_rects[i];
+    dst.Rasterizer.viewports[i] = src.Rasterizer.viewports[i];
+  }
+  dst.Rasterizer.NumScissorRects = src.Rasterizer.NumScissorRects;
+  dst.Rasterizer.NumViewports = src.Rasterizer.NumViewports;
+  dst.Rasterizer.RasterizerState = src.Rasterizer.RasterizerState;
+
+  dst.predicate = src.predicate;
+  dst.predicate_value = src.predicate_value;
+
+  return dst;
+}
+
 class MTLD3D11DeviceContextState
     : public MTLD3D11DeviceChild<ID3DDeviceContextState> {
 
 public:
   MTLD3D11DeviceContextState(MTLD3D11Device *pDevice)
       : MTLD3D11DeviceChild<ID3DDeviceContextState>(pDevice) {}
+  MTLD3D11DeviceContextState(MTLD3D11Device *pDevice,
+                             const D3D11ContextState &state)
+      : MTLD3D11DeviceChild<ID3DDeviceContextState>(pDevice),
+        context_state_(CloneD3D11ContextState(state)) {}
 
   ~MTLD3D11DeviceContextState() {}
+
+  const D3D11ContextState &contextState() const {
+    return context_state_;
+  }
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **ppvObject) {
     if (ppvObject == nullptr)
@@ -211,6 +289,9 @@ public:
 
     return E_NOINTERFACE;
   }
+
+private:
+  D3D11ContextState context_state_ = {};
 };
 
 } // namespace dxmt

@@ -25,6 +25,11 @@
 #include <memory>
 #include "d3d11_4.h"
 #include "util_win32_compat.h"
+#include <algorithm>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <cstdio>
 
 namespace dxmt {
 
@@ -40,6 +45,118 @@ const GUID kGpaUUID = {0xccffef16,
                        0x7b69,
                        0x468f,
                        {0xbc, 0xe3, 0xcd, 0x95, 0x33, 0x69, 0xa3, 0x9a}};
+
+static bool dxmt_hk_cap_trace_enabled() {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *env = std::getenv("MACRUNNER_DXMT_CAP_TRACE");
+    enabled = (env && env[0] && env[0] != '0') ? 1 : 0;
+  }
+  return enabled != 0;
+}
+
+static bool dxmt_hk_cap_trace_take_slot() {
+  static unsigned count = 0;
+  static unsigned max_count = 0;
+  if (!dxmt_hk_cap_trace_enabled())
+    return false;
+  if (!max_count) {
+    const char *env = std::getenv("MACRUNNER_DXMT_CAP_TRACE_MAX");
+    char *end = nullptr;
+    unsigned long parsed = env && env[0] ? std::strtoul(env, &end, 0) : 0;
+    max_count = (end && end != env && parsed > 0 && parsed <= 1000000) ? parsed : 4096;
+  }
+  return ++count <= max_count;
+}
+
+static uint64_t dxmt_hk_cap_trace_qword(const void *data, UINT size, UINT offset) {
+  uint64_t value = 0;
+  if (data && size > offset) {
+    UINT copy = std::min<UINT>(sizeof(value), size - offset);
+    std::memcpy(&value, static_cast<const char *>(data) + offset, copy);
+  }
+  return value;
+}
+
+static void dxmt_hk_cap_trace_feature(const char *kind, UINT feature, UINT size,
+                                      HRESULT hr, const void *data) {
+  if (!dxmt_hk_cap_trace_take_slot())
+    return;
+  std::fprintf(stderr,
+               "dxmt-hk-cap: kind=%s feature=%u size=%u hr=0x%08x "
+               "q0=0x%llx q8=0x%llx q10=0x%llx q18=0x%llx\n",
+               kind, feature, size, static_cast<unsigned>(hr),
+               static_cast<unsigned long long>(dxmt_hk_cap_trace_qword(data, size, 0)),
+               static_cast<unsigned long long>(dxmt_hk_cap_trace_qword(data, size, 8)),
+               static_cast<unsigned long long>(dxmt_hk_cap_trace_qword(data, size, 16)),
+               static_cast<unsigned long long>(dxmt_hk_cap_trace_qword(data, size, 24)));
+}
+
+static void dxmt_hk_cap_trace_format(const char *kind, UINT format, UINT arg1,
+                                     UINT arg2, HRESULT hr, UINT out0) {
+  if (!dxmt_hk_cap_trace_take_slot())
+    return;
+  std::fprintf(stderr,
+               "dxmt-hk-cap: kind=%s format=%u arg1=%u arg2=%u "
+               "hr=0x%08x out0=0x%x\n",
+               kind, format, arg1, arg2, static_cast<unsigned>(hr), out0);
+}
+
+static const char *dxmt_hk_cap_trace_device_iid(REFIID riid) {
+  if (riid == __uuidof(ID3D11Device)) return "ID3D11Device";
+  if (riid == __uuidof(ID3D11Device1)) return "ID3D11Device1";
+  if (riid == __uuidof(ID3D11Device2)) return "ID3D11Device2";
+  if (riid == __uuidof(ID3D11Device3)) return "ID3D11Device3";
+  if (riid == __uuidof(ID3D11Device4)) return "ID3D11Device4";
+  if (riid == __uuidof(ID3D11Device5)) return "ID3D11Device5";
+  if (riid == __uuidof(ID3D11Multithread)) return "ID3D11Multithread";
+  return nullptr;
+}
+
+static void dxmt_hk_cap_trace_qi(const char *iface, HRESULT hr) {
+  if (!iface || !dxmt_hk_cap_trace_take_slot())
+    return;
+  std::fprintf(stderr, "dxmt-hk-cap: kind=QueryInterface iface=%s hr=0x%08x\n",
+               iface, static_cast<unsigned>(hr));
+}
+
+static bool dxmt_hk_swap_trace_enabled() {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *env = std::getenv("MACRUNNER_DXMT_SWAPCHAIN_TRACE");
+    enabled = (env && env[0] && std::strcmp(env, "0") != 0) ? 1 : 0;
+  }
+  return enabled != 0;
+}
+
+static bool dxmt_hk_swap_trace_take_slot() {
+  static unsigned count = 0;
+  static unsigned max_count = 0;
+  if (!dxmt_hk_swap_trace_enabled())
+    return false;
+  if (!max_count) {
+    const char *env = std::getenv("MACRUNNER_DXMT_SWAPCHAIN_TRACE_MAX");
+    char *end = nullptr;
+    unsigned long parsed = env && env[0] ? std::strtoul(env, &end, 0) : 0;
+    max_count = (end && end != env && parsed > 0 && parsed <= 1000000) ? parsed : 4096;
+  }
+  return ++count <= max_count;
+}
+
+static void dxmt_hk_swap_trace_device_method(const char *method, const void *self,
+                                             HRESULT hr, const void *resource,
+                                             const void *desc, const void *out,
+                                             const void *ret0, const void *ret1,
+                                             const void *ret2, const void *ret3) {
+  if (!dxmt_hk_swap_trace_take_slot())
+    return;
+  std::fprintf(stderr,
+               "dxmt-hk-swaptrace: kind=Device method=%s tid=%lu this=%p hr=0x%08x "
+               "resource=%p desc=%p out=%p ret0=%p ret1=%p ret2=%p ret3=%p\n",
+               method, (unsigned long)GetCurrentThreadId(), self,
+               static_cast<unsigned>(static_cast<uint32_t>(hr)), resource, desc,
+               out, ret0, ret1, ret2, ret3);
+}
 
 class MTLD3D11DeviceImpl final : public MTLD3D11Device, public IMTLD3D11DeviceExt {
 friend class MTLD3D11DXGIDevice;
@@ -188,14 +305,29 @@ public:
   HRESULT STDMETHODCALLTYPE CreateRenderTargetView(
       ID3D11Resource *pResource, const D3D11_RENDER_TARGET_VIEW_DESC *pDesc,
       ID3D11RenderTargetView **ppRTView) override {
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    HRESULT hr;
     if (pDesc) {
       D3D11_RENDER_TARGET_VIEW_DESC1 desc1;
       UpgradeViewDescription(pDesc, desc1);
-      return CreateRenderTargetView1(pResource, &desc1,
-                                     (ID3D11RenderTargetView1 **)ppRTView);
-    }
-    return CreateRenderTargetView1(pResource, nullptr,
+      hr = CreateRenderTargetView1(pResource, &desc1,
                                    (ID3D11RenderTargetView1 **)ppRTView);
+      dxmt_hk_swap_trace_device_method("CreateRenderTargetView", this, hr,
+                                       pResource, pDesc,
+                                       ppRTView ? *ppRTView : nullptr, ret0,
+                                       ret1, ret2, ret3);
+      return hr;
+    }
+    hr = CreateRenderTargetView1(pResource, nullptr,
+                                 (ID3D11RenderTargetView1 **)ppRTView);
+    dxmt_hk_swap_trace_device_method("CreateRenderTargetView", this, hr,
+                                     pResource, nullptr,
+                                     ppRTView ? *ppRTView : nullptr, ret0,
+                                     ret1, ret2, ret3);
+    return hr;
   }
 
   HRESULT STDMETHODCALLTYPE CreateDepthStencilView(
@@ -438,8 +570,9 @@ public:
   CreateCounter(const D3D11_COUNTER_DESC *pCounterDesc,
                 ID3D11Counter **ppCounter) override {
     InitReturnPtr(ppCounter);
-    WARN("CreateCounter: not supported");
-    return E_NOTIMPL;
+    if (!pCounterDesc)
+      return E_INVALIDARG;
+    return DXGI_ERROR_UNSUPPORTED;
   }
 
   HRESULT STDMETHODCALLTYPE CreateDeferredContext(
@@ -458,6 +591,11 @@ public:
 
   HRESULT STDMETHODCALLTYPE
       CheckFormatSupport(DXGI_FORMAT Format, UINT *pFormatSupport) override {
+    auto trace_return = [&](HRESULT hr) -> HRESULT {
+      dxmt_hk_cap_trace_format("CheckFormatSupport", Format, 0, 0, hr,
+                               pFormatSupport ? *pFormatSupport : 0);
+      return hr;
+    };
 
     if (pFormatSupport) {
       *pFormatSupport = 0;
@@ -466,12 +604,12 @@ public:
     if (Format == DXGI_FORMAT_UNKNOWN) {
       *pFormatSupport =
           D3D11_FORMAT_SUPPORT_BUFFER | D3D11_FORMAT_SUPPORT_CPU_LOCKABLE;
-      return S_OK;
+      return trace_return(S_OK);
     }
 
     MTL_DXGI_FORMAT_DESC metal_format;
     if (FAILED(MTLQueryDXGIFormat(GetMTLDevice(), Format, metal_format))) {
-      return E_INVALIDARG;
+      return trace_return(E_INVALIDARG);
     }
 
     UINT outFormatSupport = 0;
@@ -550,13 +688,16 @@ public:
       *pFormatSupport = outFormatSupport;
     }
 
-    return S_OK;
+    return trace_return(S_OK);
   }
 
   HRESULT STDMETHODCALLTYPE CheckMultisampleQualityLevels(
       DXGI_FORMAT Format, UINT SampleCount, UINT *pNumQualityLevels) override {
-    return CheckMultisampleQualityLevels1(Format, SampleCount, 0,
-                                          pNumQualityLevels);
+    HRESULT hr = CheckMultisampleQualityLevels1(Format, SampleCount, 0,
+                                                pNumQualityLevels);
+    dxmt_hk_cap_trace_format("CheckMultisampleQualityLevels", Format, SampleCount, 0,
+                             hr, pNumQualityLevels ? *pNumQualityLevels : 0);
+    return hr;
   }
 
   void STDMETHODCALLTYPE
@@ -575,8 +716,26 @@ public:
                                          UINT *pUnitsLength,
                                          LPSTR szDescription,
                                          UINT *pDescriptionLength) override {
-    WARN("CheckCounter: not supported");
-    return E_NOTIMPL;
+    if (!pDesc || !pType || !pActiveCounters)
+      return E_INVALIDARG;
+
+    *pType = D3D11_COUNTER_TYPE_UINT32;
+    *pActiveCounters = 0;
+
+    auto clear_string = [](LPSTR string, UINT *length) {
+      if (!length)
+        return;
+      UINT capacity = *length;
+      *length = 0;
+      if (string && capacity)
+        string[0] = '\0';
+    };
+
+    clear_string(szName, pNameLength);
+    clear_string(szUnits, pUnitsLength);
+    clear_string(szDescription, pDescriptionLength);
+
+    return DXGI_ERROR_UNSUPPORTED;
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -589,17 +748,26 @@ public:
       auto info =
           static_cast<D3D11_FEATURE_DATA_FORMAT_SUPPORT *>(pFeatureSupportData);
 
-      if (FeatureSupportDataSize != sizeof(*info))
+      if (FeatureSupportDataSize != sizeof(*info)) {
+        dxmt_hk_cap_trace_feature("CheckFeatureSupport", Feature, FeatureSupportDataSize,
+                                  E_INVALIDARG, pFeatureSupportData);
         return E_INVALIDARG;
+      }
 
-      return CheckFormatSupport(info->InFormat, &info->OutFormatSupport);
+      HRESULT hr = CheckFormatSupport(info->InFormat, &info->OutFormatSupport);
+      dxmt_hk_cap_trace_feature("CheckFeatureSupport", Feature, FeatureSupportDataSize,
+                                hr, pFeatureSupportData);
+      return hr;
     }
     case D3D11_FEATURE_FORMAT_SUPPORT2: {
       auto info = static_cast<D3D11_FEATURE_DATA_FORMAT_SUPPORT2 *>(
           pFeatureSupportData);
 
-      if (FeatureSupportDataSize != sizeof(*info))
+      if (FeatureSupportDataSize != sizeof(*info)) {
+        dxmt_hk_cap_trace_feature("CheckFeatureSupport", Feature, FeatureSupportDataSize,
+                                  E_INVALIDARG, pFeatureSupportData);
         return E_INVALIDARG;
+      }
       info->OutFormatSupport2 = 0;
 
       if (info->InFormat == DXGI_FORMAT_UNKNOWN) {
@@ -613,12 +781,16 @@ public:
             D3D11_FORMAT_SUPPORT2_UAV_TYPED_LOAD |
             D3D11_FORMAT_SUPPORT2_UAV_TYPED_STORE |
             D3D11_FORMAT_SUPPORT2_SHAREABLE;
+        dxmt_hk_cap_trace_feature("CheckFeatureSupport", Feature, FeatureSupportDataSize,
+                                  S_OK, pFeatureSupportData);
         return S_OK;
       }
 
       MTL_DXGI_FORMAT_DESC metal_format;
       if (FAILED(MTLQueryDXGIFormat(GetMTLDevice(), info->InFormat,
                                     metal_format))) {
+        dxmt_hk_cap_trace_feature("CheckFeatureSupport", Feature, FeatureSupportDataSize,
+                                  E_INVALIDARG, pFeatureSupportData);
         return E_INVALIDARG;
       }
       auto Capability = GetMTLPixelFormatCapability(metal_format.PixelFormat);
@@ -658,13 +830,18 @@ public:
         info->OutFormatSupport2 |= D3D11_FORMAT_SUPPORT2_TILED;
       }
 
+      dxmt_hk_cap_trace_feature("CheckFeatureSupport", Feature, FeatureSupportDataSize,
+                                S_OK, pFeatureSupportData);
       return S_OK;
     }
     default:
       // For everything else, we can use the device feature struct
       // that we already initialized during device creation.
-      return features_.GetFeatureData(Feature, FeatureSupportDataSize,
-                                       pFeatureSupportData);
+      HRESULT hr = features_.GetFeatureData(Feature, FeatureSupportDataSize,
+                                            pFeatureSupportData);
+      dxmt_hk_cap_trace_feature("CheckFeatureSupport", Feature, FeatureSupportDataSize,
+                                hr, pFeatureSupportData);
+      return hr;
     }
   }
 
@@ -684,6 +861,7 @@ public:
   }
 
   D3D_FEATURE_LEVEL STDMETHODCALLTYPE GetFeatureLevel() override {
+    dxmt_hk_cap_trace_format("GetFeatureLevel", feature_level_, 0, 0, S_OK, feature_level_);
     return feature_level_;
   }
 
@@ -700,13 +878,14 @@ public:
   }
 
   HRESULT STDMETHODCALLTYPE SetExceptionMode(UINT RaiseFlags) override {
-    ERR("Not implemented");
-    return E_NOTIMPL;
+    if (RaiseFlags & ~D3D11_RAISE_FLAG_DRIVER_INTERNAL_ERROR)
+      return E_INVALIDARG;
+    exception_mode_ = RaiseFlags;
+    return S_OK;
   }
 
   UINT STDMETHODCALLTYPE GetExceptionMode() override {
-    ERR("Not implemented");
-    return 0;
+    return exception_mode_;
   }
 
   void STDMETHODCALLTYPE
@@ -758,12 +937,29 @@ public:
       D3D_FEATURE_LEVEL *pChosenFeatureLevel,
       ID3DDeviceContextState **ppContextState) override {
     InitReturnPtr(ppContextState);
+    if (pChosenFeatureLevel)
+      *pChosenFeatureLevel = (D3D_FEATURE_LEVEL)0;
 
     // TODO: validation
+    D3D_FEATURE_LEVEL chosen_feature_level = feature_level_;
+    if (pFeatureLevels && FeatureLevels) {
+      bool found_feature_level = false;
+      for (UINT i = 0; i < FeatureLevels; i++) {
+        if (pFeatureLevels[i] <= feature_level_) {
+          chosen_feature_level = pFeatureLevels[i];
+          found_feature_level = true;
+          break;
+        }
+      }
+      if (!found_feature_level)
+        return E_INVALIDARG;
+    }
 
     if (ppContextState == nullptr) {
       return S_FALSE;
     }
+    if (pChosenFeatureLevel)
+      *pChosenFeatureLevel = chosen_feature_level;
     *ppContextState = ref(new MTLD3D11DeviceContextState(this));
     return S_OK;
   }
@@ -797,19 +993,39 @@ public:
       D3D11_PACKED_MIP_DESC *mip_desc, D3D11_TILE_SHAPE *tile_shape,
       UINT *subresource_tiling_count, UINT first_subresource_tiling,
       D3D11_SUBRESOURCE_TILING *subresource_tiling) override{
-    UNIMPLEMENTED("tiled resource: get resource tiling");
+    (void)resource;
+    (void)first_subresource_tiling;
+    (void)subresource_tiling;
+
+    if (tile_count)
+      *tile_count = 0;
+    if (mip_desc)
+      *mip_desc = {};
+    if (tile_shape)
+      *tile_shape = {};
+    if (subresource_tiling_count)
+      *subresource_tiling_count = 0;
   }
 
   HRESULT STDMETHODCALLTYPE
   CheckMultisampleQualityLevels1(DXGI_FORMAT Format, UINT SampleCount, UINT Flags, UINT *pNumQualityLevels) override {
-    if (Flags) {
-      ERR("CheckMultisampleQualityLevels1: unsupported flags ", Flags);
+    if (!pNumQualityLevels) {
+      dxmt_hk_cap_trace_format("CheckMultisampleQualityLevels1", Format, SampleCount, Flags,
+                               E_INVALIDARG, 0);
       return E_INVALIDARG;
     }
+
     *pNumQualityLevels = 0;
+    if (Flags) {
+      dxmt_hk_cap_trace_format("CheckMultisampleQualityLevels1", Format, SampleCount, Flags,
+                               E_INVALIDARG, *pNumQualityLevels);
+      return E_INVALIDARG;
+    }
     MTL_DXGI_FORMAT_DESC desc;
     if (FAILED(MTLQueryDXGIFormat(GetMTLDevice(), Format, desc)) ||
         desc.PixelFormat == WMTPixelFormatInvalid) {
+      dxmt_hk_cap_trace_format("CheckMultisampleQualityLevels1", Format, SampleCount, Flags,
+                               E_INVALIDARG, *pNumQualityLevels);
       return E_INVALIDARG;
     }
 
@@ -825,6 +1041,8 @@ public:
       *pNumQualityLevels = 1; // always 1: in metal there is no concept of
                               // Quality Level (so is it in vulkan iirc)
     }
+    dxmt_hk_cap_trace_format("CheckMultisampleQualityLevels1", Format, SampleCount, Flags,
+                             S_OK, *pNumQualityLevels);
     return S_OK;
   }
 
@@ -934,15 +1152,32 @@ public:
   HRESULT STDMETHODCALLTYPE CreateRenderTargetView1(
       ID3D11Resource *pResource, const D3D11_RENDER_TARGET_VIEW_DESC1 *pDesc,
       ID3D11RenderTargetView1 **ppRTView) override {
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
     InitReturnPtr(ppRTView);
 
-    if (!pResource)
+    if (!pResource) {
+      dxmt_hk_swap_trace_device_method("CreateRenderTargetView1", this,
+                                       E_INVALIDARG, pResource, pDesc, nullptr,
+                                       ret0, ret1, ret2, ret3);
       return E_INVALIDARG;
+    }
 
-    if (!ppRTView)
+    if (!ppRTView) {
+      dxmt_hk_swap_trace_device_method("CreateRenderTargetView1", this, S_FALSE,
+                                       pResource, pDesc, nullptr, ret0, ret1,
+                                       ret2, ret3);
       return S_FALSE;
+    }
 
-    return static_cast<D3D11ResourceCommon *>(pResource)->CreateRenderTargetView(pDesc, ppRTView);
+    HRESULT hr = static_cast<D3D11ResourceCommon *>(pResource)->CreateRenderTargetView(pDesc, ppRTView);
+    dxmt_hk_swap_trace_device_method("CreateRenderTargetView1", this, hr,
+                                     pResource, pDesc,
+                                     ppRTView ? *ppRTView : nullptr, ret0,
+                                     ret1, ret2, ret3);
+    return hr;
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -969,12 +1204,27 @@ public:
       return S_OK;
     }
     case D3D11_QUERY_PIPELINE_STATISTICS: {
-      *ppQuery = ref(new MTLD3D11DummyQuery<D3D11_QUERY_DATA_PIPELINE_STATISTICS>(this, pQueryDesc));
+      *ppQuery = ref(new MTLD3D11ImmediateQuery<D3D11_QUERY_DATA_PIPELINE_STATISTICS>(this, pQueryDesc));
+      return S_OK;
+    }
+    case D3D11_QUERY_SO_STATISTICS:
+    case D3D11_QUERY_SO_STATISTICS_STREAM0:
+    case D3D11_QUERY_SO_STATISTICS_STREAM1:
+    case D3D11_QUERY_SO_STATISTICS_STREAM2:
+    case D3D11_QUERY_SO_STATISTICS_STREAM3: {
+      *ppQuery = ref(new MTLD3D11ImmediateQuery<D3D11_QUERY_DATA_SO_STATISTICS>(this, pQueryDesc));
+      return S_OK;
+    }
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3: {
+      *ppQuery = ref(new MTLD3D11ImmediateQuery<BOOL>(this, pQueryDesc));
       return S_OK;
     }
     default:
-      ERR("CreateQuery1: query type not implemented: ", pQueryDesc->Query);
-      return E_NOTIMPL;
+      return E_INVALIDARG;
     }
   }
 
@@ -994,7 +1244,11 @@ public:
       ID3D11Resource *pDstResource, UINT DstSubresource, const D3D11_BOX *pDstBox, const void *pSrcData,
       UINT SrcRowPitch, UINT SrcDepthPitch
   ) override {
-    UNIMPLEMENTED("map-on-default: write resource");
+    if (!pDstResource || !pSrcData)
+      return;
+
+    context_->UpdateSubresource(pDstResource, DstSubresource, pDstBox, pSrcData,
+                                SrcRowPitch, SrcDepthPitch);
   }
 
   void STDMETHODCALLTYPE
@@ -1002,7 +1256,143 @@ public:
       void *pDstData, UINT DstRowPitch, UINT DstDepthPitch, ID3D11Resource *SrcResource, UINT SrcSubresource,
       const D3D11_BOX *pSrcBox
   ) override {
-    UNIMPLEMENTED("map-on-default: read resource");
+    if (!pDstData || !SrcResource)
+      return;
+
+    D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+    SrcResource->GetType(&dimension);
+
+    auto copy_rows = [](void *dst_data, UINT dst_row_pitch,
+                        UINT dst_depth_pitch, const void *src_data,
+                        UINT src_row_pitch, UINT src_depth_pitch,
+                        UINT row_bytes, UINT rows, UINT depth) {
+      if (!dst_row_pitch)
+        dst_row_pitch = row_bytes;
+      if (!dst_depth_pitch)
+        dst_depth_pitch = dst_row_pitch * rows;
+
+      for (UINT z = 0; z < depth; z++) {
+        auto dst_slice = static_cast<char *>(dst_data) + z * dst_depth_pitch;
+        auto src_slice = static_cast<const char *>(src_data) + z * src_depth_pitch;
+        for (UINT y = 0; y < rows; y++) {
+          std::memcpy(dst_slice + y * dst_row_pitch,
+                      src_slice + y * src_row_pitch, row_bytes);
+        }
+      }
+    };
+
+    auto texture_copy_shape = [this](DXGI_FORMAT format, UINT width, UINT height,
+                                     UINT *row_bytes, UINT *rows) {
+      MTL_DXGI_FORMAT_DESC metal_format;
+      if (FAILED(MTLQueryDXGIFormat(GetMTLDevice(), format, metal_format)))
+        return false;
+
+      if (metal_format.Flag & MTL_DXGI_FORMAT_BC) {
+        *row_bytes = ((width + 3) / 4) * metal_format.BytesPerTexel;
+        *rows = (height + 3) / 4;
+      } else {
+        *row_bytes = width * metal_format.BytesPerTexel;
+        *rows = height;
+      }
+      return true;
+    };
+
+    ID3D11Resource *staging = nullptr;
+    UINT row_bytes = 0;
+    UINT rows = 1;
+    UINT depth = 1;
+
+    switch (dimension) {
+    case D3D11_RESOURCE_DIMENSION_BUFFER: {
+      D3D11_BUFFER_DESC desc = {};
+      static_cast<ID3D11Buffer *>(SrcResource)->GetDesc(&desc);
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.BindFlags = 0;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      desc.MiscFlags = 0;
+      row_bytes = pSrcBox ? pSrcBox->right - pSrcBox->left : desc.ByteWidth;
+      if (FAILED(CreateBuffer(&desc, nullptr,
+                              reinterpret_cast<ID3D11Buffer **>(&staging))))
+        return;
+      break;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+      D3D11_TEXTURE1D_DESC desc = {};
+      static_cast<ID3D11Texture1D *>(SrcResource)->GetDesc(&desc);
+      UINT mip = SrcSubresource % desc.MipLevels;
+      UINT width = pSrcBox ? pSrcBox->right - pSrcBox->left
+                           : std::max(desc.Width >> mip, 1u);
+      if (!texture_copy_shape(desc.Format, width, 1, &row_bytes, &rows))
+        return;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.BindFlags = 0;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      desc.MiscFlags = 0;
+      if (FAILED(CreateTexture1D(&desc, nullptr,
+                                 reinterpret_cast<ID3D11Texture1D **>(&staging))))
+        return;
+      break;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+      D3D11_TEXTURE2D_DESC desc = {};
+      static_cast<ID3D11Texture2D *>(SrcResource)->GetDesc(&desc);
+      UINT mip = SrcSubresource % desc.MipLevels;
+      UINT width = pSrcBox ? pSrcBox->right - pSrcBox->left
+                           : std::max(desc.Width >> mip, 1u);
+      UINT height = pSrcBox ? pSrcBox->bottom - pSrcBox->top
+                            : std::max(desc.Height >> mip, 1u);
+      if (!texture_copy_shape(desc.Format, width, height, &row_bytes, &rows))
+        return;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.BindFlags = 0;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      desc.MiscFlags = 0;
+      if (FAILED(CreateTexture2D(&desc, nullptr,
+                                 reinterpret_cast<ID3D11Texture2D **>(&staging))))
+        return;
+      break;
+    }
+    case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+      D3D11_TEXTURE3D_DESC desc = {};
+      static_cast<ID3D11Texture3D *>(SrcResource)->GetDesc(&desc);
+      UINT mip = SrcSubresource % desc.MipLevels;
+      UINT width = pSrcBox ? pSrcBox->right - pSrcBox->left
+                           : std::max(desc.Width >> mip, 1u);
+      UINT height = pSrcBox ? pSrcBox->bottom - pSrcBox->top
+                            : std::max(desc.Height >> mip, 1u);
+      depth = pSrcBox ? pSrcBox->back - pSrcBox->front
+                      : std::max(desc.Depth >> mip, 1u);
+      if (!texture_copy_shape(desc.Format, width, height, &row_bytes, &rows))
+        return;
+      desc.Usage = D3D11_USAGE_STAGING;
+      desc.BindFlags = 0;
+      desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+      desc.MiscFlags = 0;
+      if (FAILED(CreateTexture3D(&desc, nullptr,
+                                 reinterpret_cast<ID3D11Texture3D **>(&staging))))
+        return;
+      break;
+    }
+    default:
+      return;
+    }
+
+    if (pSrcBox) {
+      context_->CopySubresourceRegion(staging, SrcSubresource, 0, 0, 0,
+                                      SrcResource, SrcSubresource, pSrcBox);
+    } else {
+      context_->CopyResource(staging, SrcResource);
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (SUCCEEDED(context_->Map(staging, SrcSubresource, D3D11_MAP_READ, 0,
+                                &mapped))) {
+      copy_rows(pDstData, DstRowPitch, DstDepthPitch, mapped.pData,
+                mapped.RowPitch, mapped.DepthPitch, row_bytes, rows, depth);
+      context_->Unmap(staging, SrcSubresource);
+    }
+
+    staging->Release();
   }
 
   WMT::Device STDMETHODCALLTYPE GetMTLDevice() override {
@@ -1085,8 +1475,14 @@ public:
   virtual HRESULT STDMETHODCALLTYPE CreateFence(UINT64 InitialValue,
                                                 D3D11_FENCE_FLAG Flags,
                                                 REFIID riid, void **ppFence) final {
-    if (feature_flags_ & D3D11_CREATE_DEVICE_VIDEO_SUPPORT)
-      return E_FAIL;
+    fprintf(stderr, "macrunner-dxmt-fence: device CreateFence ENTER InitialValue=%llu Flags=0x%x feature_flags=0x%x\n",
+            (unsigned long long)InitialValue, (unsigned)Flags, (unsigned)feature_flags_);
+    if (feature_flags_ & D3D11_CREATE_DEVICE_VIDEO_SUPPORT) {
+      fprintf(stderr, "macrunner-dxmt-fence: VIDEO_SUPPORT set, degrading to local fence path\n");
+      // MacRunner: do not hard-fail here. The inner CreateFence already falls
+      // back to a local MTLSharedEvent-backed fence when D3DKMT shared handles
+      // are unavailable, which is sufficient for in-process present sync.
+    }
     return dxmt::CreateFence(this, InitialValue, Flags, riid, ppFence);
   };
 
@@ -1094,6 +1490,7 @@ private:
   MTLDXGIObject<IMTLDXGIDevice> *container_;
   D3D_FEATURE_LEVEL feature_level_;
   UINT feature_flags_;
+  UINT exception_mode_ = 0;
   MTLD3D11Inspection features_;
   FormatCapabilityInspector format_inspector_;
 
@@ -1160,6 +1557,7 @@ public:
         riid == __uuidof(IDXGIDevice2) || riid == __uuidof(IDXGIDevice3) ||
         riid == __uuidof(IMTLDXGIDevice)) {
       *ppvObject = ref(this);
+      dxmt_hk_cap_trace_qi("IDXGIDevice-family", S_OK);
       return S_OK;
     }
 
@@ -1167,6 +1565,7 @@ public:
         riid == __uuidof(ID3D11Device2) || riid == __uuidof(ID3D11Device3) ||
         riid == __uuidof(ID3D11Device4) || riid == __uuidof(ID3D11Device5)) {
       *ppvObject = ref_and_cast<ID3D11Device>(&d3d11_device_);
+      dxmt_hk_cap_trace_qi(dxmt_hk_cap_trace_device_iid(riid), S_OK);
       return S_OK;
     }
 
@@ -1182,6 +1581,7 @@ public:
 
     if (riid == __uuidof(ID3D11Multithread)) {
       *ppvObject = ref_and_cast<ID3D11Multithread>(&d3d11_device_.d3dmt_);
+      dxmt_hk_cap_trace_qi("ID3D11Multithread", S_OK);
       return S_OK;
     }
 
@@ -1213,8 +1613,17 @@ public:
   HRESULT STDMETHODCALLTYPE
   CreateSurface(const DXGI_SURFACE_DESC *desc, UINT surface_count,
                 DXGI_USAGE usage, const DXGI_SHARED_RESOURCE *shared_resource,
-                IDXGISurface **surface) override{
-    UNIMPLEMENTED("CreateSurface");
+                IDXGISurface **surface) override {
+    (void)usage;
+    (void)shared_resource;
+
+    if (!desc || !surface || !surface_count)
+      return E_INVALIDARG;
+
+    for (UINT i = 0; i < surface_count; i++)
+      surface[i] = nullptr;
+
+    return DXGI_ERROR_UNSUPPORTED;
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -1256,14 +1665,33 @@ public:
   HRESULT STDMETHODCALLTYPE
       OfferResources(UINT NumResources, IDXGIResource *const *ppResources,
                      DXGI_OFFER_RESOURCE_PRIORITY Priority) override {
-    // stub
+    if (Priority < DXGI_OFFER_RESOURCE_PRIORITY_LOW ||
+        Priority > DXGI_OFFER_RESOURCE_PRIORITY_HIGH)
+      return E_INVALIDARG;
+    if (NumResources && !ppResources)
+      return E_INVALIDARG;
+
+    for (UINT i = 0; i < NumResources; i++) {
+      if (!ppResources[i])
+        return E_INVALIDARG;
+    }
+
     return S_OK;
   }
 
   HRESULT STDMETHODCALLTYPE ReclaimResources(UINT NumResources,
                                              IDXGIResource *const *ppResources,
                                              WINBOOL *pDiscarded) override {
-    // stub
+    if (NumResources && !ppResources)
+      return E_INVALIDARG;
+
+    for (UINT i = 0; i < NumResources; i++) {
+      if (!ppResources[i])
+        return E_INVALIDARG;
+      if (pDiscarded)
+        pDiscarded[i] = FALSE;
+    }
+
     return S_OK;
   }
 

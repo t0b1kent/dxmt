@@ -1,5 +1,6 @@
 #include "dxgi_interfaces.h"
 #include "log/log.hpp"
+#include "instr.hpp"
 #include "util_env.hpp"
 #include "winemetal.h"
 #include <mutex>
@@ -61,6 +62,7 @@ static void InitializeMetalCachePath() {
 
 extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason,
                                LPVOID reserved) {
+  ::dxmt::instr::logf("DXGI DllMain reason=%u instance=%p", (unsigned)reason, (void*)instance);
   if (reason != DLL_PROCESS_ATTACH)
     return TRUE;
 
@@ -69,6 +71,7 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason,
   InitializeMetalCachePath();
   std::call_once(nvext_init, InitializeVendorExtensionNV);
 
+  ::dxmt::instr::logf("DXGI DllMain PROCESS_ATTACH done");
   return TRUE;
 }
 

@@ -14,6 +14,10 @@ struct MTL_COMPILED_SHADER {
   NOTE: it's not retained by design
   */
   WMT::Function Function;
+  /* Optional diagnostic siblings; never participate in the logical shader key. */
+  WMT::Function CausalFragmentCaptureFunction;
+  WMT::Function CausalFragmentMagentaFunction;
+  WMT::Function CausalVariantFunction;
 };
 
 namespace dxmt {
@@ -200,6 +204,7 @@ public:
   return false if it's not ready
    */
   virtual bool GetShader(MTL_COMPILED_SHADER *pShaderData) = 0;
+  virtual const char *GetFunctionName() const = 0;
 };
 
 class Shader {

@@ -11,6 +11,8 @@ inline air::Interpolation
 to_air_interpolation(microsoft::D3D10_SB_INTERPOLATION_MODE mode) {
   using namespace microsoft;
   switch (mode) {
+  case D3D10_SB_INTERPOLATION_UNDEFINED:
+    return air::Interpolation::flat;
   case D3D10_SB_INTERPOLATION_LINEAR_NOPERSPECTIVE_SAMPLE:
     return air::Interpolation::sample_no_perspective;
   case D3D10_SB_INTERPOLATION_LINEAR_SAMPLE:

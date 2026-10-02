@@ -147,6 +147,18 @@ private:
   CpuFence frame_latency_fence_;
   std::atomic_bool stopped;
 
+  /* MacRunner 2026-07-03 (lane dxmtpoll): event-driven wake for the three
+   * queue seq counters. std::atomic::notify_one is lost under HyperBridge
+   * emulation (see util_cpu_fence.hpp), so the encoder/finisher/commit waits
+   * previously fell back to a Sleep(1) poll — a ~1ms GPU-command cadence and a
+   * per-iteration NtDelayExecution round-trip. This shared mutex+condvar
+   * (wine SRW-futex / wineserver-wait path, reliably delivered under HB) drives
+   * the wakeups; the atomic counters stay lock-free for relaxed readers
+   * (CurrentChunk/allocators). Predicate-checked-under-mutex -> no lost
+   * wakeup. notify_all (3 waiters max) -> no wrong-thread starvation. */
+  dxmt::mutex queue_wake_m_;
+  dxmt::condition_variable queue_wake_cv_;
+
   std::array<CommandChunk, kCommandChunkCount> chunks;
   uint64_t encoder_seq = 1;
   uint64_t frame_count = 0;

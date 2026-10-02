@@ -88,6 +88,8 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   GetEvictionPriority(UINT *pEvictionPriority) final {
+    if (!pEvictionPriority)
+      return E_INVALIDARG;
     *pEvictionPriority = resource_->GetEvictionPriority();
     return S_OK;
   }
@@ -95,8 +97,12 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   CreateSubresourceSurface(UINT index, IDXGISurface2 **surface) final {
-    ERR_ONCE("DXGIResource::CreateSubresourceSurface: stub");
-    return E_NOTIMPL;
+    (void)index;
+    if (surface)
+      *surface = nullptr;
+    if (!surface)
+      return E_INVALIDARG;
+    return DXGI_ERROR_UNSUPPORTED;
   }
 
   HRESULT

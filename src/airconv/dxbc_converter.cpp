@@ -12,9 +12,16 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Value.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
+#include <atomic>
 #include <bit>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +32,171 @@
 #include "airconv_context.hpp"
 
 #include "ftl.hpp"
+
+namespace {
+
+bool macrunner_fragment_translation_probe_enabled() {
+  static const bool enabled = [] {
+    const char *value =
+        std::getenv("MACRUNNER_HB_FRAGMENT_SHADER_TRANSLATION_PROBE");
+    return value && value[0] && value[0] != '0';
+  }();
+  return enabled;
+}
+
+bool macrunner_causal_ladder_enabled() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("MACRUNNER_HB_CAUSAL_CONTROL");
+    return value &&
+           ((std::strlen(value) == 2 && value[0] == 'C' &&
+             value[1] >= '0' && value[1] <= '3') ||
+            std::strcmp(value, "C0,C2,C3") == 0);
+  }();
+  return enabled;
+}
+
+bool macrunner_causal_ladder_capture_claim(
+    microsoft::D3D10_SB_TOKENIZED_PROGRAM_TYPE shader_type,
+    const char *function_name) {
+  if (!macrunner_causal_ladder_enabled() || !function_name)
+    return false;
+  const bool pixel_capture =
+      shader_type == microsoft::D3D10_SB_PIXEL_SHADER &&
+      (std::strcmp(function_name,
+                   "ps_bef43b20_f8e9cf38dc7294cc7203c7fb6cd68b27ed713b6a"
+                   "_mr_c0_fragment_sidechannel") == 0 ||
+       std::strcmp(function_name,
+                   "ps_bef43b20_f8e9cf38dc7294cc7203c7fb6cd68b27ed713b6a"
+                   "_mr_c1_fragment_final_magenta_sidechannel") == 0 ||
+       std::strcmp(function_name,
+                   "ps_bef43b20_f8e9cf38dc7294cc7203c7fb6cd68b27ed713b6a"
+                   "_mr_c2_fragment_input_magenta") == 0);
+  return pixel_capture ||
+         (shader_type == microsoft::D3D10_SB_VERTEX_SHADER &&
+          std::strcmp(
+              function_name,
+              "vs_59c2a0b5_adcd61f38fa5038495d5d87e7f3a67bb8d794d86"
+              "_mr_c3_vertex_reg1_magenta") == 0);
+}
+
+unsigned macrunner_fragment_translation_probe_limit() {
+  static const unsigned limit = [] {
+    const char *value =
+        std::getenv("MACRUNNER_HB_FRAGMENT_SHADER_TRANSLATION_PROBE_MAX");
+    char *end = nullptr;
+    unsigned long parsed = value && value[0] ? std::strtoul(value, &end, 0) : 0;
+    return end && end != value && parsed > 0 && parsed <= 256
+               ? static_cast<unsigned>(parsed)
+               : 64u;
+  }();
+  return limit;
+}
+
+bool macrunner_fragment_translation_probe_claim(
+    microsoft::D3D10_SB_TOKENIZED_PROGRAM_TYPE shader_type,
+    const char *function_name, unsigned *ordinal) {
+  const bool causal_capture =
+      macrunner_causal_ladder_capture_claim(shader_type, function_name);
+  if (!causal_capture &&
+      (!macrunner_fragment_translation_probe_enabled() ||
+       shader_type != microsoft::D3D10_SB_PIXEL_SHADER || !function_name ||
+       std::strncmp(function_name, "ps_", 3) != 0))
+    return false;
+  static std::atomic_uint count{0};
+  unsigned current = count.fetch_add(1, std::memory_order_relaxed);
+  if (!causal_capture && current >= macrunner_fragment_translation_probe_limit())
+    return false;
+  if (ordinal)
+    *ordinal = current + 1;
+  return true;
+}
+
+void macrunner_store_magenta_register(
+    llvm::IRBuilder<> &builder, dxmt::air::AirType &types,
+    llvm::Value *register_file,
+    unsigned register_index) {
+  auto *array_type = llvm::cast<llvm::ArrayType>(
+      register_file->getType()->getNonOpaquePointerElementType());
+  auto *slot = builder.CreateInBoundsGEP(
+      array_type, register_file,
+      {builder.getInt32(0), builder.getInt32(register_index)});
+  auto *zero = llvm::ConstantFP::get(types._float, 0.0);
+  auto *one = llvm::ConstantFP::get(types._float, 1.0);
+  auto *magenta = llvm::ConstantVector::get({one, zero, one, one});
+  builder.CreateStore(magenta, slot);
+}
+
+constexpr uint32_t macrunner_causal_sidechannel_width = 1024;
+constexpr uint32_t macrunner_causal_sidechannel_height = 768;
+constexpr uint32_t macrunner_causal_sidechannel_buffer_index = 28;
+
+std::string macrunner_fragment_translation_probe_dir() {
+  const char *base = std::getenv("DXMT_LOG_PATH");
+  std::string dir = base && base[0] ? base : ".";
+  dir += "/fragment-translation";
+  std::error_code ec = llvm::sys::fs::create_directories(dir);
+  if (ec)
+    std::fprintf(stderr,
+                 "macrunner-hb-fragment-translation: side=airconv "
+                 "phase=mkdir-error path=%s error=%s\n",
+                 dir.c_str(), ec.message().c_str());
+  return dir;
+}
+
+std::string macrunner_fragment_translation_probe_stem(
+    const char *function_name) {
+  std::string stem = function_name ? function_name : "unknown";
+  for (char &c : stem)
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-')
+      c = '_';
+  return macrunner_fragment_translation_probe_dir() + "/" + stem;
+}
+
+bool macrunner_fragment_translation_write_bytes(
+    const std::string &path, const void *data, size_t size) {
+  std::error_code ec;
+  llvm::raw_fd_ostream output(path, ec, llvm::sys::fs::OF_None);
+  if (ec) {
+    std::fprintf(stderr,
+                 "macrunner-hb-fragment-translation: side=airconv "
+                 "phase=write-error path=%s error=%s\n",
+                 path.c_str(), ec.message().c_str());
+    return false;
+  }
+  output.write(static_cast<const char *>(data), size);
+  output.flush();
+  return !output.has_error();
+}
+
+bool macrunner_fragment_translation_write_module(
+    const std::string &path, const llvm::Module &module) {
+  std::error_code ec;
+  llvm::raw_fd_ostream output(path, ec, llvm::sys::fs::OF_Text);
+  if (ec) {
+    std::fprintf(stderr,
+                 "macrunner-hb-fragment-translation: side=airconv "
+                 "phase=write-error path=%s error=%s\n",
+                 path.c_str(), ec.message().c_str());
+    return false;
+  }
+  module.print(output, nullptr);
+  output.flush();
+  return !output.has_error();
+}
+
+std::string macrunner_fragment_translation_return_type(
+    llvm::Module &module, const char *function_name) {
+  llvm::Function *function = module.getFunction(function_name);
+  if (!function)
+    return "missing";
+  std::string result;
+  llvm::raw_string_ostream stream(result);
+  function->getReturnType()->print(stream);
+  stream.flush();
+  return result;
+}
+
+} // namespace
 
 class SM50CompiledBitcodeInternal {
 public:
@@ -472,6 +644,27 @@ llvm::Error convert_dxbc_pixel_shader(
     };
   }
 
+  const bool causal_sidechannel =
+      shader_flags & SM50_SHADER_FLAG_CAUSAL_FRAGMENT_SIDECHANNEL;
+  uint32_t causal_position_arg = UINT32_MAX;
+  uint32_t causal_buffer_arg = UINT32_MAX;
+  if (causal_sidechannel) {
+    causal_position_arg = func_signature.DefineInput(air::InputPosition{
+        .interpolation = air::Interpolation::center_no_perspective,
+    });
+    causal_buffer_arg = func_signature.DefineInput(air::ArgumentBindingBuffer{
+        .buffer_size = macrunner_causal_sidechannel_width *
+                       macrunner_causal_sidechannel_height * 16u,
+        .location_index = macrunner_causal_sidechannel_buffer_index,
+        .array_size = 1,
+        .memory_access = air::MemoryAccess::write,
+        .address_space = air::AddressSpace::device,
+        .type = air::msl_float4,
+        .arg_name = "macrunner_causal_fragment_output",
+        .raster_order_group = {},
+    });
+  }
+
   setup_binding_table(shader_info, resource_map, func_signature, module);
 
   auto [function, function_metadata] =
@@ -523,6 +716,21 @@ llvm::Error convert_dxbc_pixel_shader(
   if (auto err = prologue.build(ctx).takeError()) {
     return err;
   }
+  if (shader_flags & SM50_SHADER_FLAG_CAUSAL_FRAGMENT_INPUT_MAGENTA) {
+    if (max_input_register <= 1) {
+      std::fprintf(stderr,
+                   "macrunner-hb-causal-ladder: phase=c2-inject result=fail "
+                   "function=%s reason=missing-input-reg1 count=%u\n",
+                   name ? name : "(null)", max_input_register);
+    } else {
+      macrunner_store_magenta_register(
+          builder, types, resource_map.input.ptr_float4, 1);
+      std::fprintf(stderr,
+                   "macrunner-hb-causal-ladder: phase=c2-inject result=ok "
+                   "function=%s input=reg1 value=1,0,1,1\n",
+                   name ? name : "(null)");
+    }
+  }
   auto real_entry = convert_basicblocks(pShaderInternal->entry(), ctx, epilogue_bb);
   if (auto err = real_entry.takeError()) {
     return err;
@@ -535,6 +743,75 @@ llvm::Error convert_dxbc_pixel_shader(
     return err;
   }
   auto value = epilogue_result.get();
+  if (shader_flags & SM50_SHADER_FLAG_CAUSAL_FRAGMENT_FINAL_MAGENTA) {
+    auto *return_type = value ? llvm::dyn_cast<llvm::StructType>(value->getType())
+                              : nullptr;
+    if (!return_type || !return_type->getNumElements() ||
+        return_type->getElementType(0) != types._float4)
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "MacRunner C1 requires float4 render target 0");
+    auto *zero = llvm::ConstantFP::get(types._float, 0.0);
+    auto *one = llvm::ConstantFP::get(types._float, 1.0);
+    auto *magenta = llvm::ConstantVector::get({one, zero, one, one});
+    value = builder.CreateInsertValue(value, magenta, {0});
+    std::fprintf(stderr,
+                 "macrunner-hb-causal-ladder: phase=c1-inject result=ok "
+                 "function=%s output=rt0 value=1,0,1,1\n",
+                 name ? name : "(null)");
+  }
+  if (causal_sidechannel) {
+    if (!value || causal_position_arg >= function->arg_size() ||
+        causal_buffer_arg >= function->arg_size())
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "MacRunner fragment side-channel signature is incomplete");
+    auto *return_type = llvm::dyn_cast<llvm::StructType>(value->getType());
+    auto *position = function->getArg(causal_position_arg);
+    auto *buffer = function->getArg(causal_buffer_arg);
+    if (!return_type || !return_type->getNumElements() ||
+        return_type->getElementType(0) != types._float4 ||
+        position->getType() != types._float4 || !buffer->getType()->isPointerTy())
+      return llvm::createStringError(
+          llvm::inconvertibleErrorCode(),
+          "MacRunner fragment side-channel types are incompatible");
+
+    auto *x_float = builder.CreateExtractElement(position, builder.getInt32(0));
+    auto *y_float = builder.CreateExtractElement(position, builder.getInt32(1));
+    auto *zero_float = llvm::ConstantFP::get(types._float, 0.0);
+    auto *width_float = llvm::ConstantFP::get(
+        types._float, static_cast<double>(macrunner_causal_sidechannel_width));
+    auto *height_float = llvm::ConstantFP::get(
+        types._float, static_cast<double>(macrunner_causal_sidechannel_height));
+    auto *in_bounds = builder.CreateAnd(
+        builder.CreateAnd(builder.CreateFCmpOGE(x_float, zero_float),
+                          builder.CreateFCmpOLT(x_float, width_float)),
+        builder.CreateAnd(builder.CreateFCmpOGE(y_float, zero_float),
+                          builder.CreateFCmpOLT(y_float, height_float)));
+    auto *store_bb = llvm::BasicBlock::Create(
+        context, "macrunner.causal.sidechannel.store", function);
+    auto *return_bb = llvm::BasicBlock::Create(
+        context, "macrunner.causal.sidechannel.return", function);
+    builder.CreateCondBr(in_bounds, store_bb, return_bb);
+    builder.SetInsertPoint(store_bb);
+    auto *x = builder.CreateFPToUI(x_float, types._int);
+    auto *y = builder.CreateFPToUI(y_float, types._int);
+    auto *pixel = builder.CreateAdd(
+        builder.CreateMul(y,
+                          builder.getInt32(macrunner_causal_sidechannel_width)),
+        x);
+    auto *slot = builder.CreateInBoundsGEP(types._float4, buffer, pixel);
+    builder.CreateStore(builder.CreateExtractValue(value, {0}), slot);
+    builder.CreateBr(return_bb);
+    builder.SetInsertPoint(return_bb);
+    std::fprintf(stderr,
+                 "macrunner-hb-causal-ladder: phase=sidechannel-inject "
+                 "result=ok function=%s buffer=%u extent=%ux%u\n",
+                 name ? name : "(null)",
+                 macrunner_causal_sidechannel_buffer_index,
+                 macrunner_causal_sidechannel_width,
+                 macrunner_causal_sidechannel_height);
+  }
   if (value == nullptr) {
     builder.CreateRetVoid();
   } else {
@@ -836,6 +1113,21 @@ llvm::Error convert_dxbc_vertex_shader(
   builder.CreateBr(real_entry.get());
 
   builder.SetInsertPoint(epilogue_bb);
+  if (shader_flags & SM50_SHADER_FLAG_CAUSAL_VERTEX_REG1_MAGENTA) {
+    if (max_output_register <= 1) {
+      std::fprintf(stderr,
+                   "macrunner-hb-causal-ladder: phase=c3-inject result=fail "
+                   "function=%s reason=missing-output-reg1 count=%u\n",
+                   name ? name : "(null)", max_output_register);
+    } else {
+      macrunner_store_magenta_register(
+          builder, types, resource_map.output.ptr_float4, 1);
+      std::fprintf(stderr,
+                   "macrunner-hb-causal-ladder: phase=c3-inject result=ok "
+                   "function=%s output=user(reg1_0) value=1,0,1,1\n",
+                   name ? name : "(null)");
+    }
+  }
   auto epilogue_result = epilogue.build(ctx);
   if (auto err = epilogue_result.takeError()) {
     return err;
@@ -1078,6 +1370,15 @@ AIRCONV_API int SM50Initialize(
 
   auto sm50_shader = new SM50ShaderInternal();
   sm50_shader->shader_type = CodeParser.ShaderType();
+  if ((macrunner_fragment_translation_probe_enabled() &&
+       sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER) ||
+      (macrunner_causal_ladder_enabled() &&
+       (sm50_shader->shader_type == microsoft::D3D10_SB_PIXEL_SHADER ||
+        sm50_shader->shader_type == microsoft::D3D10_SB_VERTEX_SHADER))) {
+    const auto *begin = static_cast<const uint8_t *>(pBytecode);
+    sm50_shader->fragment_translation_probe_dxbc.assign(
+        begin, begin + BytecodeSize);
+  }
   auto shader_info = &(sm50_shader->shader_info);
 
   {
@@ -1399,12 +1700,66 @@ AIRCONV_API int SM50Compile(
     return 1;
   }
 
-  // pArgs is ignored for now
   LLVMContext context;
 
   context.setOpaquePointers(false); // I suspect Metal uses LLVM 14...
 
-  auto &shader_info = ((dxmt::dxbc::SM50ShaderInternal *)pShader)->shader_info;
+  auto *shader_internal =
+      static_cast<dxmt::dxbc::SM50ShaderInternal *>(pShader);
+  auto &shader_info = shader_internal->shader_info;
+  unsigned fragment_translation_probe_ordinal = 0;
+  const bool fragment_translation_probe =
+      macrunner_fragment_translation_probe_claim(
+          shader_internal->shader_type, FunctionName,
+          &fragment_translation_probe_ordinal);
+  std::string fragment_translation_probe_stem;
+  const SM50_SHADER_PSO_PIXEL_SHADER_DATA *pixel_pso = nullptr;
+  for (auto *arg = pArgs; arg;
+       arg = static_cast<SM50_SHADER_COMPILATION_ARGUMENT_DATA *>(arg->next)) {
+    if (arg->type == SM50_SHADER_PSO_PIXEL_SHADER) {
+      pixel_pso = reinterpret_cast<const SM50_SHADER_PSO_PIXEL_SHADER_DATA *>(arg);
+      break;
+    }
+  }
+
+  if (fragment_translation_probe) {
+    fragment_translation_probe_stem =
+        macrunner_fragment_translation_probe_stem(FunctionName);
+    const auto &dxbc = shader_internal->fragment_translation_probe_dxbc;
+    macrunner_fragment_translation_write_bytes(
+        fragment_translation_probe_stem + ".dxbc", dxbc.data(), dxbc.size());
+    std::fprintf(
+        stderr,
+        "macrunner-hb-fragment-translation: side=airconv phase=compile-start "
+        "ordinal=%u function=%s dxbc_bytes=%zu output_signature_count=%zu "
+        "valid_rt_mask=0x%x max_output_register=%u sample_mask=0x%x "
+        "unorm_output_reg_mask=0x%x dual_source_blending=%u "
+        "disable_depth_output=%u\n",
+        fragment_translation_probe_ordinal,
+        FunctionName ? FunctionName : "(null)", dxbc.size(),
+        shader_internal->output_signature.size(),
+        shader_internal->pso_valid_output_reg_mask,
+        shader_internal->max_output_register,
+        pixel_pso ? pixel_pso->sample_mask : 0,
+        pixel_pso ? pixel_pso->unorm_output_reg_mask : 0,
+        pixel_pso ? static_cast<unsigned>(pixel_pso->dual_source_blending) : 0,
+        pixel_pso ? static_cast<unsigned>(pixel_pso->disable_depth_output) : 0);
+    for (const auto &signature : shader_internal->output_signature) {
+      const auto semantic = signature.semanticName();
+      std::fprintf(
+          stderr,
+          "macrunner-hb-fragment-translation: side=airconv "
+          "phase=output-signature ordinal=%u function=%s semantic=%.*s "
+          "semantic_index=%u reg=%u mask=0x%x component_type=%u "
+          "system_value=%u\n",
+          fragment_translation_probe_ordinal,
+          FunctionName ? FunctionName : "(null)",
+          static_cast<int>(semantic.size()), semantic.data(),
+          signature.semanticIndex(), signature.reg(), signature.mask(),
+          static_cast<unsigned>(signature.componentType()),
+          static_cast<unsigned>(signature.systemValue()));
+    }
+  }
 
   auto pModule = std::make_unique<Module>("shader.air", context);
   initializeModule(*pModule);
@@ -1415,6 +1770,15 @@ AIRCONV_API int SM50Compile(
     llvm::handleAllErrors(std::move(err), [&](const UnsupportedFeature &u) {
       errorOut << u.msg;
     });
+    if (fragment_translation_probe) {
+      std::fprintf(
+          stderr,
+          "macrunner-hb-fragment-translation: side=airconv "
+          "phase=compile-error ordinal=%u function=%s error=%.*s\n",
+          fragment_translation_probe_ordinal,
+          FunctionName ? FunctionName : "(null)",
+          static_cast<int>(errorObj->buf.size()), errorObj->buf.data());
+    }
     *ppError = (sm50_error_t)errorObj;
     return 1;
   }
@@ -1424,7 +1788,37 @@ AIRCONV_API int SM50Compile(
   if (shader_info.use_samplepos)
     linkSamplePos(*pModule);
 
+  if (fragment_translation_probe) {
+    const auto return_type = macrunner_fragment_translation_return_type(
+        *pModule, FunctionName);
+    const auto path = fragment_translation_probe_stem + ".preopt.ll";
+    const bool wrote =
+        macrunner_fragment_translation_write_module(path, *pModule);
+    std::fprintf(
+        stderr,
+        "macrunner-hb-fragment-translation: side=airconv phase=preopt "
+        "ordinal=%u function=%s return_type=%s path=%s wrote=%u\n",
+        fragment_translation_probe_ordinal,
+        FunctionName ? FunctionName : "(null)", return_type.c_str(),
+        path.c_str(), static_cast<unsigned>(wrote));
+  }
+
   runOptimizationPasses(*pModule);
+
+  if (fragment_translation_probe) {
+    const auto return_type = macrunner_fragment_translation_return_type(
+        *pModule, FunctionName);
+    const auto path = fragment_translation_probe_stem + ".postopt.ll";
+    const bool wrote =
+        macrunner_fragment_translation_write_module(path, *pModule);
+    std::fprintf(
+        stderr,
+        "macrunner-hb-fragment-translation: side=airconv phase=postopt "
+        "ordinal=%u function=%s return_type=%s path=%s wrote=%u\n",
+        fragment_translation_probe_ordinal,
+        FunctionName ? FunctionName : "(null)", return_type.c_str(),
+        path.c_str(), static_cast<unsigned>(wrote));
+  }
 
   // Serialize AIR
   auto compiled = new SM50CompiledBitcodeInternal();
@@ -1434,6 +1828,19 @@ AIRCONV_API int SM50Compile(
   metallib::MetallibWriter writer;
 
   writer.Write(*pModule, OS);
+
+  if (fragment_translation_probe) {
+    const auto path = fragment_translation_probe_stem + ".metallib";
+    const bool wrote = macrunner_fragment_translation_write_bytes(
+        path, compiled->vec.data(), compiled->vec.size());
+    std::fprintf(
+        stderr,
+        "macrunner-hb-fragment-translation: side=airconv phase=complete "
+        "ordinal=%u function=%s metallib_bytes=%zu path=%s wrote=%u\n",
+        fragment_translation_probe_ordinal,
+        FunctionName ? FunctionName : "(null)", compiled->vec.size(),
+        path.c_str(), static_cast<unsigned>(wrote));
+  }
 
   pModule.reset();
 

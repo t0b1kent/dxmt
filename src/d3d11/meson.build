@@ -63,7 +63,9 @@ d3d11_dep = declare_dependency(
   include_directories : [ dxmt_include_path ],
 )
 
-if wine_builtin_dll
+# MacRunner 2026-06-19: d3d11 must remain a normal PE. Wine's builtin postprocess
+# breaks HK boot under MacRunner (process hangs before D3D11CreateDevice).
+if false
 custom_target('postprocess_libd3d11',
   input : d3d11_dll,
   output: 'd3d11.dll.postproc',

@@ -6,10 +6,257 @@
 #include "dxmt_occlusion_query.hpp"
 #include "dxmt_presenter.hpp"
 #include "wsi_platform.hpp"
-#include <cstdint>
+#include <algorithm>
+#include <atomic>
 #include <cfloat>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 namespace dxmt {
+
+static bool
+macrunner_shader_inputs_probe_enabled() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("MACRUNNER_HB_SHADER_INPUTS_PROBE");
+    return value && value[0] && std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
+static bool
+macrunner_shader_inputs_probe_take_slot(unsigned *ordinal) {
+  static std::atomic_uint count{0};
+  static const unsigned limit = [] {
+    const char *value = std::getenv("MACRUNNER_HB_SHADER_INPUTS_BIND_MAX");
+    char *end = nullptr;
+    unsigned long parsed = value && value[0] ? std::strtoul(value, &end, 0) : 0;
+    return end && end != value && parsed > 0 && parsed <= 4096 ? unsigned(parsed) : 512u;
+  }();
+  if (!macrunner_shader_inputs_probe_enabled())
+    return false;
+  unsigned current = count.fetch_add(1, std::memory_order_relaxed);
+  if (ordinal)
+    *ordinal = current + 1;
+  return current < limit;
+}
+
+static const char *
+macrunner_shader_stage_name(PipelineStage stage) {
+  switch (stage) {
+  case PipelineStage::Vertex: return "vs";
+  case PipelineStage::Pixel: return "ps";
+  case PipelineStage::Geometry: return "gs";
+  case PipelineStage::Hull: return "hs";
+  case PipelineStage::Domain: return "ds";
+  case PipelineStage::Compute: return "cs";
+  }
+  return "unknown";
+}
+
+static uint64_t
+macrunner_shader_inputs_hash(const void *data, size_t length) {
+  const auto *bytes = static_cast<const uint8_t *>(data);
+  uint64_t hash = UINT64_C(1469598103934665603);
+  for (size_t i = 0; i < length; i++) {
+    hash ^= bytes[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static bool
+macrunner_vertex_data_probe_enabled() {
+  static const bool enabled = [] {
+    const char *value = std::getenv("MACRUNNER_HB_VERTEX_DATA_PROBE");
+    return value && value[0] && std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
+static bool
+macrunner_vertex_data_probe_take_buffer(unsigned *ordinal) {
+  static std::atomic_uint count{0};
+  static const unsigned limit = [] {
+    const char *value = std::getenv("MACRUNNER_HB_VERTEX_DATA_BUFFER_MAX");
+    char *end = nullptr;
+    unsigned long parsed = value && value[0] ? std::strtoul(value, &end, 0) : 0;
+    return end && end != value && parsed > 0 && parsed <= 65536
+               ? unsigned(parsed)
+               : 8192u;
+  }();
+  if (!macrunner_vertex_data_probe_enabled())
+    return false;
+  unsigned current = count.fetch_add(1, std::memory_order_relaxed);
+  if (ordinal)
+    *ordinal = current + 1;
+  return current < limit;
+}
+
+static void
+macrunner_vertex_data_log_encoded_buffer(
+    unsigned slot, Buffer *buffer, BufferAllocation *allocation,
+    uint64_t gpu_address, uint64_t allocation_offset,
+    uint64_t resource_offset, uint64_t byte_length, uint32_t stride) {
+  unsigned ordinal;
+  if (!macrunner_vertex_data_probe_take_buffer(&ordinal))
+    return;
+
+  auto flags = allocation->flags();
+  bool cpu_visible = !flags.test(BufferAllocationFlag::CpuInvisible) &&
+                     !flags.test(BufferAllocationFlag::GpuManaged);
+  const uint8_t *bytes = nullptr;
+  if (cpu_visible) {
+    bytes = static_cast<const uint8_t *>(
+        allocation->mappedMemory(allocation->currentSuballocation()));
+    if (bytes)
+      bytes += allocation_offset;
+  }
+  size_t scan = bytes ? std::min<uint64_t>(byte_length, 1024 * 1024) : 0;
+  size_t nonzero_bytes = 0;
+  for (size_t i = 0; i < scan; i++)
+    nonzero_bytes += bytes[i] != 0;
+
+  size_t vertices = 0, rgb_zero = 0, rgb_nonzero = 0, alpha_nonzero = 0;
+  if (stride >= 40) {
+    for (size_t base = 0; bytes && base + 40 <= scan; base += stride) {
+      float rgba[4];
+      std::memcpy(rgba, bytes + base + 24, sizeof(rgba));
+      if (!std::isfinite(rgba[0]) || !std::isfinite(rgba[1]) ||
+          !std::isfinite(rgba[2]) || !std::isfinite(rgba[3]))
+        continue;
+      vertices++;
+      bool nonzero = std::fabs(rgba[0]) >= 1.0e-20f ||
+                     std::fabs(rgba[1]) >= 1.0e-20f ||
+                     std::fabs(rgba[2]) >= 1.0e-20f;
+      rgb_nonzero += nonzero;
+      rgb_zero += !nonzero;
+      alpha_nonzero += std::fabs(rgba[3]) >= 1.0e-20f;
+    }
+  }
+
+  uint32_t v768[4] = {};
+  bool v768_valid = false;
+  if (stride == 88) {
+    size_t color_offset = size_t(768) * stride + 24;
+    if (bytes && color_offset + sizeof(v768) <= scan) {
+      std::memcpy(v768, bytes + color_offset, sizeof(v768));
+      v768_valid = true;
+    }
+  }
+
+  std::fprintf(
+      stderr,
+      "macrunner-hb-vertex-data: side=dxmt phase=encode ordinal=%u slot=%u "
+      "buffer=%p allocation=%p gpu=0x%llx allocation_gpu=0x%llx "
+      "allocation_offset=%llu resource_offset=%llu length=%llu stride=%u "
+      "cpu_visible=%u scan=%zu "
+      "hash=%016llx nonzero_bytes=%zu vertices=%zu rgb0=%zu rgbnz=%zu "
+      "alphanz=%zu v768_valid=%u v768=%08x,%08x,%08x,%08x\n",
+      ordinal, slot, buffer, allocation, (unsigned long long)gpu_address,
+      (unsigned long long)allocation->gpuAddress(),
+      (unsigned long long)allocation_offset,
+      (unsigned long long)resource_offset, (unsigned long long)byte_length,
+      stride, bytes != nullptr, scan,
+      (unsigned long long)(bytes ? macrunner_shader_inputs_hash(bytes, scan) : 0),
+      nonzero_bytes, vertices, rgb_zero, rgb_nonzero, alpha_nonzero,
+      v768_valid, v768[0], v768[1], v768[2], v768[3]);
+  std::fflush(stderr);
+}
+
+static void
+macrunner_shader_inputs_log_cbuffer(PipelineStage stage, unsigned slot,
+                                    BufferAllocation *allocation,
+                                    uint64_t gpu_address, uint64_t byte_offset,
+                                    uint64_t byte_length) {
+  unsigned ordinal;
+  if (!macrunner_shader_inputs_probe_take_slot(&ordinal))
+    return;
+
+  auto flags = allocation->flags();
+  bool cpu_visible = !flags.test(BufferAllocationFlag::CpuInvisible) &&
+                     !flags.test(BufferAllocationFlag::GpuManaged);
+  const uint8_t *bytes = nullptr;
+  if (cpu_visible) {
+    bytes = static_cast<const uint8_t *>(
+        allocation->mappedMemory(allocation->currentSuballocation()));
+    if (bytes)
+      bytes += byte_offset;
+  }
+
+  size_t scan = bytes ? std::min<uint64_t>(byte_length, 65536) : 0;
+  uint64_t hash = bytes ? macrunner_shader_inputs_hash(bytes, scan) : 0;
+  size_t nonzero_bytes = 0;
+  size_t finite_floats = 0, zero_floats = 0, nonfinite_floats = 0;
+  size_t first_matrix = SIZE_MAX;
+  uint32_t matrix_bits[16] = {};
+  if (bytes) {
+    for (size_t i = 0; i < scan; i++)
+      nonzero_bytes += bytes[i] != 0;
+    size_t float_count = scan / sizeof(float);
+    for (size_t i = 0; i < float_count; i++) {
+      float value;
+      std::memcpy(&value, bytes + i * sizeof(float), sizeof(value));
+      if (!std::isfinite(value))
+        nonfinite_floats++;
+      else {
+        finite_floats++;
+        zero_floats += std::fabs(value) < 1.0e-20f;
+      }
+    }
+    for (size_t base = 0; base + 16 <= float_count; base += 4) {
+      unsigned finite = 0, meaningful = 0;
+      float candidate[16];
+      for (unsigned j = 0; j < 16; j++) {
+        std::memcpy(&candidate[j], bytes + (base + j) * sizeof(float), sizeof(float));
+        finite += std::isfinite(candidate[j]);
+        meaningful += std::isfinite(candidate[j]) && std::fabs(candidate[j]) >= 1.0e-8f;
+      }
+      if (finite == 16 && meaningful >= 4) {
+        first_matrix = base * sizeof(float);
+        std::memcpy(matrix_bits, candidate, sizeof(matrix_bits));
+        break;
+      }
+    }
+  }
+
+  std::fprintf(
+      stderr,
+      "macrunner-hb-shader-inputs: side=dxmt kind=cb ordinal=%u stage=%s slot=%u "
+      "gpu=0x%llx offset=%llu length=%llu cpu_visible=%u scan=%zu hash=%016llx "
+      "nonzero_bytes=%zu finite_f32=%zu zero_f32=%zu nonfinite_f32=%zu "
+      "matrix_off=%lld matrix_bits="
+      "%08x,%08x,%08x,%08x;%08x,%08x,%08x,%08x;"
+      "%08x,%08x,%08x,%08x;%08x,%08x,%08x,%08x\n",
+      ordinal, macrunner_shader_stage_name(stage), slot,
+      (unsigned long long)gpu_address, (unsigned long long)byte_offset,
+      (unsigned long long)byte_length, bytes != nullptr, scan,
+      (unsigned long long)hash, nonzero_bytes, finite_floats, zero_floats,
+      nonfinite_floats, first_matrix == SIZE_MAX ? -1LL : (long long)first_matrix,
+      matrix_bits[0], matrix_bits[1], matrix_bits[2], matrix_bits[3],
+      matrix_bits[4], matrix_bits[5], matrix_bits[6], matrix_bits[7],
+      matrix_bits[8], matrix_bits[9], matrix_bits[10], matrix_bits[11],
+      matrix_bits[12], matrix_bits[13], matrix_bits[14], matrix_bits[15]);
+}
+
+static void
+macrunner_shader_inputs_log_resource(PipelineStage stage, unsigned slot,
+                                     const char *kind, uint32_t flags,
+                                     uint64_t q0, uint64_t q1, uint64_t q2,
+                                     uint32_t width, uint32_t height,
+                                     uint32_t format, bool bound) {
+  unsigned ordinal;
+  if (!macrunner_shader_inputs_probe_take_slot(&ordinal))
+    return;
+  std::fprintf(stderr,
+      "macrunner-hb-shader-inputs: side=dxmt kind=%s ordinal=%u stage=%s slot=%u "
+      "bound=%u flags=0x%x q0=0x%llx q1=0x%llx q2=0x%llx size=%ux%u format=%u\n",
+      kind, ordinal, macrunner_shader_stage_name(stage), slot, bound, flags,
+      (unsigned long long)q0, (unsigned long long)q1, (unsigned long long)q2,
+      width, height, format);
+}
 
 ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Device device, InternalCommandLibrary &lib) :
     emulated_cmd(device, lib, *this),
@@ -43,6 +290,21 @@ ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Devic
                                 WMTResourceHazardTrackingModeUntracked;
   dummy_cbuffer_ = device.newBuffer(dummy_cbuffer_info_);
   std::memset(dummy_cbuffer_info_.memory.get(), 0, 65536);
+  {
+    WMTTextureInfo info = {};
+    info.pixel_format = WMTPixelFormatRGBA8Unorm;
+    info.width = 1;
+    info.height = 1;
+    info.depth = 1;
+    info.array_length = 1;
+    info.type = WMTTextureType2D;
+    info.mipmap_level_count = 1;
+    info.sample_count = 1;
+    info.usage = WMTTextureUsageShaderRead;
+    info.options = WMTResourceStorageModeShared | WMTResourceHazardTrackingModeUntracked;
+    dummy_texture_ = device.newTexture(info);
+    dummy_texture_gpu_id_ = info.gpu_resource_id;
+  }
   cpu_buffer_chunks_.emplace_back();
   barrier_event_ = device_.newEvent();
   for (unsigned i = 0; i < kParityLane; i++) {
@@ -86,7 +348,11 @@ ArgumentEncodingContext::encodeVertexBuffers(uint32_t slot_mask, uint64_t offset
         access<PipelineStage::Vertex>(buffer, state.offset, valid_length, ResourceAccess::Read);
     entries[index].buffer_handle = buffer_alloc->gpuAddress() + buffer_offset + state.offset;
     entries[index].stride = state.stride;
-    entries[index++].length = valid_length;
+    entries[index].length = valid_length;
+    macrunner_vertex_data_log_encoded_buffer(
+        slot, buffer.ptr(), buffer_alloc, entries[index].buffer_handle,
+        buffer_offset + state.offset, state.offset, valid_length, state.stride);
+    index++;
     // FIXME: did we intended to use the whole buffer?
     makeResident<PipelineStage::Vertex, kind>(buffer.ptr());
   };
@@ -162,6 +428,9 @@ ArgumentEncodingContext::encodeConstantBuffers(const MTL_SHADER_REFLECTION *refl
       auto valid_length = argbuf->length() > cbuf.offset ? argbuf->length() - cbuf.offset : 0;
       auto [argbuf_alloc, argbuf_offset] = access<stage>(argbuf, cbuf.offset, valid_length, ResourceAccess::Read);
       encoded_buffer[arg.StructurePtrOffset] = argbuf_alloc->gpuAddress() + argbuf_offset + cbuf.offset;
+      macrunner_shader_inputs_log_cbuffer(stage, arg.SM50BindingSlot, argbuf_alloc,
+                                          encoded_buffer[arg.StructurePtrOffset],
+                                          cbuf.offset, valid_length);
       makeResident<stage, kind>(argbuf.ptr());
       break;
     }
@@ -250,6 +519,9 @@ ArgumentEncodingContext::encodeShaderResources(
 
   for (unsigned i = 0; i < BindingCount; i++) {
     auto &arg = arguments[i];
+    const char *probe_kind = "unknown";
+    bool probe_bound = false;
+    uint32_t probe_width = 0, probe_height = 0, probe_format = 0;
     switch (arg.Type) {
     case SM50BindingType::ConstantBuffer: {
       DXMT_UNREACHABLE
@@ -257,6 +529,8 @@ ArgumentEncodingContext::encodeShaderResources(
     case SM50BindingType::Sampler: {
       auto slot = 16 * unsigned(stage) + arg.SM50BindingSlot;
       auto &sampler = sampler_[slot].sampler;
+      probe_kind = "sampler";
+      probe_bound = sampler != nullptr;
       if (!sampler) {
         encoded_buffer[arg.StructurePtrOffset] = dummy_sampler_info_.gpu_resource_id;
         encoded_buffer[arg.StructurePtrOffset + 1] = dummy_sampler_info_.gpu_resource_id;
@@ -271,6 +545,13 @@ ArgumentEncodingContext::encodeShaderResources(
     case SM50BindingType::SRV: {
       auto slot = 128 * unsigned(stage) + arg.SM50BindingSlot;
       auto &srv = resview_[slot];
+      probe_kind = srv.buffer.ptr() ? "srv-buffer" : "srv-texture";
+      probe_bound = srv.buffer.ptr() || srv.texture.ptr();
+      if (srv.texture.ptr()) {
+        probe_width = srv.texture->width();
+        probe_height = srv.texture->height();
+        probe_format = unsigned(srv.texture->pixelFormat());
+      }
 
       if (arg.Flags & MTL_SM50_SHADER_ARGUMENT_BUFFER) {
         if (srv.buffer.ptr()) {
@@ -298,8 +579,9 @@ ArgumentEncodingContext::encodeShaderResources(
           encoded_buffer[arg.StructurePtrOffset + 1] = TextureMetadata(srv.texture->arrayLength(viewIdChecked), 0);
           makeResident<stage, kind>(srv.texture.ptr(), viewIdChecked);
         } else {
-          encoded_buffer[arg.StructurePtrOffset] = 0;
-          encoded_buffer[arg.StructurePtrOffset + 1] = 0;
+          encoded_buffer[arg.StructurePtrOffset] = dummy_texture_gpu_id_;
+          encoded_buffer[arg.StructurePtrOffset + 1] = TextureMetadata(1, 0);
+          makeResident<stage, kind>(dummy_texture_, GetResidencyMask<kind>(stage, true, false));
         }
       }
       if (arg.Flags & MTL_SM50_SHADER_ARGUMENT_UAV_COUNTER) {
@@ -309,6 +591,13 @@ ArgumentEncodingContext::encodeShaderResources(
     }
     case SM50BindingType::UAV: {
       auto &uav = UAVBindingSet[arg.SM50BindingSlot];
+      probe_kind = uav.buffer.ptr() ? "uav-buffer" : "uav-texture";
+      probe_bound = uav.buffer.ptr() || uav.texture.ptr();
+      if (uav.texture.ptr()) {
+        probe_width = uav.texture->width();
+        probe_height = uav.texture->height();
+        probe_format = unsigned(uav.texture->pixelFormat());
+      }
       bool read = (arg.Flags >> 10) & 1, write = (arg.Flags >> 10) & 2;
       int access_flags =  ((arg.Flags >> 10) & 3) | ResourceAccess::UAV;
 
@@ -357,6 +646,15 @@ ArgumentEncodingContext::encodeShaderResources(
       break;
     }
     }
+    unsigned table_words = arg.Type == SM50BindingType::Sampler ? 3 :
+        ((arg.Type == SM50BindingType::UAV &&
+          (arg.Flags & MTL_SM50_SHADER_ARGUMENT_UAV_COUNTER)) ? 3 : 2);
+    macrunner_shader_inputs_log_resource(
+        stage, arg.SM50BindingSlot, probe_kind, arg.Flags,
+        encoded_buffer[arg.StructurePtrOffset],
+        table_words >= 2 ? encoded_buffer[arg.StructurePtrOffset + 1] : 0,
+        table_words >= 3 ? encoded_buffer[arg.StructurePtrOffset + 2] : 0,
+        probe_width, probe_height, probe_format, probe_bound);
   }
 
   if constexpr (stage == PipelineStage::Compute) {
@@ -462,7 +760,10 @@ ArgumentEncodingContext::resolveTexture(
 };
 
 void
-ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata) {
+ArgumentEncodingContext::present(
+    Rc<Texture> &texture, Rc<Presenter> &presenter, double after,
+    DXMTPresentMetadata metadata, bool frame_dump, uint64_t frame_dump_frame
+) {
   assert(!encoder_current);
   auto encoder_info = allocate<PresentData>();
   encoder_info->type = EncoderType::Present;
@@ -472,6 +773,8 @@ ArgumentEncodingContext::present(Rc<Texture> &texture, Rc<Presenter> &presenter,
   encoder_info->presenter = presenter;
   encoder_info->after = after;
   encoder_info->metadata = metadata;
+  encoder_info->frame_dump = frame_dump;
+  encoder_info->frame_dump_frame = frame_dump_frame;
 
   encoder_current = encoder_info;
   encoder_info->backbuffer = access(texture, texture->fullView, ResourceAccess::Read).texture;
@@ -1016,6 +1319,9 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
     }
     case EncoderType::Present: {
       auto data = static_cast<PresentData *>(current);
+      if (data->frame_dump)
+        MTLCommandBuffer_scheduleFrameDump(cmdbuf.handle, data->backbuffer.handle,
+                                           data->frame_dump_frame);
       auto t0 = clock::now();
       auto drawable = data->presenter->encodeCommands(
           cmdbuf, data->backbuffer, data->metadata,
@@ -1028,7 +1334,9 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
       );
       auto t1 = clock::now();
       currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
-      if (data->after > 0)
+      if (!drawable) {
+        fprintf(stderr, "dxmt[present]: skipping presentDrawable because CAMetalLayer returned nil drawable\n");
+      } else if (data->after > 0)
         cmdbuf.presentDrawableAfterMinimumDuration(drawable, data->after);
       else
         cmdbuf.presentDrawable(drawable);

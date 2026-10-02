@@ -6,6 +6,7 @@
 #include "dxgi_object.hpp"
 #include "dxgi_output.hpp"
 #include "d3d11_context.hpp"
+#include "d3d11_drawtrace_totals.hpp"
 #include "dxmt_context.hpp"
 #include "dxmt_hud_state.hpp"
 #include "dxmt_statistics.hpp"
@@ -15,6 +16,7 @@
 #include "d3d11_device.hpp"
 #include "util_cpu_fence.hpp"
 #include "util_env.hpp"
+#include "util_error.hpp"
 #include "util_string.hpp"
 #include "util_win32_compat.h"
 #include "wsi_monitor.hpp"
@@ -24,6 +26,10 @@
 #include "dxmt_presenter.hpp"
 #include <atomic>
 #include <cfloat>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <format>
 
 /**
@@ -33,6 +39,116 @@ This value is 1 by default.
 constexpr size_t kSwapchainLatency = 1;
 
 namespace dxmt {
+
+static bool dxmt_hk_swap_trace_enabled() {
+  static int enabled = []() {
+    const char *env = std::getenv("MACRUNNER_DXMT_SWAPCHAIN_TRACE");
+    return env && env[0] && std::strcmp(env, "0") != 0;
+  }();
+  return enabled != 0;
+}
+
+static bool dxmt_hk_swap_trace_take_slot() {
+  if (!dxmt_hk_swap_trace_enabled())
+    return false;
+
+  static std::atomic<uint64_t> counter {0};
+  static uint64_t max_lines = []() {
+    const char *env = std::getenv("MACRUNNER_DXMT_SWAPCHAIN_TRACE_MAX");
+    if (!env || !env[0])
+      return UINT64_C(4096);
+    char *end = nullptr;
+    uint64_t parsed = std::strtoull(env, &end, 0);
+    if (end == env || parsed == 0)
+      return UINT64_C(4096);
+    if (parsed > UINT64_C(1000000))
+      return UINT64_C(1000000);
+    return parsed;
+  }();
+
+  return counter.fetch_add(1, std::memory_order_relaxed) < max_lines;
+}
+
+struct DxmtFrameDumpRequest {
+  bool selected = false;
+  uint64_t frame = 0;
+};
+
+static DxmtFrameDumpRequest dxmt_frame_dump_take_slot() {
+  static const bool enabled = []() {
+    const char *env = std::getenv("MACRUNNER_DXMT_FRAME_DUMP");
+    return env && env[0] && std::strcmp(env, "0") != 0;
+  }();
+  static std::atomic<uint64_t> present_count {0};
+
+  if (!enabled)
+    return {};
+
+  const uint64_t frame = present_count.fetch_add(1, std::memory_order_relaxed) + 1;
+  const bool selected = frame <= 5 || (frame % 200) == 0;
+  if (selected)
+    std::fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=requested\n",
+                 static_cast<unsigned long long>(frame));
+  return {selected, frame};
+}
+
+static const char *dxmt_hk_swap_trace_iid_name(REFIID riid) {
+  if (riid == __uuidof(IUnknown))
+    return "IUnknown";
+  if (riid == __uuidof(IDXGIObject))
+    return "IDXGIObject";
+  if (riid == __uuidof(IDXGIDeviceSubObject))
+    return "IDXGIDeviceSubObject";
+  if (riid == __uuidof(IDXGISwapChain))
+    return "IDXGISwapChain";
+  if (riid == __uuidof(IDXGISwapChain1))
+    return "IDXGISwapChain1";
+  if (riid == __uuidof(IDXGISwapChain2))
+    return "IDXGISwapChain2";
+  if (riid == __uuidof(IDXGISwapChain3))
+    return "IDXGISwapChain3";
+  if (riid == __uuidof(IDXGISwapChain4))
+    return "IDXGISwapChain4";
+  if (riid == __uuidof(ID3D11Resource))
+    return "ID3D11Resource";
+  if (riid == __uuidof(ID3D11Texture2D))
+    return "ID3D11Texture2D";
+  if (riid == __uuidof(ID3D11Texture2D1))
+    return "ID3D11Texture2D1";
+  return "other";
+}
+
+static void dxmt_hk_swap_trace_method(const char *method, const void *self,
+                                      HRESULT hr, uint64_t arg0, uint64_t arg1,
+                                      const char *iid, const void *out,
+                                      const void *ret0, const void *ret1,
+                                      const void *ret2, const void *ret3) {
+  if (!dxmt_hk_swap_trace_take_slot())
+    return;
+
+  std::fprintf(
+      stderr,
+      "dxmt-hk-swaptrace: kind=SwapChain method=%s tid=%lu this=%p hr=0x%08x "
+      "arg0=0x%llx arg1=0x%llx iid=%s out=%p ret0=%p ret1=%p ret2=%p ret3=%p\n",
+      method, (unsigned long)GetCurrentThreadId(), self,
+      (unsigned)static_cast<uint32_t>(hr), (unsigned long long)arg0,
+      (unsigned long long)arg1, iid ? iid : "-", out, ret0, ret1, ret2, ret3);
+}
+
+static void dxmt_hk_swap_trace_handle(const char *method, const void *self,
+                                      HANDLE handle, uint64_t arg0,
+                                      const void *ret0, const void *ret1,
+                                      const void *ret2, const void *ret3) {
+  if (!dxmt_hk_swap_trace_take_slot())
+    return;
+
+  std::fprintf(
+      stderr,
+      "dxmt-hk-swaptrace: kind=SwapChain method=%s tid=%lu this=%p handle=%p "
+      "arg0=0x%llx ret0=%p ret1=%p ret2=%p ret3=%p\n",
+      method, (unsigned long)GetCurrentThreadId(), self, handle,
+      (unsigned long long)arg0, ret0, ret1, ret2, ret3);
+}
 
 WMTPixelFormat ConvertSwapChainFormat(DXGI_FORMAT format) {
   switch (format) {
@@ -158,6 +274,8 @@ public:
     if (desc_.Width == 0 || desc_.Height == 0) {
       wsi::getWindowSize(hWnd, &desc_.Width, &desc_.Height);
     }
+    source_width_ = desc_.Width;
+    source_height_ = desc_.Height;
 
     if (pFullscreenDesc) {
       fullscreen_desc_ = *pFullscreenDesc;
@@ -198,8 +316,20 @@ public:
     if (desc_.BufferUsage & DXGI_USAGE_UNORDERED_ACCESS)
       backbuffer_desc_.BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
 
-    // FIXME: check HRESULT!
-    ResizeBuffers(0, desc_.Width, desc_.Height, DXGI_FORMAT_UNKNOWN, desc_.Flags);
+    HRESULT hr = ResizeBuffers(0, desc_.Width, desc_.Height, DXGI_FORMAT_UNKNOWN, desc_.Flags);
+    if (FAILED(hr)) {
+      // ResizeBuffers failed to allocate the backbuffer, so backbuffer_ is null.
+      // Letting the ctor return would hand out a half-built swapchain whose
+      // GetBuffer()/Present1() dereference the null backbuffer. Fail construction
+      // instead. The dtor does NOT run for a throwing ctor, so release the
+      // manually-managed handles here (same order as ~MTLD3D11SwapChain) before
+      // throwing; RAII members (presenter, fences, backbuffer_) clean themselves up.
+      ERR("MTLD3D11SwapChain: failed to allocate backbuffer (hr 0x", std::hex, (unsigned)hr, ")");
+      WMT::ReleaseMetalView(native_view_);
+      native_view_ = {};
+      CloseHandle(present_semaphore_);
+      throw MTLD3DError("MTLD3D11SwapChain: failed to allocate backbuffer");
+    }
     if (!fullscreen_desc_.Windowed)
       EnterFullscreenMode(nullptr);
   };
@@ -214,8 +344,16 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   QueryInterface(REFIID riid, void **ppvObject) final {
-    if (ppvObject == nullptr)
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    const char *iid = dxmt_hk_swap_trace_iid_name(riid);
+    if (ppvObject == nullptr) {
+      dxmt_hk_swap_trace_method("QueryInterface", this, E_POINTER, 0, 0, iid,
+                                nullptr, ret0, ret1, ret2, ret3);
       return E_POINTER;
+    }
 
     *ppvObject = nullptr;
 
@@ -226,6 +364,8 @@ public:
         riid == __uuidof(IDXGISwapChain3) ||
         riid == __uuidof(IDXGISwapChain4)) {
       *ppvObject = ref(this);
+      dxmt_hk_swap_trace_method("QueryInterface", this, S_OK, 0, 0, iid,
+                                *ppvObject, ret0, ret1, ret2, ret3);
       return S_OK;
     }
 
@@ -233,29 +373,62 @@ public:
       WARN("DXGISwapChain: Unknown interface query ", str::format(riid));
     }
 
+    dxmt_hk_swap_trace_method("QueryInterface", this, E_NOINTERFACE, 0, 0, iid,
+                              nullptr, ret0, ret1, ret2, ret3);
     return E_NOINTERFACE;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   GetParent(REFIID riid, void **parent) final {
-    return factory_->QueryInterface(riid, parent);
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    HRESULT hr = factory_->QueryInterface(riid, parent);
+    dxmt_hk_swap_trace_method("GetParent", this, hr, 0, 0,
+                              dxmt_hk_swap_trace_iid_name(riid),
+                              parent ? *parent : nullptr, ret0, ret1, ret2,
+                              ret3);
+    return hr;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   Present(UINT sync_interval, UINT flags) final {
-    return Present1(sync_interval, flags, nullptr);
+    dxmt_hk_drawtrace_record(DXMTHKDrawTraceCounter::Present);
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    HRESULT hr = Present1(sync_interval, flags, nullptr);
+    dxmt_hk_swap_trace_method("Present", this, hr, sync_interval, flags, "-",
+                              nullptr, ret0, ret1, ret2, ret3);
+    return hr;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   GetBuffer(UINT buffer_idx, REFIID riid, void **surface) final {
-    if (buffer_idx == 0) {
-      return backbuffer_->QueryInterface(riid, surface);
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    const char *iid = dxmt_hk_swap_trace_iid_name(riid);
+    InitReturnPtr(surface);
+    UINT exposed_buffer_count = desc_.BufferCount ? desc_.BufferCount : 1;
+    if (buffer_idx < exposed_buffer_count) {
+      HRESULT hr = backbuffer_->QueryInterface(riid, surface);
+      dxmt_hk_swap_trace_method("GetBuffer", this, hr, buffer_idx,
+                                exposed_buffer_count, iid,
+                                surface ? *surface : nullptr, ret0, ret1,
+                                ret2, ret3);
+      return hr;
     } else {
-      ERR("Non zero-index buffer is not supported");
-      return DXGI_ERROR_UNSUPPORTED;
+      dxmt_hk_swap_trace_method("GetBuffer", this, DXGI_ERROR_INVALID_CALL,
+                                buffer_idx, exposed_buffer_count, iid, nullptr,
+                                ret0, ret1, ret2, ret3);
+      return DXGI_ERROR_INVALID_CALL;
     }
   };
 
@@ -453,8 +626,16 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   GetDesc(DXGI_SWAP_CHAIN_DESC *pDesc) final {
-    if (!pDesc)
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    if (!pDesc) {
+      dxmt_hk_swap_trace_method("GetDesc", this, E_INVALIDARG, 0, 0,
+                                "DXGI_SWAP_CHAIN_DESC", nullptr, ret0, ret1,
+                                ret2, ret3);
       return E_INVALIDARG;
+    }
 
     pDesc->BufferDesc.Width = desc_.Width;
     pDesc->BufferDesc.Height = desc_.Height;
@@ -469,6 +650,9 @@ public:
     pDesc->Windowed = fullscreen_desc_.Windowed;
     pDesc->SwapEffect = desc_.SwapEffect;
     pDesc->Flags = desc_.Flags;
+    dxmt_hk_swap_trace_method("GetDesc", this, S_OK, desc_.Width, desc_.Height,
+                              "DXGI_SWAP_CHAIN_DESC", pDesc, ret0, ret1, ret2,
+                              ret3);
     return S_OK;
   };
 
@@ -476,6 +660,10 @@ public:
   STDMETHODCALLTYPE
   ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format,
                 UINT flags) final {
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
     /* BufferCount ignored */
     if (Width == 0 || Height == 0) {
       wsi::getWindowSize(hWnd, &desc_.Width, &desc_.Height);
@@ -496,6 +684,10 @@ public:
       backbuffer_desc_.Width = desc_.Width;
       backbuffer_desc_.Height = desc_.Height;
     }
+    if (source_width_ == 0 || source_width_ > desc_.Width)
+      source_width_ = desc_.Width;
+    if (source_height_ == 0 || source_height_ > desc_.Height)
+      source_height_ = desc_.Height;
 
     ApplyLayerProps();
 
@@ -504,8 +696,12 @@ public:
     backbuffer_ = nullptr;
     if (FAILED(dxmt::CreateDeviceTexture2D(
             device_, &backbuffer_desc_, nullptr, reinterpret_cast<ID3D11Texture2D1 **>(&backbuffer_)
-        )))
+        ))) {
+      dxmt_hk_swap_trace_method("ResizeBuffers", this, E_FAIL, desc_.Width,
+                                desc_.Height, "CreateDeviceTexture2D", nullptr,
+                                ret0, ret1, ret2, ret3);
       return E_FAIL;
+    }
     // CreateDeviceTexture2D returns public reference, change to private one here
     backbuffer_->AddRefPrivate();
     backbuffer_->Release();
@@ -517,8 +713,12 @@ public:
       upscaled_backbuffer_ = nullptr;
       if (FAILED(dxmt::CreateDeviceTexture2D(
               device_, &upscaled_desc_, nullptr, reinterpret_cast<ID3D11Texture2D1 **>(&upscaled_backbuffer_)
-          )))
+          ))) {
+        dxmt_hk_swap_trace_method("ResizeBuffers", this, E_FAIL, desc_.Width,
+                                  desc_.Height, "CreateDeviceTexture2D.upscaled",
+                                  nullptr, ret0, ret1, ret2, ret3);
         return E_FAIL;
+      }
 
       WMTFXSpatialScalerInfo info;
       info.input_height = desc_.Height;
@@ -531,17 +731,32 @@ public:
       D3D11_ASSERT(metalfx_scaler && "otherwise metalfx failed to initialize");
     }
 
+    dxmt_hk_swap_trace_method("ResizeBuffers", this, S_OK, desc_.Width,
+                              desc_.Height, "backbuffer", backbuffer_.ptr(),
+                              ret0, ret1, ret2, ret3);
     return S_OK;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   ResizeTarget(const DXGI_MODE_DESC *pDesc) final {
-    if (!pDesc)
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    if (!pDesc) {
+      dxmt_hk_swap_trace_method("ResizeTarget", this, DXGI_ERROR_INVALID_CALL,
+                                0, 0, "DXGI_MODE_DESC", nullptr, ret0, ret1,
+                                ret2, ret3);
       return DXGI_ERROR_INVALID_CALL;
+    }
 
-    if (!wsi::isWindow(hWnd))
+    if (!wsi::isWindow(hWnd)) {
+      dxmt_hk_swap_trace_method("ResizeTarget", this, DXGI_ERROR_INVALID_CALL,
+                                pDesc->Width, pDesc->Height, "DXGI_MODE_DESC",
+                                nullptr, ret0, ret1, ret2, ret3);
       return DXGI_ERROR_INVALID_CALL;
+    }
 
     std::unique_lock<dxmt::mutex> lock(mutex_);
 
@@ -570,6 +785,9 @@ public:
       wsi::updateFullscreenWindow(monitor_, hWnd, false);
     }
 
+    dxmt_hk_swap_trace_method("ResizeTarget", this, S_OK, pDesc->Width,
+                              pDesc->Height, "DXGI_MODE_DESC", nullptr, ret0,
+                              ret1, ret2, ret3);
     return S_OK;
   };
 
@@ -661,10 +879,20 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   GetDesc1(DXGI_SWAP_CHAIN_DESC1 *pDesc) final {
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
     if (pDesc == NULL) {
+      dxmt_hk_swap_trace_method("GetDesc1", this, E_POINTER, 0, 0,
+                                "DXGI_SWAP_CHAIN_DESC1", nullptr, ret0, ret1,
+                                ret2, ret3);
       return E_POINTER;
     }
     *pDesc = desc_;
+    dxmt_hk_swap_trace_method("GetDesc1", this, S_OK, desc_.Width,
+                              desc_.Height, "DXGI_SWAP_CHAIN_DESC1", pDesc,
+                              ret0, ret1, ret2, ret3);
     return S_OK;
   };
 
@@ -691,8 +919,9 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   GetCoreWindow(REFIID refiid, void **ppUnk) final {
-    ERR("Not implemented");
-    return E_NOTIMPL;
+    (void)refiid;
+    InitReturnPtr(ppUnk);
+    return DXGI_ERROR_INVALID_CALL;
   };
 
   class SyncFrameState {
@@ -731,8 +960,17 @@ public:
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags,
            const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
-    if (SyncInterval > 4)
+    dxmt_hk_drawtrace_record(DXMTHKDrawTraceCounter::Present1);
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    if (SyncInterval > 4) {
+      dxmt_hk_swap_trace_method("Present1", this, DXGI_ERROR_INVALID_CALL,
+                                SyncInterval, PresentFlags, "-", nullptr, ret0,
+                                ret1, ret2, ret3);
       return DXGI_ERROR_INVALID_CALL;
+    }
 
     HRESULT hr = S_OK;
     bool window_minimized = wsi::isMinimized(hWnd);
@@ -744,8 +982,12 @@ public:
                           && !fullscreen_desc_.Windowed && !window_minimized && !wsi::isForeground(hWnd);
     if (hr == S_OK && should_exit_fs)
       hr = DXGI_STATUS_OCCLUDED;
-    if (PresentFlags & DXGI_PRESENT_TEST)
+    if (PresentFlags & DXGI_PRESENT_TEST) {
+      dxmt_hk_swap_trace_method("Present1", this, hr, SyncInterval,
+                                PresentFlags, "DXGI_PRESENT_TEST", nullptr,
+                                ret0, ret1, ret2, ret3);
       return hr;
+    }
 
     if (should_exit_fs)
       SetFullscreenState(FALSE, nullptr);
@@ -756,6 +998,9 @@ public:
     if (hr == DXGI_STATUS_OCCLUDED) {
       // flush commands without presenting
       device_context_->Commit();
+      dxmt_hk_swap_trace_method("Present1", this, hr, SyncInterval,
+                                PresentFlags, "DXGI_STATUS_OCCLUDED", nullptr,
+                                ret0, ret1, ret2, ret3);
       return hr;
     }
 
@@ -772,12 +1017,14 @@ public:
       auto output = static_cast<MTLDXGIOutput *>(target_.ptr());
       presenter->changeGammaRamp(output->GetGammaRamp());
     }
+    const auto frame_dump = dxmt_frame_dump_take_slot();
     if constexpr (EnableMetalFX) {
       chunk->emitcc([
         this, vsync_duration, backbuffer = backbuffer_->texture(),
         sync_state = SyncFrame(++presentation_count_),
         upscaled = upscaled_backbuffer_->texture(),
-        scaler = this->metalfx_scaler, state = presenter->synchronizeLayerProperties()
+        scaler = this->metalfx_scaler, state = presenter->synchronizeLayerProperties(),
+        frame_dump
       ](ArgumentEncodingContext &ctx) mutable {
         auto &scaler_info = ctx.currentFrameStatistics().last_scaler_info;
         scaler_info.type = ScalerType::Spatial;
@@ -786,7 +1033,8 @@ public:
         scaler_info.output_width = upscaled->width();
         scaler_info.output_height = upscaled->height();
         ctx.upscale(backbuffer, upscaled, scaler);
-        ctx.present(upscaled, presenter, vsync_duration, state.metadata);
+        ctx.present(upscaled, presenter, vsync_duration, state.metadata,
+                    frame_dump.selected, frame_dump.frame);
         ReleaseSemaphore(present_semaphore_, 1, nullptr);
         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
       });
@@ -794,9 +1042,10 @@ public:
       chunk->emitcc([
         this, vsync_duration, state = presenter->synchronizeLayerProperties(),
         sync_state = SyncFrame(++presentation_count_),
-        backbuffer = backbuffer_->texture()
+        backbuffer = backbuffer_->texture(), frame_dump
       ](ArgumentEncodingContext &ctx) mutable {
-        ctx.present(backbuffer, presenter, vsync_duration, state.metadata);
+        ctx.present(backbuffer, presenter, vsync_duration, state.metadata,
+                    frame_dump.selected, frame_dump.frame);
         ReleaseSemaphore(present_semaphore_, 1, nullptr);
         this->UpdateStatistics(ctx.queue().statistics, ctx.currentFrameId());
       });
@@ -807,6 +1056,8 @@ public:
 
     cmd_queue.PresentBoundary();
 
+    dxmt_hk_swap_trace_method("Present1", this, hr, SyncInterval, PresentFlags,
+                              "-", nullptr, ret0, ret1, ret2, ret3);
     return hr;
   };
 
@@ -897,15 +1148,18 @@ public:
   STDMETHODCALLTYPE
   GetRestrictToOutput(IDXGIOutput **ppRestrictToOutput) final {
     InitReturnPtr(ppRestrictToOutput);
-    ERR("DXGISwapChain1::GetRestrictToOutput: not implemented");
-    return E_NOTIMPL;
+    if (!ppRestrictToOutput)
+      return DXGI_ERROR_INVALID_CALL;
+    return S_OK;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   SetBackgroundColor(const DXGI_RGBA *pColor) final {
-    ERR("DXGISwapChain1::SetBackgroundColor: not implemented");
-    return E_NOTIMPL;
+    if (!pColor)
+      return E_INVALIDARG;
+    background_color_ = *pColor;
+    return S_OK;
   };
 
   HRESULT
@@ -913,16 +1167,23 @@ public:
   GetBackgroundColor(DXGI_RGBA *pColor) final {
     if (!pColor)
       return E_INVALIDARG;
-    // TODO(swapchain): check if native returns transparent or opaque black
-    *pColor = {0, 0, 0, 0};
+    *pColor = background_color_;
     return S_OK;
   };
 
   HRESULT
   STDMETHODCALLTYPE
   SetRotation(DXGI_MODE_ROTATION Rotation) final {
-    ERR("DXGISwapChain1::SetRotation: not implemented");
-    return E_NOTIMPL;
+    switch (Rotation) {
+    case DXGI_MODE_ROTATION_IDENTITY:
+    case DXGI_MODE_ROTATION_ROTATE90:
+    case DXGI_MODE_ROTATION_ROTATE180:
+    case DXGI_MODE_ROTATION_ROTATE270:
+      rotation_ = Rotation;
+      return S_OK;
+    default:
+      return DXGI_ERROR_INVALID_CALL;
+    }
   };
 
   HRESULT
@@ -930,27 +1191,39 @@ public:
   GetRotation(DXGI_MODE_ROTATION *pRotation) final {
     if (!pRotation)
       return E_INVALIDARG;
-    *pRotation = DXGI_MODE_ROTATION_IDENTITY;
+    *pRotation = rotation_;
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   SetSourceSize(UINT Width, UINT Height) override {
-    ERR("DXGISwapChain2::SetSourceSize: not implemented");
-    return E_NOTIMPL;
+    if (Width == 0 || Height == 0 || Width > desc_.Width ||
+        Height > desc_.Height)
+      return DXGI_ERROR_INVALID_CALL;
+
+    source_width_ = Width;
+    source_height_ = Height;
+    return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetSourceSize(UINT *pWidth, UINT *pHeight) override {
     if (pWidth)
-      *pWidth = desc_.Width;
+      *pWidth = source_width_;
     if (pHeight)
-      *pHeight = desc_.Height;
+      *pHeight = source_height_;
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT max_latency) override {
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
     if (max_latency == 0 || max_latency > DXGI_MAX_SWAP_CHAIN_BUFFERS) {
+      dxmt_hk_swap_trace_method("SetMaximumFrameLatency", this, E_INVALIDARG,
+                                max_latency, frame_latency, "-", nullptr, ret0,
+                                ret1, ret2, ret3);
       return E_INVALIDARG;
     }
     if (max_latency > frame_latency) {
@@ -959,18 +1232,34 @@ public:
     }
     frame_latency = max_latency;
 
+    dxmt_hk_swap_trace_method("SetMaximumFrameLatency", this, S_OK,
+                              max_latency, frame_latency, "-", nullptr, ret0,
+                              ret1, ret2, ret3);
     return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT *max_latency) override {
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
     if (max_latency) {
       *max_latency = frame_latency;
     }
+    dxmt_hk_swap_trace_method("GetMaximumFrameLatency", this, S_OK,
+                              frame_latency, 0, "-", max_latency, ret0, ret1,
+                              ret2, ret3);
     return S_OK;
   };
 
   HANDLE STDMETHODCALLTYPE GetFrameLatencyWaitableObject() override {
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
     if (!(desc_.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)) {
+      dxmt_hk_swap_trace_handle("GetFrameLatencyWaitableObject", this, nullptr,
+                                desc_.Flags, ret0, ret1, ret2, ret3);
       return nullptr;
     }
 
@@ -979,22 +1268,30 @@ public:
 
     if (!DuplicateHandle(processHandle, present_semaphore_, processHandle,
                          &result, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+      dxmt_hk_swap_trace_handle("GetFrameLatencyWaitableObject", this, nullptr,
+                                desc_.Flags, ret0, ret1, ret2, ret3);
       return nullptr;
     }
 
+    dxmt_hk_swap_trace_handle("GetFrameLatencyWaitableObject", this, result,
+                              desc_.Flags, ret0, ret1, ret2, ret3);
     return result;
   };
 
   HRESULT STDMETHODCALLTYPE
   SetMatrixTransform(const DXGI_MATRIX_3X2_F *matrix) override {
-    ERR("DXGISwapChain2::SetMatrixTransform: not implemented");
-    return E_NOTIMPL;
+    if (!matrix)
+      return DXGI_ERROR_INVALID_CALL;
+    matrix_transform_ = *matrix;
+    return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE
   GetMatrixTransform(DXGI_MATRIX_3X2_F *matrix) override {
-    ERR("DXGISwapChain2::GetMatrixTransform: not implemented");
-    return E_NOTIMPL;
+    if (!matrix)
+      return DXGI_ERROR_INVALID_CALL;
+    *matrix = matrix_transform_;
+    return S_OK;
   };
 
   HRESULT STDMETHODCALLTYPE CheckColorSpaceSupport(
@@ -1013,11 +1310,19 @@ public:
   }
 
   HRESULT STDMETHODCALLTYPE ResizeBuffers1(UINT BufferCount, UINT Width, UINT Height,
-                         DXGI_FORMAT Format, UINT SwapChainFlags,
-                         const UINT *pCreationNodeMask,
-                         IUnknown *const *ppPresentQueue) override {
-    WARN("DXGISwapChain3::ResizeBuffers1: ignoring d3d12 related parameters");
-    return ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+                          DXGI_FORMAT Format, UINT SwapChainFlags,
+                          const UINT *pCreationNodeMask,
+                          IUnknown *const *ppPresentQueue) override {
+    (void)pCreationNodeMask;
+    (void)ppPresentQueue;
+    const void *ret0 = __builtin_return_address(0);
+    const void *ret1 = __builtin_return_address(1);
+    const void *ret2 = __builtin_return_address(2);
+    const void *ret3 = __builtin_return_address(3);
+    HRESULT hr = ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
+    dxmt_hk_swap_trace_method("ResizeBuffers1", this, hr, Width, Height, "-",
+                              nullptr, ret0, ret1, ret2, ret3);
+    return hr;
   }
 
   HRESULT STDMETHODCALLTYPE
@@ -1032,15 +1337,30 @@ public:
   HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type,
                                            UINT Size,
                                            void *pMetaData) override {
-                                            return S_OK;
     if (Type == DXGI_HDR_METADATA_TYPE_NONE) {
       presenter->changeHDRMetadata(nullptr);
       return S_OK;
     }
     if (Type == DXGI_HDR_METADATA_TYPE_HDR10) {
-      if (Size != sizeof(WMTHDRMetadata))
+      if (!pMetaData || Size != sizeof(DXGI_HDR_METADATA_HDR10))
         return E_INVALIDARG;
-      presenter->changeHDRMetadata(reinterpret_cast<const WMTHDRMetadata *>(pMetaData));
+      const auto *dxgi_metadata =
+          reinterpret_cast<const DXGI_HDR_METADATA_HDR10 *>(pMetaData);
+      WMTHDRMetadata metadata = {};
+      metadata.red_primary[0] = dxgi_metadata->RedPrimary[0];
+      metadata.red_primary[1] = dxgi_metadata->RedPrimary[1];
+      metadata.green_primary[0] = dxgi_metadata->GreenPrimary[0];
+      metadata.green_primary[1] = dxgi_metadata->GreenPrimary[1];
+      metadata.blue_primary[0] = dxgi_metadata->BluePrimary[0];
+      metadata.blue_primary[1] = dxgi_metadata->BluePrimary[1];
+      metadata.white_point[0] = dxgi_metadata->WhitePoint[0];
+      metadata.white_point[1] = dxgi_metadata->WhitePoint[1];
+      metadata.max_mastering_luminance = dxgi_metadata->MaxMasteringLuminance;
+      metadata.min_mastering_luminance = dxgi_metadata->MinMasteringLuminance;
+      metadata.max_content_light_level = dxgi_metadata->MaxContentLightLevel;
+      metadata.max_frame_average_light_level =
+          dxgi_metadata->MaxFrameAverageLightLevel;
+      presenter->changeHDRMetadata(&metadata);
       return S_OK;
     }
     return DXGI_ERROR_UNSUPPORTED;
@@ -1061,6 +1381,12 @@ private:
   DXGI_SWAP_CHAIN_DESC1 desc_;
   DXGI_SWAP_CHAIN_FULLSCREEN_DESC fullscreen_desc_;
   D3D11_TEXTURE2D_DESC1 backbuffer_desc_;
+  UINT source_width_ = 0;
+  UINT source_height_ = 0;
+  DXGI_MATRIX_3X2_F matrix_transform_ = {1.0f, 0.0f, 0.0f,
+                                         1.0f, 0.0f, 0.0f};
+  DXGI_RGBA background_color_ = {0.0f, 0.0f, 0.0f, 0.0f};
+  DXGI_MODE_ROTATION rotation_ = DXGI_MODE_ROTATION_IDENTITY;
   IMTLD3D11DeviceContext* device_context_;
   Com<D3D11ResourceCommon, false> backbuffer_;
   HANDLE present_semaphore_;
@@ -1113,20 +1439,27 @@ CreateSwapChain(
       pDesc->BufferCount != 1) {
     WARN("CreateSwapChain: unsupported swap effect ", pDesc->SwapEffect, " with backbuffer size ", pDesc->BufferCount);
   }
-  if (env::getEnvVar("DXMT_METALFX_SPATIAL_SWAPCHAIN") == "1") {
-    if (pDevice->GetMTLDevice().supportsFXSpatialScaler()) {
-      *ppSwapChain = new MTLD3D11SwapChain<true>(
-          pFactory, pDevice, layer_factory.ptr(), hWnd, pDesc, pFullscreenDesc
-      );
-      return S_OK;
-    } else {
-      WARN("MetalFX spatial scaler is not supported on this device");
+  try {
+    if (env::getEnvVar("DXMT_METALFX_SPATIAL_SWAPCHAIN") == "1") {
+      if (pDevice->GetMTLDevice().supportsFXSpatialScaler()) {
+        *ppSwapChain = new MTLD3D11SwapChain<true>(
+            pFactory, pDevice, layer_factory.ptr(), hWnd, pDesc, pFullscreenDesc
+        );
+        return S_OK;
+      } else {
+        WARN("MetalFX spatial scaler is not supported on this device");
+      }
     }
+    *ppSwapChain = new MTLD3D11SwapChain<false>(
+        pFactory, pDevice, layer_factory.ptr(), hWnd, pDesc, pFullscreenDesc
+    );
+    return S_OK;
+  } catch (const MTLD3DError &err) {
+    // A throwing ctor frees its own storage; *ppSwapChain stays the null set by
+    // InitReturnPtr above, so the caller gets a clean error, not a half-built object.
+    ERR(err.message());
+    return E_FAIL;
   }
-  *ppSwapChain = new MTLD3D11SwapChain<false>(
-      pFactory, pDevice, layer_factory.ptr(), hWnd, pDesc, pFullscreenDesc
-  );
-  return S_OK;
 };
 
 } // namespace dxmt

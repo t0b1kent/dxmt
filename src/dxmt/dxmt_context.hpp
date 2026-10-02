@@ -223,6 +223,8 @@ struct PresentData : EncoderData {
   Rc<Presenter> presenter;
   double after;
   DXMTPresentMetadata metadata;
+  bool frame_dump;
+  uint64_t frame_dump_frame;
 };
 
 struct SpatialUpscaleData : EncoderData {
@@ -598,7 +600,11 @@ public:
     return (new (allocate_cpu_heap(sizeof(T), alignof(T))) T());
   };
 
-  void present(Rc<Texture> &texture, Rc<Presenter> &presenter, double after, DXMTPresentMetadata metadata);
+  void present(
+      Rc<Texture> &texture, Rc<Presenter> &presenter, double after,
+      DXMTPresentMetadata metadata, bool frame_dump = false,
+      uint64_t frame_dump_frame = 0
+  );
 
   void upscale(Rc<Texture> &texture, Rc<Texture> &upscaled, Rc<SpatialScaler> &scaler);
 
@@ -799,6 +805,8 @@ private:
   WMT::Reference<WMT::Buffer> dummy_cbuffer_;
   void *dummy_cbuffer_host_;
   WMTBufferInfo dummy_cbuffer_info_;
+  WMT::Reference<WMT::Texture> dummy_texture_;
+  uint64_t dummy_texture_gpu_id_;
 
   EncoderData encoder_head = {EncoderType::Null, nullptr, ~0ull};
   EncoderData *encoder_last = &encoder_head;

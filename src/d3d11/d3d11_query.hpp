@@ -59,17 +59,6 @@ protected:
   MTLD3D10Query d3d10_;
 };
 
-template <typename DataType>
-class MTLD3D11DummyQuery : public MTLD3DQueryBase<ID3D11Query1> {
-public:
-  MTLD3D11DummyQuery(MTLD3D11Device *pDevice, const D3D11_QUERY_DESC1 *desc)
-      : MTLD3DQueryBase<ID3D11Query1>(pDevice, desc) {}
-
-  virtual UINT STDMETHODCALLTYPE GetDataSize() override {
-    return sizeof(DataType);
-  };
-};
-
 /**
 
 From D3D11.3 Functional Spec:
@@ -113,6 +102,41 @@ enum class EventState {
   Signaled,
   Stall,
   Invalid,
+};
+
+template <typename DataType>
+class MTLD3D11ImmediateQuery : public MTLD3DQueryBase<ID3D11Query1> {
+public:
+  MTLD3D11ImmediateQuery(MTLD3D11Device *pDevice, const D3D11_QUERY_DESC1 *desc)
+      : MTLD3DQueryBase<ID3D11Query1>(pDevice, desc) {}
+
+  virtual UINT STDMETHODCALLTYPE GetDataSize() override {
+    return sizeof(DataType);
+  };
+
+  void Begin() {
+    state_ = QueryState::Building;
+    data_ = {};
+  }
+
+  void End(const DataType &data = {}) {
+    state_ = QueryState::Signaled;
+    data_ = data;
+  }
+
+  HRESULT GetData(void *data) {
+    if (state_ == QueryState::Undefined)
+      return DXGI_ERROR_INVALID_CALL;
+    if (state_ == QueryState::Building)
+      return S_FALSE;
+    if (data)
+      *static_cast<DataType *>(data) = data_;
+    return S_OK;
+  }
+
+private:
+  QueryState state_ = QueryState::Undefined;
+  DataType data_ = {};
 };
 
 constexpr size_t kEventStallThreshold = 64;

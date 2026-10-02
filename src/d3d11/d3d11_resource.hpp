@@ -255,9 +255,11 @@ public:
     *pResourceDimension = tag::dimension;
   }
 
-  void STDMETHODCALLTYPE SetEvictionPriority(UINT EvictionPriority) final {}
+  void STDMETHODCALLTYPE SetEvictionPriority(UINT EvictionPriority) final {
+    eviction_priority_ = EvictionPriority;
+  }
 
-  UINT STDMETHODCALLTYPE GetEvictionPriority() final { return DXGI_RESOURCE_PRIORITY_NORMAL; }
+  UINT STDMETHODCALLTYPE GetEvictionPriority() final { return eviction_priority_; }
 
   virtual HRESULT GetDeviceInterface(REFIID riid, void **ppDevice) {
     Com<ID3D11Device> device;
@@ -269,7 +271,14 @@ public:
     if (!pUsage) {
       return E_INVALIDARG;
     }
-    *pUsage = 0;
+    DXGI_USAGE usage = 0;
+    if (desc.BindFlags & D3D11_BIND_SHADER_RESOURCE)
+      usage |= DXGI_USAGE_SHADER_INPUT;
+    if (desc.BindFlags & (D3D11_BIND_RENDER_TARGET | D3D11_BIND_DEPTH_STENCIL))
+      usage |= DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    if (desc.BindFlags & D3D11_BIND_UNORDERED_ACCESS)
+      usage |= DXGI_USAGE_UNORDERED_ACCESS;
+    *pUsage = usage;
     return S_OK;
   }
 
@@ -308,6 +317,7 @@ protected:
   tag::DESC1 desc;
   std::unique_ptr<IDXGIResource1> dxgi_resource;
   tag::D3D10_IMPL d3d10;
+  UINT eviction_priority_ = DXGI_RESOURCE_PRIORITY_NORMAL;
 };
 
 template <typename RESOURCE_IMPL_ = ID3D11Resource,

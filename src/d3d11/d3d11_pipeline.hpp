@@ -34,6 +34,7 @@ struct MTL_COMPUTE_PIPELINE_DESC {
 
 struct MTL_COMPILED_GRAPHICS_PIPELINE {
   WMT::RenderPipelineState PipelineState;
+  uint64_t MacRunnerProbeID;
 };
 
 struct MTL_COMPILED_COMPUTE_PIPELINE {
@@ -139,6 +140,10 @@ template <> struct equal_to<MTL_GRAPHICS_PIPELINE_DESC> {
 } // namespace std
 
 namespace dxmt {
+
+bool MacRunnerFragmentOutputProbeEnabled();
+void MacRunnerFragmentOutputProbeLogBind(uint64_t pso_id,
+                                         DXGI_FORMAT d3d_rt0_format);
 
 class MTLCompiledGraphicsPipeline : public ThreadpoolWork {
 public:

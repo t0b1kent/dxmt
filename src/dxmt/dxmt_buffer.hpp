@@ -64,6 +64,13 @@ public:
     return reinterpret_cast<void *>(reinterpret_cast<std::uintptr_t>(mappedMemory_) + sub * suballocation_size_);
   }
 
+  /* read-only null check so diagnostic probes never deref a null base
+     through mappedMemory(sub) with sub > 0 (added for the HK VS-CB dump) */
+  bool
+  hasMappedMemory() const noexcept {
+    return mappedMemory_ != nullptr;
+  }
+
   uint64_t
   gpuAddress() const noexcept {
     return gpuAddress_;

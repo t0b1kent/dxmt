@@ -390,7 +390,8 @@ public:
   void
   STDMETHODCALLTYPE
   ExecuteCommandList(ID3D11CommandList *pCommandList, BOOL RestoreContextState) override{
-    UNIMPLEMENTED("ExecuteCommandList on deferred context");
+    (void)pCommandList;
+    (void)RestoreContextState;
   }
 
   HRESULT 

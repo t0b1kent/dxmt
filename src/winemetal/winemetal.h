@@ -794,6 +794,11 @@ struct WMTRenderPipelineInfo {
   enum WMTPixelFormat stencil_pixel_format;
   obj_handle_t vertex_function;
   obj_handle_t fragment_function;
+  /* Default-null diagnostic siblings. Excluded from the logical PSO hash. */
+  obj_handle_t causal_vertex_output_function;
+  obj_handle_t causal_fragment_capture_function;
+  obj_handle_t causal_fragment_magenta_function;
+  obj_handle_t causal_fragment_input_function;
   uint32_t immutable_vertex_buffers;
   uint32_t immutable_fragment_buffers;
   enum WMTPrimitiveTopologyClass input_primitive_topology;
@@ -807,6 +812,70 @@ struct WMTRenderPipelineInfo {
   bool fail_on_binary_archive_miss;
   uint8_t padding[6];
 };
+
+/*
+ * A pointer-free identity for diagnostic A/B comparisons.  Keep this helper in
+ * the shared ABI header so the D3D11 producer and the native Metal consumer
+ * hash exactly the same semantic pipeline state.  Binary archive handles and
+ * padding are deliberately excluded: neither changes shader output semantics,
+ * and both may differ between otherwise identical processes.
+ */
+static inline uint64_t WMTProbeHashU64(uint64_t hash, uint64_t value) {
+  for (unsigned i = 0; i < 8; i++) {
+    hash ^= (uint8_t)(value >> (i * 8));
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static inline uint64_t WMTProbeHashString(uint64_t hash, const char *value) {
+  if (value) {
+    while (*value) {
+      hash ^= (uint8_t)*value++;
+      hash *= UINT64_C(1099511628211);
+    }
+  }
+  return WMTProbeHashU64(hash, UINT64_C(0xff));
+}
+
+static inline uint64_t WMTComputeStringProbeHash(const char *value) {
+  return WMTProbeHashString(UINT64_C(14695981039346656037), value);
+}
+
+static inline uint64_t WMTComputeRenderPipelineProbeID(
+    const struct WMTRenderPipelineInfo *info, const char *vertex_name,
+    const char *fragment_name) {
+  uint64_t hash = UINT64_C(14695981039346656037);
+  hash = WMTProbeHashString(hash, vertex_name);
+  hash = WMTProbeHashString(hash, fragment_name);
+  for (unsigned i = 0; i < 8; i++) {
+    const struct WMTColorAttachmentBlendInfo *color = &info->colors[i];
+    hash = WMTProbeHashU64(hash, color->pixel_format);
+    hash = WMTProbeHashU64(hash, color->rgb_blend_operation);
+    hash = WMTProbeHashU64(hash, color->alpha_blend_operation);
+    hash = WMTProbeHashU64(hash, color->src_rgb_blend_factor);
+    hash = WMTProbeHashU64(hash, color->dst_rgb_blend_factor);
+    hash = WMTProbeHashU64(hash, color->src_alpha_blend_factor);
+    hash = WMTProbeHashU64(hash, color->dst_alpha_blend_factor);
+    hash = WMTProbeHashU64(hash, color->write_mask);
+    hash = WMTProbeHashU64(hash, color->blending_enabled ? 1 : 0);
+  }
+  hash = WMTProbeHashU64(hash, info->alpha_to_coverage_enabled ? 1 : 0);
+  hash = WMTProbeHashU64(hash, info->logic_operation_enabled ? 1 : 0);
+  hash = WMTProbeHashU64(hash, info->logic_operation);
+  hash = WMTProbeHashU64(hash, info->rasterization_enabled ? 1 : 0);
+  hash = WMTProbeHashU64(hash, info->raster_sample_count);
+  hash = WMTProbeHashU64(hash, info->depth_pixel_format);
+  hash = WMTProbeHashU64(hash, info->stencil_pixel_format);
+  hash = WMTProbeHashU64(hash, info->immutable_vertex_buffers);
+  hash = WMTProbeHashU64(hash, info->immutable_fragment_buffers);
+  hash = WMTProbeHashU64(hash, info->input_primitive_topology);
+  hash = WMTProbeHashU64(hash, info->tessellation_partition_mode);
+  hash = WMTProbeHashU64(hash, info->max_tessellation_factor);
+  hash = WMTProbeHashU64(hash, info->tessellation_output_winding_order);
+  hash = WMTProbeHashU64(hash, info->tessellation_factor_step);
+  return hash;
+}
 
 struct WMTMeshRenderPipelineInfo {
   struct WMTColorAttachmentBlendInfo colors[8];
@@ -1903,6 +1972,10 @@ WINEMETAL_API obj_handle_t MTLDevice_newSharedEventWithMachPort(obj_handle_t dev
 WINEMETAL_API uint64_t MTLDevice_registryID(obj_handle_t device);
 
 WINEMETAL_API bool MTLSharedEvent_waitUntilSignaledValue(obj_handle_t event, uint64_t value, uint64_t timeout);
+
+WINEMETAL_API void MTLCommandBuffer_scheduleFrameDump(
+    obj_handle_t cmdbuf, obj_handle_t texture, uint64_t frame
+);
 
 WINEMETAL_API obj_handle_t
 MTLCounterSampleBuffer_newTimestampBuffer(obj_handle_t device, uint32_t sample_count, bool shared);

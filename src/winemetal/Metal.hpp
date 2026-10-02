@@ -1063,6 +1063,10 @@ InitializeRenderPipelineInfo(WMTRenderPipelineInfo &info) {
 
   info.vertex_function = NULL_OBJECT_HANDLE;
   info.fragment_function = NULL_OBJECT_HANDLE;
+  info.causal_vertex_output_function = NULL_OBJECT_HANDLE;
+  info.causal_fragment_capture_function = NULL_OBJECT_HANDLE;
+  info.causal_fragment_magenta_function = NULL_OBJECT_HANDLE;
+  info.causal_fragment_input_function = NULL_OBJECT_HANDLE;
   info.immutable_vertex_buffers = 0;
   info.immutable_fragment_buffers = 0;
   info.binary_archive_for_serialization = NULL_OBJECT_HANDLE;

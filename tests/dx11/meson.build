@@ -29,3 +29,15 @@ executable('dx11_hdr_linear', ['dx11_hdr_linear.cpp'],
 executable('dx11_hdr_pq', ['dx11_hdr_pq.cpp'],
   dependencies: [ lib_d3d11, lib_dxgi, lib_d3dcompiler]
 )
+
+executable('dx11_headless_smoke', ['dx11_headless_smoke.cpp'],
+  dependencies: []
+)
+
+executable('dx11_hk_present_probe', ['dx11_hk_present_probe.cpp'],
+  dependencies: []
+)
+
+executable('dx11_blend_write_probe', ['dx11_blend_write_probe.cpp'],
+  dependencies: [ lib_d3d11, lib_d3dcompiler]
+)

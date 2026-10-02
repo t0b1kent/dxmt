@@ -183,13 +183,17 @@ HRESULT ExtractMTLStreamOutputElements(
   using namespace microsoft;
   std::array<uint32_t, 4> offsets = {{}};
   uint32_t element_count = 0;
-  CSignatureParser parser;
+  CSignatureParser5 parser;
   HRESULT hr = DXBCGetOutputSignature(pShaderBytecode, &parser);
   if (FAILED(hr)) {
     return hr;
   }
+  if (parser.NumStreams() == 0) {
+    ERR("CreateEmulatedVertexStreamOutputShader: output signature has no streams");
+    return E_INVALIDARG;
+  }
   const D3D11_SIGNATURE_PARAMETER *pParameters;
-  auto numParameters = parser.GetParameters(&pParameters);
+  auto numParameters = parser.Signature(0)->GetParameters(&pParameters);
   for (unsigned i = 0; i < NumEntries; i++) {
     auto entry = pEntries[i];
     if (entry.Stream != 0) {

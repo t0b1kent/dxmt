@@ -4,6 +4,7 @@
 #include "dxmt_format.hpp"
 #include "dxmt_presenter.hpp"
 #include "util_likely.hpp"
+#include <cstdio>
 
 
 namespace dxmt {
@@ -157,6 +158,10 @@ Presenter::encodeCommands(
     std::function<void(WMT::RenderCommandEncoder)> &&update_fences
 ) {
   auto drawable = layer_.nextDrawable();
+  if (!drawable) {
+    fprintf(stderr, "dxmt[present]: CAMetalLayer nextDrawable returned nil; dropping frame\n");
+    return {};
+  }
 
   WMTRenderPassInfo info;
   WMT::InitializeRenderPassInfo(info);

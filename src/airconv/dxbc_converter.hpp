@@ -392,6 +392,8 @@ public:
     return system_value_ != microsoft::D3D10_SB_NAME_UNDEFINED;
   }
 
+  microsoft::D3D10_SB_NAME systemValue() const { return system_value_; }
+
   RegisterComponentType componentType() const {
     return (RegisterComponentType)component_type_;
   }
@@ -418,6 +420,7 @@ public:
   uint32_t max_input_register = 0;
   uint32_t max_output_register = 0;
   uint32_t pso_valid_output_reg_mask = 0;
+  std::vector<uint8_t> fragment_translation_probe_dxbc;
   uint32_t max_patch_constant_output_register = 0;
   std::vector<MTL_SM50_SHADER_ARGUMENT> args_reflection_cbuffer;
   std::vector<MTL_SM50_SHADER_ARGUMENT> args_reflection;

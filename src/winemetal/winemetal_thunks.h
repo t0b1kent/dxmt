@@ -371,6 +371,12 @@ struct unixcall_mtlcommandbuffer_blitcommandencoderwithsamplebuffers {
   obj_handle_t ret;
 };
 
+struct unixcall_mtlcommandbuffer_frame_dump {
+  obj_handle_t cmdbuf;
+  obj_handle_t texture;
+  uint64_t frame;
+};
+
 #pragma pack(pop)
 
 #endif

@@ -23,28 +23,66 @@ Logger::Logger(const std::string &fileName)
 
 Logger::~Logger() {}
 
+/*
+ * MacRunner guard: under the ARM64X EC entry the Logger Meyers-singleton's
+ * std::ostream/stringstream machinery has an uninitialized vtable (static-init
+ * order), so emitMsg() (which uses std::stringstream/operator<</std::endl)
+ * crashes with a c0000005 vtable AV the first time DXMT logs during
+ * D3D11CreateDevice (DXMT d3d11 rva 0x1fac78). DXMT's log output is dead under
+ * wine anyway (every output channel produces zero bytes), so neutralize ALL log
+ * entry points to a no-op. This covers every Logger::{trace,debug,info,warn,err,
+ * log} call site (whole-class sweep), not just the one on the device-create path.
+ * Remove once the ARM64X static-init root fix lands (graphics lane).
+ */
+#define MACRUNNER_DXMT_LOG_DISABLED 0
+
 void Logger::trace(const std::string &message) {
+#if !MACRUNNER_DXMT_LOG_DISABLED
   s_instance.emitMsg(LogLevel::Trace, message);
+#else
+  (void)message;
+#endif
 }
 
 void Logger::debug(const std::string &message) {
+#if !MACRUNNER_DXMT_LOG_DISABLED
   s_instance.emitMsg(LogLevel::Debug, message);
+#else
+  (void)message;
+#endif
 }
 
 void Logger::info(const std::string &message) {
+#if !MACRUNNER_DXMT_LOG_DISABLED
   s_instance.emitMsg(LogLevel::Info, message);
+#else
+  (void)message;
+#endif
 }
 
 void Logger::warn(const std::string &message) {
+#if !MACRUNNER_DXMT_LOG_DISABLED
   s_instance.emitMsg(LogLevel::Warn, message);
+#else
+  (void)message;
+#endif
 }
 
 void Logger::err(const std::string &message) {
+#if !MACRUNNER_DXMT_LOG_DISABLED
   s_instance.emitMsg(LogLevel::Error, message);
+#else
+  (void)message;
+#endif
 }
 
 void Logger::log(LogLevel level, const std::string &message) {
+#if !MACRUNNER_DXMT_LOG_DISABLED
   s_instance.emitMsg(level, message);
+#else
+  (void)level;
+  (void)message;
+#endif
 }
 
 void Logger::emitMsg(LogLevel level, const std::string &message) {

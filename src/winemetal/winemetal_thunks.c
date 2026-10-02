@@ -1179,3 +1179,13 @@ MTLDevice_newTileRenderPipelineState(
     *err_out = params.ret_error;
   return params.ret_pso;
 }
+
+WINEMETAL_API void
+MTLCommandBuffer_scheduleFrameDump(obj_handle_t cmdbuf, obj_handle_t texture,
+                                   uint64_t frame) {
+  struct unixcall_mtlcommandbuffer_frame_dump params;
+  params.cmdbuf = cmdbuf;
+  params.texture = texture;
+  params.frame = frame;
+  UNIX_CALL(132, &params);
+}

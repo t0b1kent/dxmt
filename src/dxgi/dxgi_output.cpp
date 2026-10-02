@@ -340,22 +340,27 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   SetDisplaySurface(IDXGISurface *surface) final {
-    ERR("Not implemented");
-    return E_NOTIMPL;
+    if (surface == nullptr)
+      return DXGI_ERROR_INVALID_CALL;
+    return DXGI_ERROR_UNSUPPORTED;
   }
 
   HRESULT
   STDMETHODCALLTYPE
   GetDisplaySurfaceData(IDXGISurface *surface) final {
-    ERR("Not implemented");
-    return E_NOTIMPL;
+    if (surface == nullptr)
+      return DXGI_ERROR_INVALID_CALL;
+    return DXGI_ERROR_UNSUPPORTED;
   }
 
   HRESULT
   STDMETHODCALLTYPE
   GetFrameStatistics(DXGI_FRAME_STATISTICS *stats) final {
-    ERR("Not implemented");
-    return E_NOTIMPL;
+    if (stats == nullptr)
+      return DXGI_ERROR_INVALID_CALL;
+
+    *stats = {};
+    return S_OK;
   }
 
   HRESULT
@@ -530,8 +535,9 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   GetDisplaySurfaceData1(IDXGIResource *destination) final {
-    ERR("Not implemented");
-    return E_NOTIMPL;
+    if (destination == nullptr)
+      return DXGI_ERROR_INVALID_CALL;
+    return DXGI_ERROR_UNSUPPORTED;
   }
 
   HRESULT
@@ -543,9 +549,6 @@ public:
     if (!pDevice)
       return E_INVALIDARG;
 
-    ERR("Not implemented");
-
-    // At least return a valid error code
     return DXGI_ERROR_UNSUPPORTED;
   }
 
@@ -627,8 +630,6 @@ public:
     InitReturnPtr(ppOutputDuplication);
     if (!pDevice)
       return E_INVALIDARG;
-
-    ERR("Not implemented");
 
     return DXGI_ERROR_UNSUPPORTED;
   }

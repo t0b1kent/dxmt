@@ -1,11 +1,24 @@
-#include <stdatomic.h>
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <math.h>
+#include <stdint.h>
+#include <stdatomic.h>
+#include <os/lock.h>
+#include <time.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #import <Cocoa/Cocoa.h>
 #import <ColorSync/ColorSync.h>
 #import <CoreFoundation/CFRunLoop.h>
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/QuartzCore.h>
+#import <objc/runtime.h>
 #include "objc/objc-runtime.h"
 #include <bootstrap.h>
 #include <mach/mach_port.h>
@@ -16,6 +29,2158 @@
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
 #define STATUS_UNSUCCESSFUL 0xC0000001
+
+/*
+ * Metal render state persists for the lifetime of an MTLRenderCommandEncoder,
+ * not for the lifetime of one Wine unix-call command list. DXMT may submit a
+ * SetPSO command and a later Draw through separate encodeCommands calls, so the
+ * software guard must have the same lifetime as the native encoder state.
+ */
+static char winemetal_render_encoder_has_pso_key;
+static char macrunner_render_probe_state_key;
+static char macrunner_pipeline_probe_info_key;
+static char macrunner_magenta_fragment_function_key;
+static char macrunner_causal_present_surface_phase_key;
+static char macrunner_present_attachment_trace_key;
+
+#define MACRUNNER_CAUSAL_SIDECHANNEL_BUFFER_INDEX 28u
+#define MACRUNNER_CAUSAL_SIDECHANNEL_WIDTH 1024u
+#define MACRUNNER_CAUSAL_SIDECHANNEL_HEIGHT 768u
+#define MACRUNNER_CAUSAL_SIDECHANNEL_SENTINEL UINT32_C(0x7fc0c0de)
+
+enum MacRunnerGPUReadbackPhase {
+  MacRunnerGPUReadbackAfterClear = 1,
+  MacRunnerGPUReadbackAfterRender = 2,
+  MacRunnerGPUReadbackPrePresent = 3,
+  MacRunnerGPUReadbackShaderTexture = 4,
+  MacRunnerGPUReadbackCausalC0 = 5,
+  MacRunnerGPUReadbackCausalC1 = 6,
+  MacRunnerGPUReadbackCausalC2 = 7,
+  MacRunnerGPUReadbackCausalC3 = 8,
+  MacRunnerGPUReadbackCausalPresentC0 = 9,
+  MacRunnerGPUReadbackCausalPresentC1 = 10,
+  MacRunnerGPUReadbackCausalPresentC2 = 11,
+  MacRunnerGPUReadbackCausalPresentC3 = 12,
+  MacRunnerGPUReadbackPresentedSurface = 13,
+};
+
+static atomic_uint_fast64_t macrunner_present_surface_ordinal;
+
+static void macrunner_gpu_readback_schedule(id<MTLCommandBuffer> command_buffer,
+                                            id<MTLTexture> texture, uint32_t phase,
+                                            uint64_t tag);
+
+static const char *
+macrunner_frame_dump_format_name(MTLPixelFormat format) {
+  switch (format) {
+  case MTLPixelFormatBGRA8Unorm: return "BGRA8Unorm";
+  case MTLPixelFormatBGRA8Unorm_sRGB: return "BGRA8Unorm_sRGB";
+  case MTLPixelFormatRGBA8Unorm: return "RGBA8Unorm";
+  case MTLPixelFormatRGBA8Unorm_sRGB: return "RGBA8Unorm_sRGB";
+  default: return "unsupported";
+  }
+}
+
+static char *
+macrunner_frame_dump_directory(void) {
+  const char *configured = getenv("MACRUNNER_DXMT_FRAME_DUMP_DIR");
+  if (configured && configured[0])
+    return strdup(configured);
+
+  const char *run_dir = getenv("MACRUNNER_RUN_DIR");
+  if (!run_dir || !run_dir[0])
+    run_dir = getenv("DXMT_LOG_PATH");
+  if (!run_dir || !run_dir[0])
+    return NULL;
+
+  size_t run_len = strlen(run_dir);
+  static const char suffix[] = "/dxmt-frame-dumps";
+  if (run_len > PATH_MAX - sizeof(suffix))
+    return NULL;
+
+  char *directory = malloc(run_len + sizeof(suffix));
+  if (!directory)
+    return NULL;
+  memcpy(directory, run_dir, run_len);
+  memcpy(directory + run_len, suffix, sizeof(suffix));
+  return directory;
+}
+
+static BOOL
+macrunner_frame_dump_mkdirs(char *directory) {
+  if (!directory || !directory[0])
+    return NO;
+
+  for (char *cursor = directory + 1; *cursor; cursor++) {
+    if (*cursor != '/')
+      continue;
+    *cursor = '\0';
+    if (mkdir(directory, 0700) && errno != EEXIST) {
+      *cursor = '/';
+      return NO;
+    }
+    *cursor = '/';
+  }
+  return !mkdir(directory, 0700) || errno == EEXIST;
+}
+
+static BOOL
+macrunner_frame_dump_write_all(int fd, const uint8_t *bytes, size_t length) {
+  while (length) {
+    ssize_t written = write(fd, bytes, length);
+    if (written < 0 && errno == EINTR)
+      continue;
+    if (written <= 0)
+      return NO;
+    bytes += written;
+    length -= (size_t)written;
+  }
+  return YES;
+}
+
+static void
+macrunner_frame_dump_schedule(id<MTLCommandBuffer> command_buffer,
+                              id<MTLTexture> texture, uint64_t frame) {
+  if (!command_buffer || !texture) {
+    fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=skip reason=null-object\n",
+            (unsigned long long)frame);
+    return;
+  }
+
+  const MTLPixelFormat format = texture.pixelFormat;
+  const BOOL bgra = format == MTLPixelFormatBGRA8Unorm ||
+                    format == MTLPixelFormatBGRA8Unorm_sRGB;
+  const BOOL rgba = format == MTLPixelFormatRGBA8Unorm ||
+                    format == MTLPixelFormatRGBA8Unorm_sRGB;
+  const NSUInteger width = texture.width;
+  const NSUInteger height = texture.height;
+  if ((!bgra && !rgba) || texture.textureType != MTLTextureType2D ||
+      texture.sampleCount != 1 || !width || !height || width > 16384 ||
+      height > 16384 || width > SIZE_MAX / 4) {
+    fprintf(stderr,
+            "dxmt-frame-dump: frame=%llu stage=skip reason=unsupported "
+            "format=%lu type=%lu samples=%lu size=%lux%lu\n",
+            (unsigned long long)frame, (unsigned long)format,
+            (unsigned long)texture.textureType, (unsigned long)texture.sampleCount,
+            (unsigned long)width, (unsigned long)height);
+    return;
+  }
+
+  NSUInteger alignment = [texture.device minimumLinearTextureAlignmentForPixelFormat:format];
+  if (!alignment)
+    alignment = 256;
+  const NSUInteger packed_row = width * 4;
+  const NSUInteger row_bytes = (packed_row + alignment - 1) & ~(alignment - 1);
+  if (height > SIZE_MAX / row_bytes) {
+    fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=skip reason=size-overflow\n",
+            (unsigned long long)frame);
+    return;
+  }
+  const NSUInteger byte_count = row_bytes * height;
+  char *directory = macrunner_frame_dump_directory();
+  if (!directory) {
+    fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=skip reason=no-output-dir\n",
+            (unsigned long long)frame);
+    return;
+  }
+
+  id<MTLBuffer> staging = [texture.device newBufferWithLength:byte_count
+                                                        options:MTLResourceStorageModeShared];
+  if (!staging) {
+    fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=skip reason=buffer-allocation\n",
+            (unsigned long long)frame);
+    free(directory);
+    return;
+  }
+
+  id<MTLBlitCommandEncoder> blit = [command_buffer blitCommandEncoder];
+  [blit copyFromTexture:texture
+            sourceSlice:0
+            sourceLevel:0
+           sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:MTLSizeMake(width, height, 1)
+               toBuffer:staging
+      destinationOffset:0
+ destinationBytesPerRow:row_bytes
+destinationBytesPerImage:byte_count];
+  [blit endEncoding];
+  fprintf(stderr,
+          "dxmt-frame-dump: frame=%llu stage=scheduled size=%lux%lu format=%s row=%lu\n",
+          (unsigned long long)frame, (unsigned long)width, (unsigned long)height,
+          macrunner_frame_dump_format_name(format), (unsigned long)row_bytes);
+
+  [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+    if (completed.status != MTLCommandBufferStatusCompleted) {
+      fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=failed status=%lu\n",
+              (unsigned long long)frame, (unsigned long)completed.status);
+      [staging release];
+      free(directory);
+      return;
+    }
+
+    if (!macrunner_frame_dump_mkdirs(directory)) {
+      fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=failed reason=mkdir errno=%d\n",
+              (unsigned long long)frame, errno);
+      [staging release];
+      free(directory);
+      return;
+    }
+
+    char path[PATH_MAX];
+    int path_len = snprintf(path, sizeof(path),
+                            "%s/frame-%06llu-%lux%lu.rgba", directory,
+                            (unsigned long long)frame, (unsigned long)width,
+                            (unsigned long)height);
+    if (path_len < 0 || (size_t)path_len >= sizeof(path)) {
+      fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=failed reason=path-too-long\n",
+              (unsigned long long)frame);
+      [staging release];
+      free(directory);
+      return;
+    }
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) {
+      fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=failed reason=open errno=%d\n",
+              (unsigned long long)frame, errno);
+      [staging release];
+      free(directory);
+      return;
+    }
+
+    const uint8_t *source = (const uint8_t *)staging.contents;
+    uint8_t *rgba_row = malloc(packed_row);
+    uint64_t sum_r = 0, sum_g = 0, sum_b = 0, nonzero = 0;
+    uint8_t min_r = 255, min_g = 255, min_b = 255;
+    uint8_t max_r = 0, max_g = 0, max_b = 0;
+    BOOL write_ok = source && rgba_row;
+    for (NSUInteger y = 0; write_ok && y < height; y++) {
+      const uint8_t *src_row = source + y * row_bytes;
+      for (NSUInteger x = 0; x < width; x++) {
+        const uint8_t *pixel = src_row + x * 4;
+        const uint8_t r = bgra ? pixel[2] : pixel[0];
+        const uint8_t g = pixel[1];
+        const uint8_t b = bgra ? pixel[0] : pixel[2];
+        const uint8_t a = pixel[3];
+        uint8_t *dst = rgba_row + x * 4;
+        dst[0] = r; dst[1] = g; dst[2] = b; dst[3] = a;
+        sum_r += r; sum_g += g; sum_b += b;
+        nonzero += (r | g | b) != 0;
+        if (r < min_r) min_r = r; if (r > max_r) max_r = r;
+        if (g < min_g) min_g = g; if (g > max_g) max_g = g;
+        if (b < min_b) min_b = b; if (b > max_b) max_b = b;
+      }
+      write_ok = macrunner_frame_dump_write_all(fd, rgba_row, packed_row);
+    }
+    const int close_rc = close(fd);
+    const uint64_t pixels = (uint64_t)width * (uint64_t)height;
+    if (!write_ok || close_rc) {
+      fprintf(stderr, "dxmt-frame-dump: frame=%llu stage=failed reason=write errno=%d\n",
+              (unsigned long long)frame, errno);
+      unlink(path);
+    } else {
+      fprintf(stderr,
+              "dxmt-frame-dump: frame=%llu stage=complete path=%s size=%lux%lu "
+              "format=%s min_rgb=%u,%u,%u max_rgb=%u,%u,%u "
+              "mean_rgb=%.3f,%.3f,%.3f nonzero_fraction=%.6f\n",
+              (unsigned long long)frame, path, (unsigned long)width,
+              (unsigned long)height, macrunner_frame_dump_format_name(format),
+              min_r, min_g, min_b, max_r, max_g, max_b,
+              pixels ? (double)sum_r / pixels : 0.0,
+              pixels ? (double)sum_g / pixels : 0.0,
+              pixels ? (double)sum_b / pixels : 0.0,
+              pixels ? (double)nonzero / pixels : 0.0);
+    }
+    free(rgba_row);
+    [staging release];
+    free(directory);
+  }];
+}
+
+@interface MacRunnerRenderProbeState : NSObject {
+@public
+  obj_handle_t command_buffer;
+  obj_handle_t render_target;
+  obj_handle_t pso;
+  obj_handle_t depth_stencil_state;
+  uint32_t stencil_ref;
+  float blend_color[4];
+  obj_handle_t vertex_buffers[31];
+  uint64_t vertex_buffer_offsets[31];
+  obj_handle_t fragment_buffers[31];
+  uint64_t fragment_buffer_offsets[31];
+  obj_handle_t fragment_textures[32];
+  obj_handle_t shader_textures[8];
+  uint64_t shader_texture_ids[8];
+  uint32_t shader_texture_count;
+  struct WMTViewport viewport;
+  struct WMTScissorRect scissor;
+  enum WMTTriangleFillMode fill_mode;
+  enum WMTCullMode cull_mode;
+  enum WMTDepthClipMode depth_clip_mode;
+  uint32_t render_target_width;
+  uint32_t render_target_height;
+  uint32_t draw_count;
+  uint32_t causal_phase;
+  uint32_t causal_target_draw_count;
+  enum WMTLoadAction color_load_action;
+  BOOL viewport_valid;
+  BOOL scissor_valid;
+  BOOL causal_target_seen;
+  BOOL causal_signature_match;
+}
+@end
+
+@implementation MacRunnerRenderProbeState
+@end
+
+/*
+ * Per-command-buffer attachment inventory.  This deliberately retains every
+ * non-null attachment pointer for the lifetime of the Metal command buffer:
+ * an absence result is valid only when no attachment has been silently
+ * dropped by a fixed-size sample.
+ */
+@interface MacRunnerPresentAttachmentTrace : NSObject {
+ @public
+  uint64_t render_encoder_count;
+  uint64_t color_slot_count;
+  uint64_t color_nonnull_count;
+  uint64_t resolve_slot_count;
+  uint64_t resolve_nonnull_count;
+  uint64_t color_clear_count;
+  uint64_t draw_count;
+  uint64_t direct_control_writes;
+  NSMutableSet *color_textures;
+  NSMutableSet *resolve_textures;
+}
+@end
+
+@implementation MacRunnerPresentAttachmentTrace
+- (id)init {
+  self = [super init];
+  if (self) {
+    color_textures = [[NSMutableSet alloc] init];
+    resolve_textures = [[NSMutableSet alloc] init];
+  }
+  return self;
+}
+- (void)dealloc {
+  [color_textures release];
+  [resolve_textures release];
+  [super dealloc];
+}
+@end
+
+@interface MacRunnerPipelineProbeInfo : NSObject {
+@public
+  obj_handle_t vertex_function;
+  obj_handle_t fragment_function;
+  uint64_t pso_id;
+  uint64_t fragment_hash;
+  char vertex_name[160];
+  char fragment_name[160];
+  NSUInteger metal_rt0_format;
+  NSUInteger metal_write_mask;
+  NSUInteger metal_rgb_op;
+  NSUInteger metal_alpha_op;
+  NSUInteger metal_src_rgb;
+  NSUInteger metal_dst_rgb;
+  NSUInteger metal_src_alpha;
+  NSUInteger metal_dst_alpha;
+  NSUInteger metal_depth_format;
+  NSUInteger metal_stencil_format;
+  NSUInteger metal_sample_count;
+  NSUInteger metal_input_topology;
+  BOOL metal_blend_enabled;
+  BOOL metal_alpha_to_coverage;
+  BOOL magenta_override;
+  obj_handle_t causal_pso[4];
+  BOOL causal_ready;
+}
+@end
+
+@implementation MacRunnerPipelineProbeInfo
+- (void)dealloc {
+  for (unsigned i = 0; i < 4; i++)
+    [(id)causal_pso[i] release];
+  [super dealloc];
+}
+@end
+
+struct MacRunnerCausalDrawSignature {
+  uint64_t schema_version;
+  uint64_t logical_pso_id;
+  uint64_t vertex_name_hash;
+  uint64_t fragment_name_hash;
+  uint64_t fragment_hash;
+  uint64_t index_buffer_offset;
+  uint64_t index_count;
+  uint64_t primitive_type;
+  uint64_t index_type;
+  uint64_t instance_count;
+  uint64_t base_vertex;
+  uint64_t base_instance;
+  uint64_t viewport_valid;
+  uint64_t viewport_x_bits;
+  uint64_t viewport_y_bits;
+  uint64_t viewport_width_bits;
+  uint64_t viewport_height_bits;
+  uint64_t viewport_znear_bits;
+  uint64_t viewport_zfar_bits;
+  uint64_t scissor_valid;
+  uint64_t scissor_x;
+  uint64_t scissor_y;
+  uint64_t scissor_width;
+  uint64_t scissor_height;
+  uint64_t index_buffer_length;
+  uint64_t index_storage_mode;
+  uint64_t index_slice_valid;
+  uint64_t index_slice_bytes;
+  uint64_t index_slice_hash;
+  uint64_t metal_rt0_format;
+  uint64_t metal_write_mask;
+  uint64_t metal_blend_enabled;
+  uint64_t metal_rgb_op;
+  uint64_t metal_alpha_op;
+  uint64_t metal_src_rgb;
+  uint64_t metal_dst_rgb;
+  uint64_t metal_src_alpha;
+  uint64_t metal_dst_alpha;
+  uint64_t metal_depth_format;
+  uint64_t metal_stencil_format;
+  uint64_t metal_sample_count;
+  uint64_t metal_input_topology;
+  uint64_t metal_alpha_to_coverage;
+  uint64_t render_target_width;
+  uint64_t render_target_height;
+  uint64_t fill_mode;
+  uint64_t cull_mode;
+  uint64_t depth_clip_mode;
+  uint64_t stencil_ref;
+  uint64_t color_load_action;
+  uint64_t blend_color_bits[4];
+};
+
+#define MACRUNNER_CAUSAL_SIGNATURE_SCHEMA UINT64_C(1)
+#define MACRUNNER_CAUSAL_SIGNATURE_FIELD_COUNT 54u
+#define MACRUNNER_CAUSAL_SIGNATURE_CHECKSUM UINT64_C(0x07194c46f282d32d)
+
+static const struct MacRunnerCausalDrawSignature
+    macrunner_causal_c0_signature = {
+        .schema_version = UINT64_C(1),
+        .logical_pso_id = UINT64_C(0x9d2b46c27af732f4),
+        .vertex_name_hash = UINT64_C(0x9159b629ce5383e1),
+        .fragment_name_hash = UINT64_C(0x937eaceb50c989a0),
+        .fragment_hash = UINT64_C(0x0bcd488ba1612b3f),
+        .index_buffer_offset = UINT64_C(0x000000000000000c),
+        .index_count = 6,
+        .primitive_type = 3,
+        .index_type = 0,
+        .instance_count = 1,
+        .base_vertex = UINT64_C(0x0000000000000300),
+        .base_instance = 0,
+        .viewport_valid = 1,
+        .viewport_x_bits = UINT64_C(0x0000000000000000),
+        .viewport_y_bits = UINT64_C(0x4050000000000000),
+        .viewport_width_bits = UINT64_C(0x4090000000000000),
+        .viewport_height_bits = UINT64_C(0x4084000000000000),
+        .viewport_znear_bits = UINT64_C(0x0000000000000000),
+        .viewport_zfar_bits = UINT64_C(0x3ff0000000000000),
+        .scissor_valid = 1,
+        .scissor_x = 0,
+        .scissor_y = 64,
+        .scissor_width = 1024,
+        .scissor_height = 640,
+        .index_buffer_length = UINT64_C(0x0000000000020000),
+        .index_storage_mode = 0,
+        .index_slice_valid = 1,
+        .index_slice_bytes = 12,
+        .index_slice_hash = UINT64_C(0x39ccf7d8033c06e7),
+        .metal_rt0_format = UINT64_C(0x46),
+        .metal_write_mask = UINT64_C(0x0f),
+        .metal_blend_enabled = 0,
+        .metal_rgb_op = 0,
+        .metal_alpha_op = 0,
+        .metal_src_rgb = 1,
+        .metal_dst_rgb = 0,
+        .metal_src_alpha = 1,
+        .metal_dst_alpha = 0,
+        .metal_depth_format = UINT64_C(0x104),
+        .metal_stencil_format = UINT64_C(0x104),
+        .metal_sample_count = 1,
+        .metal_input_topology = 3,
+        .metal_alpha_to_coverage = 0,
+        .render_target_width = 1024,
+        .render_target_height = 768,
+        .fill_mode = 0,
+        .cull_mode = 0,
+        .depth_clip_mode = 0,
+        .stencil_ref = 0,
+        .color_load_action = 2,
+        .blend_color_bits = {UINT64_C(0x3f800000), UINT64_C(0x3f800000),
+                             UINT64_C(0x3f800000), UINT64_C(0x3f800000)},
+};
+
+_Static_assert(sizeof(struct MacRunnerCausalDrawSignature) ==
+                   MACRUNNER_CAUSAL_SIGNATURE_FIELD_COUNT * sizeof(uint64_t),
+               "causal signature must be a packed sequence of semantic u64 fields");
+
+static atomic_bool macrunner_causal_stage_busy;
+static atomic_uint macrunner_causal_control_claimed_mask;
+static atomic_bool macrunner_causal_invalid;
+static atomic_uint macrunner_causal_signature_skip_logs;
+
+static BOOL
+winemetal_render_encoder_has_pso(id<MTLRenderCommandEncoder> encoder) {
+  return encoder &&
+         objc_getAssociatedObject(encoder, &winemetal_render_encoder_has_pso_key) != nil;
+}
+
+static void
+winemetal_render_encoder_set_has_pso(id<MTLRenderCommandEncoder> encoder, BOOL has_pso) {
+  if (!encoder)
+    return;
+  objc_setAssociatedObject(encoder, &winemetal_render_encoder_has_pso_key,
+                           has_pso ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static int
+macrunner_gpu_readback_probe_enabled(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("MACRUNNER_HB_GPU_READBACK_PROBE");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+  }
+  return enabled;
+}
+
+static int
+macrunner_shader_inputs_probe_enabled(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("MACRUNNER_HB_SHADER_INPUTS_PROBE");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+  }
+  return enabled;
+}
+
+static int
+macrunner_fragment_output_probe_enabled(void) {
+  static int enabled;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_FRAGMENT_OUTPUT_PROBE");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+  });
+  return enabled;
+}
+
+static int
+macrunner_force_magenta_fragment_enabled(void) {
+  static int enabled;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_FORCE_MAGENTA_FRAGMENT");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+  });
+  return enabled;
+}
+
+/*
+ * Runtime A/B control requested by the lane contract.  Unlike the exact-ID
+ * developer control above, this switches every color-producing PSO so A and B
+ * differ by one child-environment variable only.  The probe still hashes the
+ * original fragment function and state, allowing comparison to fail closed if
+ * the same PSO/Draw is not observed.
+ */
+static int
+macrunner_force_fragment_magenta_global_enabled(void) {
+  static int enabled;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_FORCE_FRAGMENT_MAGENTA");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+  });
+  return enabled;
+}
+
+struct MacRunnerCausalControlConfig {
+  unsigned count;
+  unsigned phases[4];
+};
+
+static BOOL
+macrunner_causal_parse_phase_token(const char *value, size_t length,
+                                   unsigned *phase_out) {
+  if (!value || length != 2 || value[0] != 'C' || value[1] < '0' ||
+      value[1] > '3')
+    return NO;
+  if (phase_out)
+    *phase_out = (unsigned)(value[1] - '0');
+  return YES;
+}
+
+static const struct MacRunnerCausalControlConfig *
+macrunner_causal_control_config(void) {
+  static struct MacRunnerCausalControlConfig config;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_CAUSAL_CONTROL");
+    unsigned phase = UINT32_MAX;
+    if (value && macrunner_causal_parse_phase_token(value, strlen(value),
+                                                    &phase)) {
+      config.count = 1;
+      config.phases[0] = phase;
+    } else if (value && strcmp(value, "C0,C2,C3") == 0) {
+      config.count = 3;
+      config.phases[0] = 0;
+      config.phases[1] = 2;
+      config.phases[2] = 3;
+    }
+  });
+  return &config;
+}
+
+static unsigned
+macrunner_causal_control(void) {
+  const struct MacRunnerCausalControlConfig *config =
+      macrunner_causal_control_config();
+  return config->count == 1 ? config->phases[0] : UINT32_MAX;
+}
+
+static unsigned
+macrunner_causal_control_count(void) {
+  return macrunner_causal_control_config()->count;
+}
+
+static unsigned
+macrunner_causal_control_phase_at(unsigned index) {
+  const struct MacRunnerCausalControlConfig *config =
+      macrunner_causal_control_config();
+  return index < config->count ? config->phases[index] : UINT32_MAX;
+}
+
+static uint32_t
+macrunner_causal_control_mask(void) {
+  const struct MacRunnerCausalControlConfig *config =
+      macrunner_causal_control_config();
+  uint32_t mask = 0;
+  for (unsigned i = 0; i < config->count; i++)
+    if (config->phases[i] < 4)
+      mask |= UINT32_C(1) << config->phases[i];
+  return mask;
+}
+
+static BOOL
+macrunner_causal_phase_requested(unsigned phase) {
+  return phase < 4 && (macrunner_causal_control_mask() & (UINT32_C(1) << phase));
+}
+
+static int
+macrunner_causal_ladder_enabled(void) {
+  return macrunner_causal_control_count() > 0;
+}
+
+static int
+macrunner_causal_sidechannel_grid_enabled(void) {
+  static int enabled;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_CAUSAL_SIDECHANNEL_GRID");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+  });
+  return enabled;
+}
+
+static int
+macrunner_causal_sidechannel_grid_control_phase(void) {
+  static int phase = -1;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_CAUSAL_SIDECHANNEL_GRID_CONTROL");
+    if (!value || !value[0] || !strcmp(value, "0"))
+      return;
+    if (!strcmp(value, "C1"))
+      phase = 1;
+    else if (!strcmp(value, "C2"))
+      phase = 2;
+    else if (!strcmp(value, "C3"))
+      phase = 3;
+    else
+      fprintf(stderr,
+              "macrunner-hb-causal-sidechannel-grid: control=INVALID result=skip "
+              "reason=bad-grid-control value=%s\n", value);
+  });
+  return phase;
+}
+
+static const char *
+macrunner_causal_phase_name(unsigned phase) {
+  static const char *names[] = {"C0", "C1", "C2", "C3"};
+  return phase < 4 ? names[phase] : "INVALID";
+}
+
+static void
+macrunner_causal_sidechannel_analyze(id<MTLCommandBuffer> command_buffer,
+                                     id<MTLBuffer> buffer, unsigned phase) {
+  const uint32_t *words = (const uint32_t *)[buffer contents];
+  const uint64_t pixel_count =
+      (uint64_t)MACRUNNER_CAUSAL_SIDECHANNEL_WIDTH *
+      MACRUNNER_CAUSAL_SIDECHANNEL_HEIGHT;
+  uint64_t written = 0, black = 0, magenta = 0, other = 0, nonfinite = 0;
+  const int grid_control_phase = macrunner_causal_sidechannel_grid_control_phase();
+  const BOOL grid_enabled = (phase == 0 && macrunner_causal_sidechannel_grid_enabled()) ||
+                            phase == (unsigned)grid_control_phase;
+  uint64_t grid_finite = 0, grid_nonzero = 0;
+  float grid_min[3] = {INFINITY, INFINITY, INFINITY};
+  float grid_max[3] = {-INFINITY, -INFINITY, -INFINITY};
+  double grid_sum[3] = {0.0, 0.0, 0.0};
+  uint64_t hash = UINT64_C(1469598103934665603);
+  if (command_buffer.status == MTLCommandBufferStatusCompleted && words) {
+    for (uint64_t pixel = 0; pixel < pixel_count; pixel++) {
+      const uint32_t *rgba_words = words + pixel * 4;
+      if (rgba_words[0] == MACRUNNER_CAUSAL_SIDECHANNEL_SENTINEL &&
+          rgba_words[1] == MACRUNNER_CAUSAL_SIDECHANNEL_SENTINEL &&
+          rgba_words[2] == MACRUNNER_CAUSAL_SIDECHANNEL_SENTINEL &&
+          rgba_words[3] == MACRUNNER_CAUSAL_SIDECHANNEL_SENTINEL)
+        continue;
+      float rgba[4];
+      memcpy(rgba, rgba_words, sizeof(rgba));
+      written++;
+      for (unsigned component = 0; component < 4; component++) {
+        uint32_t word = rgba_words[component];
+        for (unsigned byte = 0; byte < 4; byte++) {
+          hash ^= (uint8_t)(word >> (byte * 8));
+          hash *= UINT64_C(1099511628211);
+        }
+      }
+      if (!isfinite(rgba[0]) || !isfinite(rgba[1]) ||
+          !isfinite(rgba[2]) || !isfinite(rgba[3])) {
+        nonfinite++;
+      } else if (grid_enabled) {
+        for (unsigned component = 0; component < 3; component++) {
+          grid_min[component] = fminf(grid_min[component], rgba[component]);
+          grid_max[component] = fmaxf(grid_max[component], rgba[component]);
+          grid_sum[component] += rgba[component];
+        }
+        grid_finite++;
+        if (fabsf(rgba[0]) > (1.0f / 255.0f) ||
+            fabsf(rgba[1]) > (1.0f / 255.0f) ||
+            fabsf(rgba[2]) > (1.0f / 255.0f))
+          grid_nonzero++;
+        if (fabsf(rgba[0]) <= (1.0f / 255.0f) &&
+            fabsf(rgba[1]) <= (1.0f / 255.0f) &&
+            fabsf(rgba[2]) <= (1.0f / 255.0f)) {
+          black++;
+        } else if (rgba[0] >= 0.9f && fabsf(rgba[1]) <= 0.1f &&
+                   rgba[2] >= 0.9f && rgba[3] >= 0.9f) {
+          magenta++;
+        } else {
+          other++;
+        }
+      } else if (fabsf(rgba[0]) <= (1.0f / 255.0f) &&
+                 fabsf(rgba[1]) <= (1.0f / 255.0f) &&
+                 fabsf(rgba[2]) <= (1.0f / 255.0f)) {
+        black++;
+      } else if (rgba[0] >= 0.9f && fabsf(rgba[1]) <= 0.1f &&
+                 rgba[2] >= 0.9f && rgba[3] >= 0.9f) {
+        magenta++;
+      } else {
+        other++;
+      }
+    }
+  }
+  const char *classification =
+      !written ? "EMPTY" : nonfinite ? "NONFINITE" :
+      black == written ? "BLACK" : magenta == written ? "MAGENTA" : "MIXED";
+  BOOL valid = command_buffer.status == MTLCommandBufferStatusCompleted &&
+               words && written;
+  if (!valid)
+    atomic_store_explicit(&macrunner_causal_invalid, true,
+                          memory_order_release);
+  fprintf(
+      stderr,
+      "macrunner-hb-causal-ladder: phase=sidechannel-complete control=%s "
+      "result=%s class=%s written=%llu black=%llu magenta=%llu other=%llu "
+      "nonfinite=%llu total=%llu hash=0x%016llx status=%ld error=%s\n",
+      macrunner_causal_phase_name(phase), valid ? "ok" : "invalid",
+      classification, (unsigned long long)written, (unsigned long long)black,
+      (unsigned long long)magenta, (unsigned long long)other,
+      (unsigned long long)nonfinite, (unsigned long long)pixel_count,
+      (unsigned long long)hash, (long)command_buffer.status,
+      command_buffer.error ? [[command_buffer.error description] UTF8String] : "none");
+  if (grid_enabled) {
+    const double divisor = grid_finite ? (double)grid_finite : 1.0;
+    const uint64_t missing = pixel_count - written;
+    const char *coverage =
+        !valid ? "invalid" : written == pixel_count ? "full" :
+        written ? "partial" : "empty";
+    fprintf(
+        stderr,
+        "macrunner-hb-causal-sidechannel-grid: control=%s result=%s "
+        "coverage=%s grid=%ux%u sampled=%llu total=%llu missing=%llu "
+        "coverage_fraction=%.9g finite=%llu nonfinite=%llu min_rgb=%.9g,%.9g,%.9g "
+        "max_rgb=%.9g,%.9g,%.9g mean_rgb=%.9g,%.9g,%.9g "
+        "nonzero=%llu nonzero_fraction=%.9g\n",
+        macrunner_causal_phase_name(phase),
+        valid && grid_finite ? "ok" : valid ? "empty" : "invalid",
+        coverage,
+        MACRUNNER_CAUSAL_SIDECHANNEL_WIDTH,
+        MACRUNNER_CAUSAL_SIDECHANNEL_HEIGHT,
+        (unsigned long long)written, (unsigned long long)pixel_count,
+        (unsigned long long)missing, (double)written / (double)pixel_count,
+        (unsigned long long)grid_finite,
+        (unsigned long long)nonfinite, grid_min[0], grid_min[1], grid_min[2],
+        grid_max[0], grid_max[1], grid_max[2], grid_sum[0] / divisor,
+        grid_sum[1] / divisor, grid_sum[2] / divisor,
+        (unsigned long long)grid_nonzero,
+        (double)grid_nonzero / divisor);
+  }
+  fflush(stderr);
+}
+
+static BOOL
+macrunner_causal_pipeline_is_target(uint64_t pso_id, const char *vertex_name,
+                                    const char *fragment_name) {
+  return macrunner_causal_ladder_enabled() &&
+         pso_id == UINT64_C(0x9d2b46c27af732f4) &&
+         vertex_name && fragment_name &&
+         strcmp(vertex_name,
+                "vs_59c2a0b5_adcd61f38fa5038495d5d87e7f3a67bb8d794d86") == 0 &&
+         strcmp(fragment_name,
+                "ps_bef43b20_f8e9cf38dc7294cc7203c7fb6cd68b27ed713b6a") == 0;
+}
+
+static int
+macrunner_force_magenta_target_id(uint64_t *target_id) {
+  static int valid;
+  static uint64_t target;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_FORCE_MAGENTA_PSO_ID");
+    char *end = NULL;
+    unsigned long long parsed = value && value[0] ? strtoull(value, &end, 0) : 0;
+    if (value && value[0] && (!end || end == value || *end != '\0')) {
+      end = NULL;
+      parsed = strtoull(value, &end, 16);
+    }
+    valid = end && end != value && *end == '\0' && parsed != 0;
+    target = valid ? (uint64_t)parsed : 0;
+  });
+  if (target_id)
+    *target_id = target;
+  return valid;
+}
+
+static int
+macrunner_fragment_output_probe_take_slot(unsigned *ordinal) {
+  static atomic_uint count;
+  static unsigned limit;
+  static dispatch_once_t once;
+  if (!macrunner_fragment_output_probe_enabled())
+    return 0;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_FRAGMENT_OUTPUT_PROBE_MAX");
+    char *end = NULL;
+    unsigned long parsed = value && value[0] ? strtoul(value, &end, 0) : 0;
+    limit = end && end != value && parsed > 0 && parsed <= 4096 ? parsed : 64;
+  });
+  unsigned current = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed);
+  if (ordinal)
+    *ordinal = current + 1;
+  return current < limit;
+}
+
+static int
+macrunner_fragment_output_pso_take_slot(unsigned *ordinal) {
+  static atomic_uint count;
+  static unsigned limit;
+  static dispatch_once_t once;
+  if (!macrunner_fragment_output_probe_enabled())
+    return 0;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_FRAGMENT_OUTPUT_PROBE_MAX");
+    char *end = NULL;
+    unsigned long parsed = value && value[0] ? strtoul(value, &end, 0) : 0;
+    limit = end && end != value && parsed > 0 && parsed <= 4096 ? parsed : 64;
+  });
+  unsigned current = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed);
+  if (ordinal)
+    *ordinal = current + 1;
+  return current < limit;
+}
+
+static int
+macrunner_vertex_data_probe_enabled(void) {
+  /* MacRunner 28.09.2026: read once; getenv here was 19 % of the dxmt encode thread's work. */
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("MACRUNNER_HB_VERTEX_DATA_PROBE");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+  }
+  return enabled;
+}
+
+static int
+macrunner_vertex_data_draw_take_slot(unsigned *ordinal) {
+  static atomic_uint count;
+  static unsigned limit;
+  static dispatch_once_t once;
+  if (!macrunner_vertex_data_probe_enabled())
+    return 0;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_VERTEX_DATA_DRAW_MAX");
+    char *end = NULL;
+    unsigned long parsed = value && value[0] ? strtoul(value, &end, 0) : 0;
+    limit = end && end != value && parsed > 0 && parsed <= 65536 ? parsed : 4096;
+  });
+  unsigned current = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed);
+  if (ordinal)
+    *ordinal = current + 1;
+  return current < limit;
+}
+
+static int
+macrunner_render_probe_state_enabled(void) {
+  return macrunner_gpu_readback_probe_enabled() || macrunner_shader_inputs_probe_enabled() ||
+         macrunner_fragment_output_probe_enabled() || macrunner_force_magenta_fragment_enabled() ||
+         macrunner_force_fragment_magenta_global_enabled() ||
+         macrunner_causal_ladder_enabled() || macrunner_vertex_data_probe_enabled();
+}
+
+/*
+ * Maps the native DXMT render-pass attachments on a command buffer to the
+ * CAMetalDrawable texture observed at Present.  The trace is off by default
+ * and has no fixed sampling limit: each command buffer retains its complete
+ * set of non-null color/resolve texture identities until it is released.
+ */
+static BOOL
+macrunner_present_attachment_trace_enabled(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("MACRUNNER_HB_PRESENT_SURFACE_ATTACHMENT_TRACE");
+    enabled = value && value[0] && strcmp(value, "0");
+  }
+  return enabled;
+}
+
+static MacRunnerPresentAttachmentTrace *
+macrunner_present_attachment_trace_for_command_buffer(id<MTLCommandBuffer> command_buffer,
+                                                      BOOL create) {
+  if (!macrunner_present_attachment_trace_enabled() || !command_buffer)
+    return nil;
+  MacRunnerPresentAttachmentTrace *trace = objc_getAssociatedObject(
+      command_buffer, &macrunner_present_attachment_trace_key);
+  if (!trace && create) {
+    trace = [[MacRunnerPresentAttachmentTrace alloc] init];
+    objc_setAssociatedObject(command_buffer, &macrunner_present_attachment_trace_key, trace,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [trace release];
+  }
+  return trace;
+}
+
+static void
+macrunner_present_attachment_trace_record(id<MTLCommandBuffer> command_buffer,
+                                          const struct WMTRenderPassInfo *info) {
+  MacRunnerPresentAttachmentTrace *trace =
+      macrunner_present_attachment_trace_for_command_buffer(command_buffer, YES);
+  if (!trace || !info)
+    return;
+  trace->render_encoder_count++;
+  for (unsigned i = 0; i < 8; i++) {
+    trace->color_slot_count++;
+    if (info->colors[i].texture) {
+      trace->color_nonnull_count++;
+      if (info->colors[i].load_action == WMTLoadActionClear)
+        trace->color_clear_count++;
+      [trace->color_textures addObject:
+          [NSValue valueWithPointer:(void *)info->colors[i].texture]];
+    }
+    trace->resolve_slot_count++;
+    if (info->colors[i].resolve_texture) {
+      trace->resolve_nonnull_count++;
+      [trace->resolve_textures addObject:
+          [NSValue valueWithPointer:(void *)info->colors[i].resolve_texture]];
+    }
+  }
+}
+
+static void
+macrunner_present_attachment_trace_log(id<MTLCommandBuffer> command_buffer,
+                                       id<MTLTexture> texture, uint64_t ordinal,
+                                       BOOL direct_control_match) {
+  if (!macrunner_present_attachment_trace_enabled())
+    return;
+  MacRunnerPresentAttachmentTrace *trace =
+      macrunner_present_attachment_trace_for_command_buffer(command_buffer,
+                                                             direct_control_match);
+  uint64_t encoders = trace ? trace->render_encoder_count : 0;
+  uint64_t color_slots = trace ? trace->color_slot_count : 0;
+  uint64_t color_nonnull = trace ? trace->color_nonnull_count : 0;
+  uint64_t resolve_slots = trace ? trace->resolve_slot_count : 0;
+  uint64_t resolve_nonnull = trace ? trace->resolve_nonnull_count : 0;
+  uint64_t color_clears = trace ? trace->color_clear_count : 0;
+  uint64_t draws = trace ? trace->draw_count : 0;
+  uint64_t control_writes = trace ? trace->direct_control_writes : 0;
+  NSUInteger color_unique = trace ? [trace->color_textures count] : 0;
+  NSUInteger resolve_unique = trace ? [trace->resolve_textures count] : 0;
+  BOOL color_match = trace && texture && [trace->color_textures containsObject:
+      [NSValue valueWithPointer:(void *)texture]];
+  BOOL resolve_match = trace && texture && [trace->resolve_textures containsObject:
+      [NSValue valueWithPointer:(void *)texture]];
+  fprintf(stderr,
+          "macrunner-hb-present-attachment: phase=map result=ok ordinal=%llu "
+          "command_buffer=%p texture=%p encoders=%llu color_slots=%llu "
+          "color_nonnull=%llu color_unique=%lu color_match=%u "
+          "color_clears=%llu draws=%llu "
+          "resolve_slots=%llu resolve_nonnull=%llu resolve_unique=%lu "
+          "resolve_match=%u direct_control_writes=%llu direct_control_match=%u\n",
+          (unsigned long long)ordinal, command_buffer, texture,
+          (unsigned long long)encoders, (unsigned long long)color_slots,
+          (unsigned long long)color_nonnull, (unsigned long)color_unique, color_match,
+          (unsigned long long)color_clears, (unsigned long long)draws,
+          (unsigned long long)resolve_slots, (unsigned long long)resolve_nonnull,
+          (unsigned long)resolve_unique, resolve_match,
+          (unsigned long long)control_writes, direct_control_match);
+  fflush(stderr);
+}
+
+static void
+macrunner_fragment_output_log_draw(MacRunnerRenderProbeState *state,
+                                   const char *kind) {
+  unsigned ordinal;
+  if (!state || !state->pso ||
+      !macrunner_fragment_output_probe_take_slot(&ordinal))
+    return;
+  MacRunnerPipelineProbeInfo *pipeline =
+      objc_getAssociatedObject((id)state->pso, &macrunner_pipeline_probe_info_key);
+  if (!pipeline)
+    return;
+  fprintf(
+      stderr,
+      "macrunner-hb-fragment-output: side=winemetal phase=draw ordinal=%u "
+      "pso_id=0x%016llx draw=%s pso=%p rtv=%p ps=%s ps_hash=%016llx "
+      "override_magenta=%u metal_rt0_format=%lu metal_write_mask=0x%lx "
+      "metal_blend=%u metal_rgb_op=%lu metal_alpha_op=%lu "
+      "metal_src_rgb=%lu metal_dst_rgb=%lu metal_src_alpha=%lu metal_dst_alpha=%lu "
+      "viewport_valid=%u viewport=%.3f,%.3f,%.3f,%.3f,%.6f,%.6f\n",
+      ordinal, (unsigned long long)pipeline->pso_id, kind,
+      (void *)(uintptr_t)state->pso, (void *)(uintptr_t)state->render_target,
+      pipeline->fragment_name, (unsigned long long)pipeline->fragment_hash,
+      pipeline->magenta_override, (unsigned long)pipeline->metal_rt0_format,
+      (unsigned long)pipeline->metal_write_mask, pipeline->metal_blend_enabled,
+      (unsigned long)pipeline->metal_rgb_op, (unsigned long)pipeline->metal_alpha_op,
+      (unsigned long)pipeline->metal_src_rgb, (unsigned long)pipeline->metal_dst_rgb,
+      (unsigned long)pipeline->metal_src_alpha, (unsigned long)pipeline->metal_dst_alpha,
+      state->viewport_valid, state->viewport.originX, state->viewport.originY,
+      state->viewport.width, state->viewport.height, state->viewport.znear,
+      state->viewport.zfar);
+  fflush(stderr);
+}
+
+static uint64_t
+macrunner_causal_hash_bytes(const void *data, size_t size) {
+  const uint8_t *bytes = data;
+  uint64_t hash = UINT64_C(14695981039346656037);
+  for (size_t i = 0; i < size; i++) {
+    hash ^= bytes[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static uint64_t
+macrunner_causal_hash_string(const char *value) {
+  return macrunner_causal_hash_bytes(value, value ? strlen(value) : 0);
+}
+
+static uint64_t
+macrunner_causal_signature_checksum(
+    const struct MacRunnerCausalDrawSignature *signature) {
+  uint64_t checksum = UINT64_C(14695981039346656037);
+  const uint8_t *bytes = (const uint8_t *)signature;
+  for (unsigned field = 0; field < MACRUNNER_CAUSAL_SIGNATURE_FIELD_COUNT;
+       field++) {
+    uint64_t value = 0;
+    memcpy(&value, bytes + field * sizeof(uint64_t), sizeof(value));
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+      checksum ^= (uint8_t)(value >> shift);
+      checksum *= UINT64_C(1099511628211);
+    }
+  }
+  return checksum;
+}
+
+static int
+macrunner_causal_signature_artifact_valid(void) {
+  static int valid;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    uint64_t observed =
+        macrunner_causal_signature_checksum(&macrunner_causal_c0_signature);
+    valid = observed == MACRUNNER_CAUSAL_SIGNATURE_CHECKSUM;
+    if (macrunner_causal_ladder_enabled()) {
+      fprintf(stderr,
+              "macrunner-hb-causal-ladder: phase=signature-artifact "
+              "control=%s result=%s schema=%llu fields=%u "
+              "expected_checksum=0x%016llx observed_checksum=0x%016llx\n",
+              macrunner_causal_phase_name(macrunner_causal_control()),
+              valid ? "ok" : "invalid",
+              (unsigned long long)MACRUNNER_CAUSAL_SIGNATURE_SCHEMA,
+              MACRUNNER_CAUSAL_SIGNATURE_FIELD_COUNT,
+              (unsigned long long)MACRUNNER_CAUSAL_SIGNATURE_CHECKSUM,
+              (unsigned long long)observed);
+      fflush(stderr);
+    }
+  });
+  return valid;
+}
+
+static void
+macrunner_causal_log_u64(unsigned phase, const char *scope,
+                         const char *field, uint64_t expected,
+                         uint64_t observed) {
+  fprintf(stderr,
+          "macrunner-hb-causal-ladder: phase=signature-field control=%s "
+          "scope=%s field=%s expected=0x%016llx observed=0x%016llx "
+          "changed=%u\n",
+          macrunner_causal_phase_name(phase), scope, field,
+          (unsigned long long)expected, (unsigned long long)observed,
+          expected != observed);
+}
+
+static void
+macrunner_causal_log_signature_diff(
+    unsigned phase, const struct MacRunnerCausalDrawSignature *expected,
+    const struct MacRunnerCausalDrawSignature *observed) {
+#define LOG_SIGNATURE_U64(field)                                              \
+  do {                                                                        \
+    if (expected->field != observed->field)                                   \
+      macrunner_causal_log_u64(phase, "semantic", #field, expected->field,   \
+                               observed->field);                              \
+  } while (0)
+  LOG_SIGNATURE_U64(schema_version);
+  LOG_SIGNATURE_U64(logical_pso_id);
+  LOG_SIGNATURE_U64(vertex_name_hash);
+  LOG_SIGNATURE_U64(fragment_name_hash);
+  LOG_SIGNATURE_U64(fragment_hash);
+  LOG_SIGNATURE_U64(index_buffer_offset);
+  LOG_SIGNATURE_U64(index_count);
+  LOG_SIGNATURE_U64(primitive_type);
+  LOG_SIGNATURE_U64(index_type);
+  LOG_SIGNATURE_U64(instance_count);
+  LOG_SIGNATURE_U64(base_vertex);
+  LOG_SIGNATURE_U64(base_instance);
+  LOG_SIGNATURE_U64(viewport_valid);
+  LOG_SIGNATURE_U64(viewport_x_bits);
+  LOG_SIGNATURE_U64(viewport_y_bits);
+  LOG_SIGNATURE_U64(viewport_width_bits);
+  LOG_SIGNATURE_U64(viewport_height_bits);
+  LOG_SIGNATURE_U64(viewport_znear_bits);
+  LOG_SIGNATURE_U64(viewport_zfar_bits);
+  LOG_SIGNATURE_U64(scissor_valid);
+  LOG_SIGNATURE_U64(scissor_x);
+  LOG_SIGNATURE_U64(scissor_y);
+  LOG_SIGNATURE_U64(scissor_width);
+  LOG_SIGNATURE_U64(scissor_height);
+  LOG_SIGNATURE_U64(index_buffer_length);
+  LOG_SIGNATURE_U64(index_storage_mode);
+  LOG_SIGNATURE_U64(index_slice_valid);
+  LOG_SIGNATURE_U64(index_slice_bytes);
+  LOG_SIGNATURE_U64(index_slice_hash);
+  LOG_SIGNATURE_U64(metal_rt0_format);
+  LOG_SIGNATURE_U64(metal_write_mask);
+  LOG_SIGNATURE_U64(metal_blend_enabled);
+  LOG_SIGNATURE_U64(metal_rgb_op);
+  LOG_SIGNATURE_U64(metal_alpha_op);
+  LOG_SIGNATURE_U64(metal_src_rgb);
+  LOG_SIGNATURE_U64(metal_dst_rgb);
+  LOG_SIGNATURE_U64(metal_src_alpha);
+  LOG_SIGNATURE_U64(metal_dst_alpha);
+  LOG_SIGNATURE_U64(metal_depth_format);
+  LOG_SIGNATURE_U64(metal_stencil_format);
+  LOG_SIGNATURE_U64(metal_sample_count);
+  LOG_SIGNATURE_U64(metal_input_topology);
+  LOG_SIGNATURE_U64(metal_alpha_to_coverage);
+  LOG_SIGNATURE_U64(render_target_width);
+  LOG_SIGNATURE_U64(render_target_height);
+  LOG_SIGNATURE_U64(fill_mode);
+  LOG_SIGNATURE_U64(cull_mode);
+  LOG_SIGNATURE_U64(depth_clip_mode);
+  LOG_SIGNATURE_U64(stencil_ref);
+  LOG_SIGNATURE_U64(color_load_action);
+  for (unsigned i = 0; i < 4; i++) {
+    char field[32];
+    snprintf(field, sizeof(field), "blend_color_bits[%u]", i);
+    if (expected->blend_color_bits[i] != observed->blend_color_bits[i])
+      macrunner_causal_log_u64(phase, "semantic", field,
+                               expected->blend_color_bits[i],
+                               observed->blend_color_bits[i]);
+  }
+  fflush(stderr);
+#undef LOG_SIGNATURE_U64
+}
+
+static void
+macrunner_causal_signature_fill(
+    struct MacRunnerCausalDrawSignature *signature,
+    MacRunnerRenderProbeState *state,
+    MacRunnerPipelineProbeInfo *pipeline,
+    const struct wmtcmd_render_draw_indexed *draw) {
+  memset(signature, 0, sizeof(*signature));
+  signature->schema_version = MACRUNNER_CAUSAL_SIGNATURE_SCHEMA;
+  signature->logical_pso_id = pipeline->pso_id;
+  signature->vertex_name_hash = macrunner_causal_hash_string(pipeline->vertex_name);
+  signature->fragment_name_hash =
+      macrunner_causal_hash_string(pipeline->fragment_name);
+  signature->fragment_hash = pipeline->fragment_hash;
+  signature->index_buffer_offset = draw->index_buffer_offset;
+  signature->index_count = draw->index_count;
+  signature->primitive_type = draw->primitive_type;
+  signature->index_type = draw->index_type;
+  signature->instance_count = draw->instance_count;
+  signature->base_vertex = (uint64_t)(int64_t)draw->base_vertex;
+  signature->base_instance = draw->base_instance;
+  signature->viewport_valid = state->viewport_valid;
+  memcpy(&signature->viewport_x_bits, &state->viewport.originX,
+         sizeof(signature->viewport_x_bits));
+  memcpy(&signature->viewport_y_bits, &state->viewport.originY,
+         sizeof(signature->viewport_y_bits));
+  memcpy(&signature->viewport_width_bits, &state->viewport.width,
+         sizeof(signature->viewport_width_bits));
+  memcpy(&signature->viewport_height_bits, &state->viewport.height,
+         sizeof(signature->viewport_height_bits));
+  memcpy(&signature->viewport_znear_bits, &state->viewport.znear,
+         sizeof(signature->viewport_znear_bits));
+  memcpy(&signature->viewport_zfar_bits, &state->viewport.zfar,
+         sizeof(signature->viewport_zfar_bits));
+  signature->scissor_valid = state->scissor_valid;
+  signature->scissor_x = state->scissor.x;
+  signature->scissor_y = state->scissor.y;
+  signature->scissor_width = state->scissor.width;
+  signature->scissor_height = state->scissor.height;
+  signature->metal_rt0_format = pipeline->metal_rt0_format;
+  signature->metal_write_mask = pipeline->metal_write_mask;
+  signature->metal_blend_enabled = pipeline->metal_blend_enabled;
+  signature->metal_rgb_op = pipeline->metal_rgb_op;
+  signature->metal_alpha_op = pipeline->metal_alpha_op;
+  signature->metal_src_rgb = pipeline->metal_src_rgb;
+  signature->metal_dst_rgb = pipeline->metal_dst_rgb;
+  signature->metal_src_alpha = pipeline->metal_src_alpha;
+  signature->metal_dst_alpha = pipeline->metal_dst_alpha;
+  signature->metal_depth_format = pipeline->metal_depth_format;
+  signature->metal_stencil_format = pipeline->metal_stencil_format;
+  signature->metal_sample_count = pipeline->metal_sample_count;
+  signature->metal_input_topology = pipeline->metal_input_topology;
+  signature->metal_alpha_to_coverage = pipeline->metal_alpha_to_coverage;
+  signature->render_target_width = state->render_target_width;
+  signature->render_target_height = state->render_target_height;
+  signature->fill_mode = state->fill_mode;
+  signature->cull_mode = state->cull_mode;
+  signature->depth_clip_mode = state->depth_clip_mode;
+  signature->stencil_ref = state->stencil_ref;
+  signature->color_load_action = state->color_load_action;
+  for (unsigned i = 0; i < 4; i++) {
+    uint32_t bits = 0;
+    memcpy(&bits, &state->blend_color[i], sizeof(bits));
+    signature->blend_color_bits[i] = bits;
+  }
+
+  id<MTLBuffer> index_buffer = (id<MTLBuffer>)draw->index_buffer;
+  if (!index_buffer)
+    return;
+  signature->index_buffer_length = index_buffer.length;
+  signature->index_storage_mode = index_buffer.storageMode;
+  const uint64_t stride =
+      draw->index_type == WMTIndexTypeUInt32 ? 4u : 2u;
+  if (draw->index_count > UINT64_MAX / stride)
+    return;
+  const uint64_t bytes = draw->index_count * stride;
+  signature->index_slice_bytes = bytes;
+  if ((index_buffer.storageMode != MTLStorageModeShared &&
+       index_buffer.storageMode != MTLStorageModeManaged) ||
+      draw->index_buffer_offset > index_buffer.length ||
+      bytes > index_buffer.length - draw->index_buffer_offset)
+    return;
+  const uint8_t *contents = (const uint8_t *)index_buffer.contents;
+  if (!contents)
+    return;
+  signature->index_slice_hash = macrunner_causal_hash_bytes(
+      contents + draw->index_buffer_offset, bytes);
+  signature->index_slice_valid = 1;
+}
+
+static id<MTLRenderPipelineState>
+macrunner_causal_prepare_indexed_draw(
+    MacRunnerRenderProbeState *state,
+    id<MTLRenderCommandEncoder> encoder,
+    const struct wmtcmd_render_draw_indexed *draw, unsigned requested_phase,
+    unsigned *phase_out,
+    id<MTLBuffer> *sidechannel_out) {
+  if (phase_out)
+    *phase_out = UINT32_MAX;
+  if (sidechannel_out)
+    *sidechannel_out = nil;
+  if (!macrunner_causal_phase_requested(requested_phase))
+    return nil;
+  if (!macrunner_causal_ladder_enabled() || !state || !state->pso ||
+      !state->viewport_valid || state->viewport.originX != 0.0 ||
+      state->viewport.originY != 64.0 || state->viewport.width != 1024.0 ||
+      state->viewport.height != 640.0 ||
+      atomic_load_explicit(&macrunner_causal_invalid, memory_order_acquire))
+    return nil;
+
+  MacRunnerPipelineProbeInfo *pipeline =
+      objc_getAssociatedObject((id)state->pso, &macrunner_pipeline_probe_info_key);
+  if (!pipeline || pipeline->pso_id != UINT64_C(0x9d2b46c27af732f4))
+    return nil;
+  const uint32_t phase_bit = UINT32_C(1) << requested_phase;
+  if (atomic_load_explicit(&macrunner_causal_control_claimed_mask,
+                           memory_order_acquire) & phase_bit)
+    return nil;
+  unsigned phase = requested_phase;
+  if (phase >= 4)
+    return nil;
+  if (!macrunner_causal_signature_artifact_valid()) {
+    atomic_store_explicit(&macrunner_causal_invalid, true, memory_order_release);
+    return nil;
+  }
+
+  struct MacRunnerCausalDrawSignature signature;
+  macrunner_causal_signature_fill(&signature, state, pipeline, draw);
+  const uint64_t observed_checksum =
+      macrunner_causal_signature_checksum(&signature);
+  const BOOL signature_match =
+      observed_checksum == MACRUNNER_CAUSAL_SIGNATURE_CHECKSUM &&
+      memcmp(&signature, &macrunner_causal_c0_signature,
+             sizeof(signature)) == 0;
+
+  if (!signature_match) {
+    unsigned skip_log = atomic_fetch_add_explicit(
+        &macrunner_causal_signature_skip_logs, 1, memory_order_acq_rel);
+    if (skip_log < 4) {
+      macrunner_causal_log_signature_diff(
+          phase, &macrunner_causal_c0_signature, &signature);
+      fprintf(stderr,
+              "macrunner-hb-causal-ladder: phase=draw-select control=%s "
+              "result=skip reason=canonical-logical-signature-mismatch "
+              "logical_pso=0x%016llx expected_checksum=0x%016llx "
+              "observed_checksum=0x%016llx skip_index=%u\n",
+              macrunner_causal_phase_name(phase),
+              (unsigned long long)pipeline->pso_id,
+              (unsigned long long)MACRUNNER_CAUSAL_SIGNATURE_CHECKSUM,
+              (unsigned long long)observed_checksum, skip_log);
+      fflush(stderr);
+    }
+    return nil;
+  }
+
+  bool expected_busy = false;
+  if (!atomic_compare_exchange_strong_explicit(
+          &macrunner_causal_stage_busy, &expected_busy, true,
+          memory_order_acq_rel, memory_order_acquire))
+    return nil;
+  if (atomic_load_explicit(&macrunner_causal_control_claimed_mask,
+                           memory_order_acquire) & phase_bit) {
+    atomic_store_explicit(&macrunner_causal_stage_busy, false,
+                          memory_order_release);
+    return nil;
+  }
+  if (!pipeline->causal_ready) {
+    atomic_store_explicit(&macrunner_causal_invalid, true, memory_order_release);
+    atomic_store_explicit(&macrunner_causal_stage_busy, false,
+                          memory_order_release);
+    fprintf(stderr,
+            "macrunner-hb-causal-ladder: phase=draw-select control=%s "
+            "result=invalid reason=physical-variants-unavailable "
+            "logical_pso=0x%016llx\n",
+            macrunner_causal_phase_name(phase),
+            (unsigned long long)pipeline->pso_id);
+    return nil;
+  }
+
+  id<MTLRenderPipelineState> selected =
+      (id<MTLRenderPipelineState>)pipeline->causal_pso[phase];
+  if (!selected) {
+    atomic_store_explicit(&macrunner_causal_invalid, true, memory_order_release);
+    atomic_store_explicit(&macrunner_causal_stage_busy, false, memory_order_release);
+    fprintf(stderr,
+            "macrunner-hb-causal-ladder: phase=draw-select control=%s "
+            "result=invalid reason=null-physical-pso logical_pso=0x%016llx\n",
+            macrunner_causal_phase_name(phase),
+            (unsigned long long)pipeline->pso_id);
+    return nil;
+  }
+
+  const NSUInteger sidechannel_length =
+      (NSUInteger)MACRUNNER_CAUSAL_SIDECHANNEL_WIDTH *
+      MACRUNNER_CAUSAL_SIDECHANNEL_HEIGHT * 16u;
+  id<MTLCommandBuffer> command_buffer =
+      (id<MTLCommandBuffer>)state->command_buffer;
+  id<MTLBuffer> sidechannel = [command_buffer.device
+      newBufferWithLength:sidechannel_length
+                  options:MTLResourceStorageModeShared];
+  uint32_t *words = (uint32_t *)[sidechannel contents];
+  if (!sidechannel || !words) {
+    [sidechannel release];
+    atomic_store_explicit(&macrunner_causal_invalid, true,
+                          memory_order_release);
+    atomic_store_explicit(&macrunner_causal_stage_busy, false,
+                          memory_order_release);
+    fprintf(stderr,
+            "macrunner-hb-causal-ladder: phase=sidechannel-prepare "
+            "control=%s result=invalid reason=shared-buffer-allocation\n",
+            macrunner_causal_phase_name(phase));
+    return nil;
+  }
+  const NSUInteger word_count = sidechannel_length / sizeof(uint32_t);
+  for (NSUInteger i = 0; i < word_count; i++)
+    words[i] = MACRUNNER_CAUSAL_SIDECHANNEL_SENTINEL;
+  sidechannel.label = [NSString stringWithFormat:
+      @"MacRunner exact fragment output %s", macrunner_causal_phase_name(phase)];
+  [encoder setFragmentBuffer:sidechannel
+                      offset:0
+                     atIndex:MACRUNNER_CAUSAL_SIDECHANNEL_BUFFER_INDEX];
+  if (sidechannel_out)
+    *sidechannel_out = sidechannel;
+
+  uint32_t old_claimed = atomic_fetch_or_explicit(
+      &macrunner_causal_control_claimed_mask, phase_bit, memory_order_acq_rel);
+  if (old_claimed & phase_bit) {
+    [sidechannel release];
+    atomic_store_explicit(&macrunner_causal_stage_busy, false,
+                          memory_order_release);
+    return nil;
+  }
+  state->causal_target_seen = YES;
+  state->causal_signature_match = YES;
+  state->causal_phase = phase;
+  state->causal_target_draw_count = state->draw_count + 1;
+  if (phase_out)
+    *phase_out = phase;
+  fprintf(
+      stderr,
+      "macrunner-hb-causal-ladder: phase=draw-select control=%s result=ok "
+      "logical_pso=0x%016llx original_pso=%p physical_pso=%p "
+      "primitive=%u index_count=%llu index_type=%u index_buffer=%p "
+      "index_offset=%llu instances=%u base_vertex=%d base_instance=%u "
+      "viewport=%.0f,%.0f,%.0f,%.0f scissor=%llu,%llu,%llu,%llu "
+      "sequence_count=%u expected_mask=0x%02x claimed_mask=0x%02x\n",
+      macrunner_causal_phase_name(phase),
+      (unsigned long long)pipeline->pso_id, (void *)(uintptr_t)state->pso,
+      selected, draw->primitive_type, (unsigned long long)draw->index_count,
+      draw->index_type, (void *)(uintptr_t)draw->index_buffer,
+      (unsigned long long)draw->index_buffer_offset, draw->instance_count,
+      draw->base_vertex, draw->base_instance, state->viewport.originX,
+      state->viewport.originY, state->viewport.width, state->viewport.height,
+      (unsigned long long)state->scissor.x,
+      (unsigned long long)state->scissor.y,
+      (unsigned long long)state->scissor.width,
+      (unsigned long long)state->scissor.height,
+      macrunner_causal_control_count(),
+      (unsigned)macrunner_causal_control_mask(),
+      (unsigned)atomic_load_explicit(&macrunner_causal_control_claimed_mask,
+                                     memory_order_acquire));
+  fprintf(stderr,
+          "macrunner-hb-causal-ladder: phase=sidechannel-prepare control=%s "
+          "result=ok buffer=%p slot=%u bytes=%lu restored_buffer=%p "
+          "restored_offset=%llu\n",
+          macrunner_causal_phase_name(phase), sidechannel,
+          MACRUNNER_CAUSAL_SIDECHANNEL_BUFFER_INDEX,
+          (unsigned long)sidechannel_length,
+          (void *)(uintptr_t)state->fragment_buffers[
+              MACRUNNER_CAUSAL_SIDECHANNEL_BUFFER_INDEX],
+          (unsigned long long)state->fragment_buffer_offsets[
+              MACRUNNER_CAUSAL_SIDECHANNEL_BUFFER_INDEX]);
+  fflush(stderr);
+  return selected;
+}
+
+static void
+macrunner_causal_finish_draw(MacRunnerRenderProbeState *state,
+                             id<MTLBuffer> sidechannel, unsigned phase) {
+  if (!state || !sidechannel || phase >= 4) {
+    [sidechannel release];
+    atomic_store_explicit(&macrunner_causal_invalid, true,
+                          memory_order_release);
+    atomic_store_explicit(&macrunner_causal_stage_busy, false,
+                          memory_order_release);
+    return;
+  }
+  id<MTLCommandBuffer> command_buffer =
+      (id<MTLCommandBuffer>)state->command_buffer;
+  [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+    macrunner_causal_sidechannel_analyze(completed, sidechannel, phase);
+    [sidechannel release];
+  }];
+  const uint32_t phase_bit = UINT32_C(1) << phase;
+  BOOL scheduled =
+      macrunner_causal_phase_requested(phase) &&
+      (atomic_load_explicit(&macrunner_causal_control_claimed_mask,
+                            memory_order_acquire) & phase_bit);
+  if (!scheduled)
+    atomic_store_explicit(&macrunner_causal_invalid, true,
+                          memory_order_release);
+  atomic_store_explicit(&macrunner_causal_stage_busy, false,
+                        memory_order_release);
+  fprintf(stderr,
+          "macrunner-hb-causal-ladder: phase=sidechannel-schedule control=%s "
+          "result=%s target_draw=%u buffer=%p one_shot=1 same_logical_draw=1 "
+          "sequence_count=%u expected_mask=0x%02x claimed_mask=0x%02x\n",
+          macrunner_causal_phase_name(phase), scheduled ? "ok" : "invalid",
+          state->causal_target_draw_count, sidechannel,
+          macrunner_causal_control_count(),
+          (unsigned)macrunner_causal_control_mask(),
+          (unsigned)atomic_load_explicit(&macrunner_causal_control_claimed_mask,
+                                         memory_order_acquire));
+  fflush(stderr);
+}
+
+/*
+ * The side-channel proves a fragment output, not the Metal attachment that
+ * receives it.  Keep this separate, explicit, and default-off: it samples the
+ * exact causal draw's active color target after its encoder ends.  It is not a
+ * claim that this target is the surface ultimately presented by DXMT.
+ */
+static BOOL
+macrunner_causal_target_readback_enabled(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("MACRUNNER_HB_CAUSAL_TARGET_READBACK");
+    enabled = value && value[0] && strcmp(value, "0");
+  }
+  return enabled;
+}
+
+/*
+ * This is deliberately separate from the causal target readback: the latter
+ * samples the attachment of the selected draw, whereas this one samples the
+ * CAMetalDrawable texture that the same command buffer actually presents.
+ * It is armed only by a valid causal encoder and defaults off.
+ */
+static BOOL
+macrunner_causal_present_surface_readback_enabled(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("MACRUNNER_HB_CAUSAL_PRESENT_SURFACE_READBACK");
+    enabled = value && value[0] && strcmp(value, "0");
+  }
+  return enabled;
+}
+
+static BOOL
+macrunner_causal_present_surface_apply_control(id<MTLCommandBuffer> command_buffer,
+                                               id<MTLTexture> texture,
+                                               unsigned phase) {
+  const char *control = getenv("MACRUNNER_HB_CAUSAL_PRESENT_SURFACE_CONTROL");
+  if (!control || !control[0] || !strcmp(control, "0"))
+    return YES;
+  if (strcmp(control, "C1") || phase != 1) {
+    fprintf(stderr,
+            "macrunner-hb-causal-present-surface: phase=control result=invalid "
+            "control=%s causal_control=%s reason=only-C1-is-supported\n",
+            control, macrunner_causal_phase_name(phase));
+    return NO;
+  }
+  MTLRenderPassDescriptor *descriptor = [[MTLRenderPassDescriptor alloc] init];
+  descriptor.colorAttachments[0].texture = texture;
+  descriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
+  descriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+  descriptor.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 0.0, 1.0, 1.0);
+  id<MTLRenderCommandEncoder> encoder =
+      [command_buffer renderCommandEncoderWithDescriptor:descriptor];
+  [descriptor release];
+  if (!encoder) {
+    fprintf(stderr,
+            "macrunner-hb-causal-present-surface: phase=c1-inject result=invalid "
+            "reason=render-encoder-allocation texture=%p\n", texture);
+    return NO;
+  }
+  [encoder endEncoding];
+  fprintf(stderr,
+          "macrunner-hb-causal-present-surface: phase=c1-inject result=ok "
+          "texture=%p value=1,0,1,1\n", texture);
+  return YES;
+}
+
+/* Direct observable surface, intentionally not restricted to a causal draw. */
+static BOOL
+macrunner_present_surface_readback_enabled(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("MACRUNNER_HB_PRESENT_SURFACE_READBACK");
+    enabled = value && value[0] && strcmp(value, "0");
+  }
+  return enabled;
+}
+
+/*
+ * A late frame is the relevant boundary for Hollow Knight.  Keeping the
+ * ordinal count uncapped while copying every drawable would allocate a staging
+ * buffer for every Present, so an opt-in selector takes exactly one sample.
+ * The selector is parsed once because the child environment is immutable.
+ */
+static BOOL
+macrunner_present_surface_readback_ordinal_matches(uint64_t ordinal) {
+  static dispatch_once_t once;
+  static BOOL valid = YES;
+  static BOOL configured;
+  static uint64_t selected_ordinal;
+
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_HB_PRESENT_SURFACE_READBACK_ORDINAL");
+    if (!value || !value[0] || !strcmp(value, "0"))
+      return;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno || end == value || !end || *end || !parsed) {
+      valid = NO;
+      fprintf(stderr,
+              "macrunner-hb-present-surface: phase=selector result=invalid "
+              "value=%s reason=expected-positive-decimal-ordinal\n", value);
+      return;
+    }
+    configured = YES;
+    selected_ordinal = (uint64_t)parsed;
+    fprintf(stderr,
+            "macrunner-hb-present-surface: phase=selector result=ok ordinal=%llu\n",
+            (unsigned long long)selected_ordinal);
+  });
+  return valid && (!configured || ordinal == selected_ordinal);
+}
+
+static BOOL
+macrunner_present_surface_apply_control(id<MTLCommandBuffer> command_buffer,
+                                         id<MTLTexture> texture,
+                                         BOOL *did_inject) {
+  if (did_inject)
+    *did_inject = NO;
+  const char *control = getenv("MACRUNNER_HB_PRESENT_SURFACE_CONTROL");
+  if (!control || !control[0] || !strcmp(control, "0"))
+    return YES;
+  if (strcmp(control, "C1")) {
+    fprintf(stderr,
+            "macrunner-hb-present-surface: phase=control result=invalid "
+            "control=%s reason=only-C1-is-supported\n", control);
+    return NO;
+  }
+  MTLRenderPassDescriptor *descriptor = [[MTLRenderPassDescriptor alloc] init];
+  descriptor.colorAttachments[0].texture = texture;
+  descriptor.colorAttachments[0].loadAction = MTLLoadActionClear;
+  descriptor.colorAttachments[0].storeAction = MTLStoreActionStore;
+  descriptor.colorAttachments[0].clearColor = MTLClearColorMake(1.0, 0.0, 1.0, 1.0);
+  id<MTLRenderCommandEncoder> encoder =
+      [command_buffer renderCommandEncoderWithDescriptor:descriptor];
+  [descriptor release];
+  if (!encoder) {
+    fprintf(stderr,
+            "macrunner-hb-present-surface: phase=c1-inject result=invalid "
+            "reason=render-encoder-allocation texture=%p\n", texture);
+    return NO;
+  }
+  [encoder endEncoding];
+  if (did_inject)
+    *did_inject = YES;
+  fprintf(stderr,
+          "macrunner-hb-present-surface: phase=c1-inject result=ok "
+          "texture=%p value=1,0,1,1\n", texture);
+  return YES;
+}
+
+static void
+macrunner_present_surface_schedule(id<MTLCommandBuffer> command_buffer,
+                                   id<CAMetalDrawable> drawable) {
+  if (!macrunner_present_surface_readback_enabled())
+    return;
+  uint64_t ordinal = atomic_fetch_add_explicit(&macrunner_present_surface_ordinal, 1,
+                                               memory_order_relaxed) + 1;
+  if (!macrunner_present_surface_readback_ordinal_matches(ordinal))
+    return;
+  id<MTLTexture> texture = drawable ? drawable.texture : nil;
+  if (!texture) {
+    fprintf(stderr,
+            "macrunner-hb-present-surface: phase=schedule result=invalid "
+            "ordinal=%llu command_buffer=%p drawable=%p reason=null-texture\n",
+            (unsigned long long)ordinal, command_buffer, drawable);
+  } else {
+    BOOL direct_control_match = NO;
+    if (!macrunner_present_surface_apply_control(command_buffer, texture,
+                                                 &direct_control_match))
+      return;
+    if (direct_control_match) {
+      MacRunnerPresentAttachmentTrace *trace =
+          macrunner_present_attachment_trace_for_command_buffer(command_buffer, YES);
+      if (trace)
+        trace->direct_control_writes++;
+    }
+    macrunner_present_attachment_trace_log(command_buffer, texture, ordinal,
+                                           direct_control_match);
+    fprintf(stderr,
+            "macrunner-hb-present-surface: phase=schedule result=ok "
+            "ordinal=%llu command_buffer=%p drawable=%p texture=%p\n",
+            (unsigned long long)ordinal, command_buffer, drawable, texture);
+    macrunner_gpu_readback_schedule(command_buffer, texture,
+                                    MacRunnerGPUReadbackPresentedSurface, ordinal);
+  }
+}
+
+static void
+macrunner_causal_finish_encoder(MacRunnerRenderProbeState *state) {
+  if (!state || !state->causal_target_seen)
+    return;
+  unsigned phase = state->causal_phase;
+  const uint32_t expected_mask = macrunner_causal_control_mask();
+  const uint32_t claimed_mask = atomic_load_explicit(
+      &macrunner_causal_control_claimed_mask, memory_order_acquire);
+  BOOL valid = phase < 4 && expected_mask != 0 &&
+               (claimed_mask & expected_mask) == expected_mask &&
+               state->causal_signature_match &&
+               !atomic_load_explicit(&macrunner_causal_invalid,
+                                     memory_order_acquire);
+  fprintf(stderr,
+          "macrunner-hb-causal-ladder: phase=encoder-end control=%s "
+          "result=%s isolation=shader-sidechannel target_draw=%u "
+          "final_draw=%u rtv=%p sequence_count=%u expected_mask=0x%02x "
+          "claimed_mask=0x%02x\n",
+          macrunner_causal_phase_name(phase), valid ? "ok" : "invalid",
+          state->causal_target_draw_count, state->draw_count,
+          (void *)(uintptr_t)state->render_target,
+          macrunner_causal_control_count(), (unsigned)expected_mask,
+          (unsigned)claimed_mask);
+  if (!valid)
+    atomic_store_explicit(&macrunner_causal_invalid, true, memory_order_release);
+  if (valid && macrunner_causal_present_surface_readback_enabled()) {
+    id<MTLCommandBuffer> command_buffer = (id<MTLCommandBuffer>)state->command_buffer;
+    NSNumber *existing = objc_getAssociatedObject(
+        command_buffer, &macrunner_causal_present_surface_phase_key);
+    if (existing) {
+      fprintf(stderr,
+              "macrunner-hb-causal-present-surface: phase=arm result=skip "
+              "control=%s command_buffer=%p reason=already-armed\n",
+              macrunner_causal_phase_name(phase), command_buffer);
+    } else {
+      NSNumber *armed_phase = [NSNumber numberWithUnsignedInt:phase];
+      objc_setAssociatedObject(command_buffer, &macrunner_causal_present_surface_phase_key,
+                               armed_phase, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+      [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        NSNumber *pending = objc_getAssociatedObject(
+            completed, &macrunner_causal_present_surface_phase_key);
+        if (pending) {
+          fprintf(stderr,
+                  "macrunner-hb-causal-present-surface: phase=complete result=not-presented "
+                  "control=%s command_buffer=%p\n",
+                  macrunner_causal_phase_name(pending.unsignedIntValue), completed);
+          fflush(stderr);
+        }
+      }];
+      fprintf(stderr,
+              "macrunner-hb-causal-present-surface: phase=arm result=ok "
+              "control=%s command_buffer=%p\n",
+              macrunner_causal_phase_name(phase), command_buffer);
+    }
+  }
+  fflush(stderr);
+}
+
+static NSMapTable *
+macrunner_shader_texture_registry(void) {
+  static NSMapTable *registry;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    registry = [[NSMapTable strongToWeakObjectsMapTable] retain];
+  });
+  return registry;
+}
+
+static void
+macrunner_shader_texture_register(uint64_t gpu_resource_id, id<MTLTexture> texture) {
+  if (!macrunner_shader_inputs_probe_enabled() || !gpu_resource_id || !texture)
+    return;
+  NSMapTable *registry = macrunner_shader_texture_registry();
+  @synchronized(registry) {
+    [registry setObject:texture forKey:[NSNumber numberWithUnsignedLongLong:gpu_resource_id]];
+  }
+}
+
+static id<MTLTexture>
+macrunner_shader_texture_lookup(uint64_t gpu_resource_id) {
+  if (!gpu_resource_id)
+    return nil;
+  NSMapTable *registry = macrunner_shader_texture_registry();
+  @synchronized(registry) {
+    return [registry objectForKey:[NSNumber numberWithUnsignedLongLong:gpu_resource_id]];
+  }
+}
+
+static int
+macrunner_shader_texture_readback_take_slot(uint64_t gpu_resource_id) {
+  static uint64_t seen[16];
+  static unsigned count;
+  NSMapTable *registry = macrunner_shader_texture_registry();
+  @synchronized(registry) {
+    for (unsigned i = 0; i < count; i++)
+      if (seen[i] == gpu_resource_id)
+        return 0;
+    if (count >= sizeof(seen) / sizeof(seen[0]))
+      return 0;
+    seen[count++] = gpu_resource_id;
+    return 1;
+  }
+}
+
+static uint64_t
+macrunner_shader_inputs_hash(const uint8_t *bytes, size_t length) {
+  uint64_t hash = UINT64_C(1469598103934665603);
+  for (size_t i = 0; i < length; i++) {
+    hash ^= bytes[i];
+    hash *= UINT64_C(1099511628211);
+  }
+  return hash;
+}
+
+static void
+macrunner_vertex_data_log_draw(MacRunnerRenderProbeState *state,
+                               const char *kind, uint64_t primitive_type,
+                               uint64_t count, uint64_t instance_count,
+                               uint64_t start, int64_t base_vertex,
+                               uint64_t base_instance,
+                               obj_handle_t index_handle,
+                               uint64_t index_offset,
+                               uint64_t index_type) {
+  unsigned ordinal;
+  if (!state || !state->pso ||
+      !macrunner_vertex_data_draw_take_slot(&ordinal))
+    return;
+
+  MacRunnerPipelineProbeInfo *pipeline =
+      objc_getAssociatedObject((id)state->pso, &macrunner_pipeline_probe_info_key);
+  id<MTLBuffer> table = (id<MTLBuffer>)state->vertex_buffers[16];
+  uint64_t table_offset = state->vertex_buffer_offsets[16];
+  NSUInteger table_length = table ? [table length] : 0;
+  const uint8_t *table_contents = table ? (const uint8_t *)[table contents] : NULL;
+  uint64_t entry[2] = {};
+  BOOL entry_valid = table_contents && table_offset <= table_length &&
+                     table_length - table_offset >= sizeof(entry);
+  if (entry_valid)
+    memcpy(entry, table_contents + table_offset, sizeof(entry));
+
+  uint64_t vertex_gpu = entry[0];
+  uint32_t vertex_stride = (uint32_t)entry[1];
+  uint32_t vertex_length = (uint32_t)(entry[1] >> 32);
+
+  id<MTLBuffer> index_buffer = (id<MTLBuffer>)index_handle;
+  NSUInteger index_length = index_buffer ? [index_buffer length] : 0;
+  const uint8_t *index_contents =
+      index_buffer ? (const uint8_t *)[index_buffer contents] : NULL;
+  size_t index_size = index_type == MTLIndexTypeUInt32 ? 4 : 2;
+  uint64_t requested = count <= SIZE_MAX / index_size ? count * index_size : SIZE_MAX;
+  size_t index_scan = 0;
+  if (index_contents && index_offset <= index_length) {
+    uint64_t available = index_length - index_offset;
+    uint64_t bounded = MIN(requested, available);
+    index_scan = (size_t)MIN(bounded, UINT64_C(1024) * 1024);
+  }
+  const uint8_t *index_bytes = index_scan ? index_contents + index_offset : NULL;
+  uint64_t index_hash =
+      index_bytes ? macrunner_causal_hash_bytes(index_bytes, index_scan) : 0;
+  uint32_t indices[6] = {};
+  uint32_t index_min = UINT32_MAX;
+  uint32_t index_max = 0;
+  size_t parsed_indices = index_scan / index_size;
+  for (size_t i = 0; i < parsed_indices; i++) {
+    uint32_t index;
+    if (index_size == 4)
+      memcpy(&index, index_bytes + i * index_size, sizeof(index));
+    else {
+      uint16_t value;
+      memcpy(&value, index_bytes + i * index_size, sizeof(value));
+      index = value;
+    }
+    if (i < 6)
+      indices[i] = index;
+    index_min = MIN(index_min, index);
+    index_max = MAX(index_max, index);
+  }
+
+  BOOL exact = pipeline &&
+      pipeline->pso_id == UINT64_C(0x9d2b46c27af732f4) &&
+      strcmp(pipeline->vertex_name,
+             "vs_59c2a0b5_adcd61f38fa5038495d5d87e7f3a67bb8d794d86") == 0 &&
+      strcmp(pipeline->fragment_name,
+             "ps_bef43b20_f8e9cf38dc7294cc7203c7fb6cd68b27ed713b6a") == 0;
+  fprintf(
+      stderr,
+      "macrunner-hb-vertex-data: side=winemetal phase=draw ordinal=%u exact=%u "
+      "kind=%s pso_id=0x%016llx vs=%s ps=%s primitive=%llu count=%llu "
+      "instances=%llu start=%llu base_vertex=%lld base_instance=%llu "
+      "table=%p table_offset=%llu table_length=%llu table_cpu_visible=%u "
+      "entry_valid=%u vertex_gpu=0x%016llx vertex_stride=%u vertex_length=%u "
+      "index_buffer=%p index_offset=%llu index_type=%llu index_length=%llu "
+      "index_cpu_visible=%u index_scan=%zu index_hash=0x%016llx "
+      "index_parsed=%zu index_min=%u index_max=%u indices=%u,%u,%u,%u,%u,%u\n",
+      ordinal, exact, kind,
+      (unsigned long long)(pipeline ? pipeline->pso_id : 0),
+      pipeline ? pipeline->vertex_name : "unknown",
+      pipeline ? pipeline->fragment_name : "unknown",
+      (unsigned long long)primitive_type, (unsigned long long)count,
+      (unsigned long long)instance_count, (unsigned long long)start,
+      (long long)base_vertex, (unsigned long long)base_instance, table,
+      (unsigned long long)table_offset, (unsigned long long)table_length,
+      table_contents != NULL, entry_valid, (unsigned long long)vertex_gpu,
+      vertex_stride, vertex_length, index_buffer,
+      (unsigned long long)index_offset, (unsigned long long)index_type,
+      (unsigned long long)index_length, index_contents != NULL, index_scan,
+      (unsigned long long)index_hash, parsed_indices,
+      parsed_indices ? index_min : 0, parsed_indices ? index_max : 0,
+      indices[0], indices[1], indices[2], indices[3], indices[4], indices[5]);
+  fflush(stderr);
+}
+
+static int
+macrunner_shader_inputs_draw_take_slot(unsigned *ordinal) {
+  static atomic_uint count;
+  static unsigned limit;
+  if (!macrunner_shader_inputs_probe_enabled())
+    return 0;
+  if (!limit) {
+    const char *value = getenv("MACRUNNER_HB_SHADER_INPUTS_DRAW_MAX");
+    char *end = NULL;
+    unsigned long parsed = value && value[0] ? strtoul(value, &end, 0) : 0;
+    limit = end && end != value && parsed > 0 && parsed <= 1024 ? parsed : 32;
+  }
+  unsigned current = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed);
+  if (ordinal)
+    *ordinal = current + 1;
+  return current < limit;
+}
+
+static void
+macrunner_shader_inputs_log_table(MacRunnerRenderProbeState *state,
+                                  unsigned ordinal, const char *stage,
+                                  unsigned slot, obj_handle_t handle,
+                                  uint64_t offset) {
+  id<MTLBuffer> buffer = (id<MTLBuffer>)handle;
+  if (!buffer) {
+    fprintf(stderr,
+            "macrunner-hb-shader-inputs: side=winemetal kind=table ordinal=%u "
+            "stage=%s slot=%u buffer=null offset=%llu\n",
+            ordinal, stage, slot, (unsigned long long)offset);
+    return;
+  }
+  NSUInteger length = [buffer length];
+  const uint8_t *contents = (const uint8_t *)[buffer contents];
+  size_t scan = contents && offset < length ? MIN((NSUInteger)512, length - offset) : 0;
+  const uint8_t *bytes = scan ? contents + offset : NULL;
+  size_t nonzero = 0;
+  for (size_t i = 0; i < scan; i++)
+    nonzero += bytes[i] != 0;
+  uint64_t q[8] = {};
+  size_t qcount = MIN((size_t)8, scan / sizeof(uint64_t));
+  if (qcount)
+    memcpy(q, bytes, qcount * sizeof(uint64_t));
+  if (state && stage[0] == 'p' && slot == 30) {
+    for (size_t i = 0; i < qcount; i++) {
+      id<MTLTexture> texture = macrunner_shader_texture_lookup(q[i]);
+      if (!texture)
+        continue;
+      BOOL duplicate = NO;
+      for (uint32_t j = 0; j < state->shader_texture_count; j++)
+        duplicate |= state->shader_texture_ids[j] == q[i];
+      if (!duplicate && state->shader_texture_count < 8) {
+        uint32_t index = state->shader_texture_count++;
+        state->shader_texture_ids[index] = q[i];
+        state->shader_textures[index] = (obj_handle_t)texture;
+        fprintf(stderr,
+                "macrunner-hb-shader-inputs: side=winemetal kind=texture-map "
+                "ordinal=%u qword=%zu gpu_id=0x%llx texture=%p format=%lu size=%lux%lu\n",
+                ordinal, i, (unsigned long long)q[i], texture,
+                (unsigned long)[texture pixelFormat],
+                (unsigned long)[texture width], (unsigned long)[texture height]);
+      }
+    }
+  }
+  fprintf(stderr,
+          "macrunner-hb-shader-inputs: side=winemetal kind=table ordinal=%u "
+          "stage=%s slot=%u buffer=%p offset=%llu length=%llu storage=%lu "
+          "cpu_visible=%u scan=%zu hash=%016llx nonzero=%zu "
+          "qwords=%016llx,%016llx,%016llx,%016llx,%016llx,%016llx,%016llx,%016llx\n",
+          ordinal, stage, slot, buffer, (unsigned long long)offset,
+          (unsigned long long)length, (unsigned long)[buffer storageMode],
+          contents != NULL, scan,
+          (unsigned long long)(bytes ? macrunner_shader_inputs_hash(bytes, scan) : 0),
+          nonzero, (unsigned long long)q[0], (unsigned long long)q[1],
+          (unsigned long long)q[2], (unsigned long long)q[3],
+          (unsigned long long)q[4], (unsigned long long)q[5],
+          (unsigned long long)q[6], (unsigned long long)q[7]);
+}
+
+static void
+macrunner_shader_inputs_log_draw(MacRunnerRenderProbeState *state,
+                                 const char *kind) {
+  unsigned ordinal;
+  if (!state || !macrunner_shader_inputs_draw_take_slot(&ordinal))
+    return;
+  fprintf(stderr,
+          "macrunner-hb-shader-inputs: side=winemetal kind=draw ordinal=%u draw=%s "
+          "pso=%p rtv=%p\n", ordinal, kind,
+          (void *)(uintptr_t)state->pso, (void *)(uintptr_t)state->render_target);
+  macrunner_shader_inputs_log_table(state, ordinal, "vs", 29, state->vertex_buffers[29],
+                                    state->vertex_buffer_offsets[29]);
+  macrunner_shader_inputs_log_table(state, ordinal, "vs", 30, state->vertex_buffers[30],
+                                    state->vertex_buffer_offsets[30]);
+  macrunner_shader_inputs_log_table(state, ordinal, "ps", 29, state->fragment_buffers[29],
+                                    state->fragment_buffer_offsets[29]);
+  macrunner_shader_inputs_log_table(state, ordinal, "ps", 30, state->fragment_buffers[30],
+                                    state->fragment_buffer_offsets[30]);
+  fflush(stderr);
+}
+
+static int
+macrunner_gpu_readback_draw_take_slot(unsigned *ordinal) {
+  static atomic_uint count;
+  static unsigned limit;
+  if (!macrunner_gpu_readback_probe_enabled())
+    return 0;
+  if (!limit) {
+    const char *value = getenv("MACRUNNER_HB_GPU_READBACK_DRAW_MAX");
+    char *end = NULL;
+    unsigned long parsed = value && value[0] ? strtoul(value, &end, 0) : 0;
+    limit = end && end != value && parsed > 0 && parsed <= 1024 ? parsed : 32;
+  }
+  unsigned current = atomic_fetch_add_explicit(&count, 1, memory_order_relaxed);
+  if (ordinal)
+    *ordinal = current + 1;
+  return current < limit;
+}
+
+static int
+macrunner_gpu_readback_phase_take_slot(uint32_t phase, uint64_t *tag) {
+  static atomic_uint counters[3];
+  static atomic_ullong sequence;
+  static unsigned limit;
+  if (!macrunner_gpu_readback_probe_enabled() ||
+      phase < MacRunnerGPUReadbackAfterClear || phase > MacRunnerGPUReadbackPrePresent)
+    return 0;
+  if (!limit) {
+    const char *value = getenv("MACRUNNER_HB_GPU_READBACK_MAX");
+    char *end = NULL;
+    unsigned long parsed = value && value[0] ? strtoul(value, &end, 0) : 0;
+    limit = end && end != value && parsed > 0 && parsed <= 64 ? parsed : 4;
+  }
+  unsigned current = atomic_fetch_add_explicit(&counters[phase - 1], 1, memory_order_relaxed);
+  if (tag)
+    *tag = atomic_fetch_add_explicit(&sequence, 1, memory_order_relaxed) + 1;
+  return current < limit;
+}
+
+static void
+macrunner_gpu_readback_log_draw(
+    MacRunnerRenderProbeState *state, id<MTLRenderCommandEncoder> encoder,
+    const char *kind, unsigned primitive, uint64_t count, uint32_t instances,
+    uint64_t start, int32_t base_vertex, uint32_t base_instance,
+    obj_handle_t index_buffer, uint64_t index_offset,
+    obj_handle_t indirect_buffer, uint64_t indirect_offset) {
+  unsigned ordinal;
+  if (!state || !macrunner_gpu_readback_draw_take_slot(&ordinal))
+    return;
+
+  MacRunnerPipelineProbeInfo *pipeline =
+      state->pso ? objc_getAssociatedObject((id)state->pso, &macrunner_pipeline_probe_info_key) : nil;
+  fprintf(
+      stderr,
+      "macrunner-hb-gpu-probe: phase=draw ordinal=%u kind=%s encoder=%p "
+      "rtv=%p rt=%ux%u pso=%p vs=%p ps=%p prim=%u count=%llu instances=%u "
+      "start=%llu base_vertex=%d base_instance=%u ib=%p iboff=%llu indirect=%p indirect_off=%llu "
+      "viewport_valid=%u viewport=%.3f,%.3f,%.3f,%.3f,%.6f,%.6f "
+      "scissor_valid=%u scissor=%llu,%llu,%llu,%llu raster=%u,%u,%u "
+      "vb0=%p+%llu vb1=%p+%llu vb2=%p+%llu vb3=%p+%llu vb16=%p+%llu "
+      "fb0=%p+%llu fb1=%p+%llu fb29=%p+%llu fb30=%p+%llu "
+      "ft0=%p ft1=%p ft2=%p ft3=%p ft4=%p ft5=%p ft6=%p ft7=%p "
+      "samplers=argument-buffer\n",
+      ordinal, kind, encoder, (void *)(uintptr_t)state->render_target,
+      state->render_target_width, state->render_target_height,
+      (void *)(uintptr_t)state->pso,
+      pipeline ? (void *)(uintptr_t)pipeline->vertex_function : NULL,
+      pipeline ? (void *)(uintptr_t)pipeline->fragment_function : NULL,
+      primitive, (unsigned long long)count, instances,
+      (unsigned long long)start, base_vertex, base_instance,
+      (void *)(uintptr_t)index_buffer, (unsigned long long)index_offset,
+      (void *)(uintptr_t)indirect_buffer, (unsigned long long)indirect_offset,
+      state->viewport_valid, state->viewport.originX, state->viewport.originY,
+      state->viewport.width, state->viewport.height, state->viewport.znear,
+      state->viewport.zfar, state->scissor_valid,
+      (unsigned long long)state->scissor.x, (unsigned long long)state->scissor.y,
+      (unsigned long long)state->scissor.width, (unsigned long long)state->scissor.height,
+      state->fill_mode, state->cull_mode, state->depth_clip_mode,
+      (void *)(uintptr_t)state->vertex_buffers[0],
+      (unsigned long long)state->vertex_buffer_offsets[0],
+      (void *)(uintptr_t)state->vertex_buffers[1],
+      (unsigned long long)state->vertex_buffer_offsets[1],
+      (void *)(uintptr_t)state->vertex_buffers[2],
+      (unsigned long long)state->vertex_buffer_offsets[2],
+      (void *)(uintptr_t)state->vertex_buffers[3],
+      (unsigned long long)state->vertex_buffer_offsets[3],
+      (void *)(uintptr_t)state->vertex_buffers[16],
+      (unsigned long long)state->vertex_buffer_offsets[16],
+      (void *)(uintptr_t)state->fragment_buffers[0],
+      (unsigned long long)state->fragment_buffer_offsets[0],
+      (void *)(uintptr_t)state->fragment_buffers[1],
+      (unsigned long long)state->fragment_buffer_offsets[1],
+      (void *)(uintptr_t)state->fragment_buffers[29],
+      (unsigned long long)state->fragment_buffer_offsets[29],
+      (void *)(uintptr_t)state->fragment_buffers[30],
+      (unsigned long long)state->fragment_buffer_offsets[30],
+      (void *)(uintptr_t)state->fragment_textures[0],
+      (void *)(uintptr_t)state->fragment_textures[1],
+      (void *)(uintptr_t)state->fragment_textures[2],
+      (void *)(uintptr_t)state->fragment_textures[3],
+      (void *)(uintptr_t)state->fragment_textures[4],
+      (void *)(uintptr_t)state->fragment_textures[5],
+      (void *)(uintptr_t)state->fragment_textures[6],
+      (void *)(uintptr_t)state->fragment_textures[7]
+  );
+  fflush(stderr);
+}
+
+static int macrunner_render_pipeline_probe_enabled(void) {
+  static int enabled = -1;
+  if (enabled < 0) {
+    const char *value = getenv("MACRUNNER_HB_RENDER_PIPELINE_PROBE");
+    enabled = value && value[0] && strcmp(value, "0") != 0;
+  }
+  return enabled;
+}
+
+static int macrunner_render_pipeline_probe_take_slot(void) {
+  static atomic_uint count;
+  static unsigned limit;
+  if (!macrunner_render_pipeline_probe_enabled())
+    return 0;
+  if (!limit) {
+    const char *value = getenv("MACRUNNER_HB_RENDER_PIPELINE_PROBE_MAX");
+    char *end = NULL;
+    unsigned long parsed = value && value[0] ? strtoul(value, &end, 0) : 0;
+    limit = end && end != value && parsed > 0 && parsed <= 1000000 ? parsed : 8192;
+  }
+  return atomic_fetch_add_explicit(&count, 1, memory_order_relaxed) < limit;
+}
+
+static void macrunner_render_pipeline_probe_log(
+    const char *phase, const void *encoder, const void *head, unsigned cmd_type,
+    const void *pso, unsigned commands, unsigned set_pso, unsigned draws,
+    unsigned missing_pso) {
+  if (!macrunner_render_pipeline_probe_take_slot())
+    return;
+  fprintf(stderr,
+          "macrunner-hb-render-pipeline: layer=winemetal-stream phase=%s "
+          "encoder=%p head=%p cmd=%u pso=%p commands=%u setpso=%u draws=%u "
+          "missing=%u\n",
+          phase, encoder, head, cmd_type, pso, commands, set_pso, draws,
+          missing_pso);
+  fflush(stderr);
+}
 
 void
 execute_on_main(dispatch_block_t block) {
@@ -278,6 +2443,7 @@ _MTLDevice_newTexture(void *obj) {
   id<MTLTexture> ret = [device newTextureWithDescriptor:desc];
   params->ret = (obj_handle_t)ret;
   info->gpu_resource_id = [ret gpuResourceID]._impl;
+  macrunner_shader_texture_register(info->gpu_resource_id, ret);
   info->mach_port = 0;
 
   [desc release];
@@ -295,6 +2461,7 @@ _MTLBuffer_newTexture(void *obj) {
   id<MTLTexture> ret = [buffer newTextureWithDescriptor:desc offset:params->offset bytesPerRow:params->bytes_per_row];
   params->ret = (obj_handle_t)ret;
   info->gpu_resource_id = [ret gpuResourceID]._impl;
+  macrunner_shader_texture_register(info->gpu_resource_id, ret);
   info->mach_port = 0;
 
   [desc release];
@@ -343,6 +2510,7 @@ _MTLTexture_newTextureView(void *obj) {
                             swizzle:to_metal_swizzle(params->swizzle, params->format)];
   params->ret = (obj_handle_t)ret;
   params->gpu_resource_id = [ret gpuResourceID]._impl;
+  macrunner_shader_texture_register(params->gpu_resource_id, ret);
   return STATUS_SUCCESS;
 }
 
@@ -484,7 +2652,33 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
     descriptor.tileHeight = info->tile_height;
   }
 
-  params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+  macrunner_present_attachment_trace_record((id<MTLCommandBuffer>)params->handle, info);
+  id<MTLRenderCommandEncoder> encoder =
+      [(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+  MacRunnerPresentAttachmentTrace *attachment_trace =
+      macrunner_present_attachment_trace_for_command_buffer(
+          (id<MTLCommandBuffer>)params->handle, NO);
+  if (encoder && attachment_trace)
+    objc_setAssociatedObject(encoder, &macrunner_present_attachment_trace_key,
+                             attachment_trace, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  winemetal_render_encoder_set_has_pso(encoder, NO);
+  if (encoder && macrunner_render_probe_state_enabled()) {
+    MacRunnerRenderProbeState *state = [[MacRunnerRenderProbeState alloc] init];
+    id<MTLTexture> render_target = (id<MTLTexture>)info->colors[0].texture;
+    state->command_buffer = params->handle;
+    state->render_target = info->colors[0].texture;
+    state->render_target_width = info->render_target_width ? info->render_target_width : (uint32_t)[render_target width];
+    state->render_target_height = info->render_target_height ? info->render_target_height : (uint32_t)[render_target height];
+    state->fill_mode = WMTTriangleFillModeFill;
+    state->cull_mode = WMTCullModeNone;
+    state->depth_clip_mode = WMTDepthClipModeClip;
+    state->color_load_action = info->colors[0].load_action;
+    state->causal_phase = UINT32_MAX;
+    objc_setAssociatedObject(encoder, &macrunner_render_probe_state_key, state,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [state release];
+  }
+  params->ret = (obj_handle_t)encoder;
 
   [descriptor release];
   return STATUS_SUCCESS;
@@ -493,7 +2687,63 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
 static NTSTATUS
 _MTLCommandEncoder_endEncoding(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
+  id<MTLRenderCommandEncoder> encoder = (id<MTLRenderCommandEncoder>)params->handle;
+  MacRunnerRenderProbeState *state = macrunner_render_probe_state_enabled()
+      ? objc_getAssociatedObject(encoder, &macrunner_render_probe_state_key) : nil;
+  winemetal_render_encoder_set_has_pso((id<MTLRenderCommandEncoder>)params->handle, NO);
   [(id<MTLCommandEncoder>)params->handle endEncoding];
+  macrunner_causal_finish_encoder(state);
+  if (state && state->causal_target_seen && state->causal_phase < 4 &&
+      state->causal_signature_match && macrunner_causal_target_readback_enabled()) {
+    id<MTLTexture> target = (id<MTLTexture>)state->render_target;
+    const char *control = macrunner_causal_phase_name(state->causal_phase);
+    if (target) {
+      fprintf(stderr,
+              "macrunner-hb-causal-target-readback: phase=schedule control=%s "
+              "result=ok target=%p size=%lux%lu target_draw=%u "
+              "surface_claim=causal-target-not-final-backbuffer\n",
+              control, target, (unsigned long)[target width],
+              (unsigned long)[target height], state->causal_target_draw_count);
+      fflush(stderr);
+      macrunner_gpu_readback_schedule((id<MTLCommandBuffer>)state->command_buffer,
+                                      target,
+                                      MacRunnerGPUReadbackCausalC0 + state->causal_phase,
+                                      state->causal_target_draw_count);
+    } else {
+      fprintf(stderr,
+              "macrunner-hb-causal-target-readback: phase=schedule control=%s "
+              "result=no-target surface_claim=causal-target-not-final-backbuffer\n",
+              control);
+      fflush(stderr);
+    }
+  }
+  if (state) {
+    uint64_t tag;
+    if (state->draw_count) {
+      for (uint32_t i = 0; i < state->shader_texture_count; i++) {
+        if (macrunner_shader_texture_readback_take_slot(state->shader_texture_ids[i]))
+          macrunner_gpu_readback_schedule((id<MTLCommandBuffer>)state->command_buffer,
+                                          (id<MTLTexture>)state->shader_textures[i],
+                                          MacRunnerGPUReadbackShaderTexture,
+                                          state->shader_texture_ids[i]);
+      }
+      if (state->render_target &&
+          macrunner_gpu_readback_phase_take_slot(MacRunnerGPUReadbackAfterRender, &tag))
+        macrunner_gpu_readback_schedule((id<MTLCommandBuffer>)state->command_buffer,
+                                        (id<MTLTexture>)state->render_target,
+                                        MacRunnerGPUReadbackAfterRender, tag);
+      if (state->fragment_textures[0] && state->fragment_textures[0] != state->render_target &&
+          macrunner_gpu_readback_phase_take_slot(MacRunnerGPUReadbackPrePresent, &tag))
+        macrunner_gpu_readback_schedule((id<MTLCommandBuffer>)state->command_buffer,
+                                        (id<MTLTexture>)state->fragment_textures[0],
+                                        MacRunnerGPUReadbackPrePresent, tag);
+    } else if (state->render_target && state->color_load_action == WMTLoadActionClear &&
+               macrunner_gpu_readback_phase_take_slot(MacRunnerGPUReadbackAfterClear, &tag)) {
+      macrunner_gpu_readback_schedule((id<MTLCommandBuffer>)state->command_buffer,
+                                      (id<MTLTexture>)state->render_target,
+                                      MacRunnerGPUReadbackAfterClear, tag);
+    }
+  }
   return STATUS_SUCCESS;
 }
 
@@ -536,11 +2786,74 @@ MTLMeshRenderPipelineDescriptor ()
 
 #endif
 
+static id<MTLFunction>
+macrunner_opaque_magenta_fragment_function(id<MTLDevice> device) {
+  if (!device)
+    return nil;
+  id<MTLFunction> function =
+      objc_getAssociatedObject(device, &macrunner_magenta_fragment_function_key);
+  if (function)
+    return function;
+
+  @synchronized(device) {
+    function = objc_getAssociatedObject(device, &macrunner_magenta_fragment_function_key);
+    if (function)
+      return function;
+
+    NSString *source =
+        @"#include <metal_stdlib>\n"
+         "using namespace metal;\n"
+         "struct MacRunnerMagentaOut { float4 color [[color(0)]]; };\n"
+         "fragment MacRunnerMagentaOut macrunner_probe_opaque_magenta() {\n"
+         "  MacRunnerMagentaOut out; out.color = float4(1.0, 0.0, 1.0, 1.0); return out;\n"
+         "}\n";
+    NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+    if (!library) {
+      fprintf(stderr,
+              "macrunner-hb-fragment-output: side=winemetal phase=override-compile "
+              "result=fail error=%s\n",
+              error ? [[error description] UTF8String] : "<nil NSError>");
+      fflush(stderr);
+      return nil;
+    }
+    function = [library newFunctionWithName:@"macrunner_probe_opaque_magenta"];
+    [library release];
+    if (!function) {
+      fprintf(stderr,
+              "macrunner-hb-fragment-output: side=winemetal phase=override-compile "
+              "result=no-function\n");
+      fflush(stderr);
+      return nil;
+    }
+    objc_setAssociatedObject(device, &macrunner_magenta_fragment_function_key,
+                             function, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [function release];
+    function = objc_getAssociatedObject(device, &macrunner_magenta_fragment_function_key);
+    fprintf(stderr,
+            "macrunner-hb-fragment-output: side=winemetal phase=override-compile "
+            "result=ok function=%s\n", [[function name] UTF8String]);
+    fflush(stderr);
+  }
+  return function;
+}
+
 static NTSTATUS
 _MTLDevice_newRenderPipelineState(void *obj) {
   struct unixcall_mtldevice_newrenderpso *params = obj;
   const struct WMTRenderPipelineInfo *info = params->info.ptr;
   MTLRenderPipelineDescriptor *descriptor = [[MTLRenderPipelineDescriptor alloc] init];
+  id<MTLFunction> original_vertex_function = (id<MTLFunction>)info->vertex_function;
+  id<MTLFunction> original_fragment_function = (id<MTLFunction>)info->fragment_function;
+  const char *vertex_name = original_vertex_function ? [[original_vertex_function name] UTF8String] : "";
+  const char *fragment_name = original_fragment_function ? [[original_fragment_function name] UTF8String] : "";
+  uint64_t pso_id = WMTComputeRenderPipelineProbeID(info, vertex_name, fragment_name);
+  uint64_t fragment_hash = WMTComputeStringProbeHash(fragment_name);
+  BOOL magenta_override = NO;
+  BOOL causal_target = macrunner_causal_pipeline_is_target(
+      pso_id, vertex_name, fragment_name);
+  BOOL causal_ready = NO;
+  id<MTLRenderPipelineState> causal_psos[4] = {nil, nil, nil, nil};
 
   for (unsigned i = 0; i < 8; i++) {
     descriptor.colorAttachments[i].pixelFormat = to_metal_pixel_format(info->colors[i].pixel_format);
@@ -578,21 +2891,174 @@ _MTLDevice_newRenderPipelineState(void *obj) {
   descriptor.tessellationOutputWindingOrder = (MTLWinding)info->tessellation_output_winding_order;
   descriptor.maxTessellationFactor = info->max_tessellation_factor;
 
-  descriptor.vertexFunction = (id<MTLFunction>)info->vertex_function;
-  descriptor.fragmentFunction = (id<MTLFunction>)info->fragment_function;
+  descriptor.vertexFunction = original_vertex_function;
+  descriptor.fragmentFunction = original_fragment_function;
+
+  uint64_t magenta_target = 0;
+  BOOL force_magenta_global = macrunner_force_fragment_magenta_global_enabled();
+  BOOL force_magenta_exact = macrunner_force_magenta_fragment_enabled() &&
+      macrunner_force_magenta_target_id(&magenta_target) && magenta_target == pso_id;
+  if ((force_magenta_global || force_magenta_exact) && original_fragment_function &&
+      descriptor.colorAttachments[0].pixelFormat != MTLPixelFormatInvalid) {
+    id<MTLFunction> magenta = macrunner_opaque_magenta_fragment_function(
+        (id<MTLDevice>)params->device);
+    if (magenta) {
+      descriptor.fragmentFunction = magenta;
+      magenta_override = YES;
+    }
+  }
+
+  unsigned probe_ordinal = 0;
+  if (macrunner_fragment_output_pso_take_slot(&probe_ordinal)) {
+    MTLRenderPipelineColorAttachmentDescriptor *rt0 = descriptor.colorAttachments[0];
+    fprintf(
+        stderr,
+        "macrunner-hb-fragment-output: side=winemetal phase=create ordinal=%u "
+        "pso_id=0x%016llx vs=%s ps=%s ps_hash=%016llx override_magenta=%u "
+        "force_global=%u target_valid=%u target_id=0x%016llx metal_rt0_format=%lu "
+        "metal_write_mask=0x%lx metal_blend=%u metal_rgb_op=%lu metal_alpha_op=%lu "
+        "metal_src_rgb=%lu metal_dst_rgb=%lu metal_src_alpha=%lu metal_dst_alpha=%lu\n",
+        probe_ordinal, (unsigned long long)pso_id, vertex_name, fragment_name,
+        (unsigned long long)fragment_hash, magenta_override, force_magenta_global,
+        macrunner_force_magenta_target_id(NULL), (unsigned long long)magenta_target,
+        (unsigned long)rt0.pixelFormat, (unsigned long)rt0.writeMask,
+        rt0.blendingEnabled, (unsigned long)rt0.rgbBlendOperation,
+        (unsigned long)rt0.alphaBlendOperation, (unsigned long)rt0.sourceRGBBlendFactor,
+        (unsigned long)rt0.destinationRGBBlendFactor,
+        (unsigned long)rt0.sourceAlphaBlendFactor,
+        (unsigned long)rt0.destinationAlphaBlendFactor);
+    fflush(stderr);
+  }
 
   if (info->num_binary_archives_for_lookup && info->binary_archives_for_lookup.ptr)
     descriptor.binaryArchives = [NSArray arrayWithObjects:(id<MTLBinaryArchive> *)info->binary_archives_for_lookup.ptr
                                                     count:info->num_binary_archives_for_lookup];
   NSError *err = NULL;
   MTLPipelineOption options =
-      info->fail_on_binary_archive_miss ? MTLPipelineOptionFailOnBinaryArchiveMiss : MTLPipelineOptionNone;
+      !magenta_override && info->fail_on_binary_archive_miss
+          ? MTLPipelineOptionFailOnBinaryArchiveMiss
+          : MTLPipelineOptionNone;
   params->ret_pso = (obj_handle_t)[(id<MTLDevice>)params->device newRenderPipelineStateWithDescriptor:descriptor
                                                                                               options:options
                                                                                            reflection:nil
                                                                                                 error:&err];
   params->ret_error = (obj_handle_t)err;
-  if (!err && info->binary_archive_for_serialization) {
+  if (causal_target && params->ret_pso) {
+    id<MTLFunction> c0_fragment =
+        (id<MTLFunction>)info->causal_fragment_capture_function;
+    id<MTLFunction> c1_fragment =
+        (id<MTLFunction>)info->causal_fragment_magenta_function;
+    id<MTLFunction> c2_fragment =
+        (id<MTLFunction>)info->causal_fragment_input_function;
+    id<MTLFunction> c3_vertex =
+        (id<MTLFunction>)info->causal_vertex_output_function;
+    NSError *causal_errors[4] = {nil, nil, nil, nil};
+
+    if (magenta_override || !c0_fragment || !c1_fragment || !c2_fragment ||
+        !c3_vertex) {
+      atomic_store_explicit(&macrunner_causal_invalid, true, memory_order_release);
+      fprintf(stderr,
+              "macrunner-hb-causal-ladder: phase=pso-variants result=invalid "
+              "logical_pso=0x%016llx reason=%s c0=%p c1=%p c2=%p c3=%p\n",
+              (unsigned long long)pso_id,
+              magenta_override ? "original-pso-was-overridden" :
+                                 "missing-diagnostic-function",
+              c0_fragment, c1_fragment, c2_fragment, c3_vertex);
+    } else {
+      descriptor.vertexFunction = original_vertex_function;
+      descriptor.fragmentFunction = c0_fragment;
+      causal_psos[0] = [(id<MTLDevice>)params->device
+          newRenderPipelineStateWithDescriptor:descriptor
+                                     options:MTLPipelineOptionNone
+                                  reflection:nil
+                                       error:&causal_errors[0]];
+
+      descriptor.fragmentFunction = c1_fragment;
+      causal_psos[1] = [(id<MTLDevice>)params->device
+          newRenderPipelineStateWithDescriptor:descriptor
+                                     options:MTLPipelineOptionNone
+                                  reflection:nil
+                                       error:&causal_errors[1]];
+
+      descriptor.fragmentFunction = c2_fragment;
+      causal_psos[2] = [(id<MTLDevice>)params->device
+          newRenderPipelineStateWithDescriptor:descriptor
+                                     options:MTLPipelineOptionNone
+                                  reflection:nil
+                                       error:&causal_errors[2]];
+
+      descriptor.vertexFunction = c3_vertex;
+      descriptor.fragmentFunction = c0_fragment;
+      causal_psos[3] = [(id<MTLDevice>)params->device
+          newRenderPipelineStateWithDescriptor:descriptor
+                                     options:MTLPipelineOptionNone
+                                  reflection:nil
+                                       error:&causal_errors[3]];
+      descriptor.vertexFunction = original_vertex_function;
+      descriptor.fragmentFunction = original_fragment_function;
+      causal_ready = causal_psos[0] && causal_psos[1] && causal_psos[2] &&
+                     causal_psos[3];
+      fprintf(
+          stderr,
+          "macrunner-hb-causal-ladder: phase=pso-variants result=%s "
+          "logical_pso=0x%016llx original=%p C1=%p C2=%p C3=%p "
+          "vs=%s ps=%s errors=%s|%s|%s|%s\n",
+          causal_ready ? "ok" : "invalid", (unsigned long long)pso_id,
+          causal_psos[0], causal_psos[1], causal_psos[2], causal_psos[3],
+          vertex_name, fragment_name,
+          causal_errors[0] ? [[causal_errors[0] description] UTF8String] : "none",
+          causal_errors[1] ? [[causal_errors[1] description] UTF8String] : "none",
+          causal_errors[2] ? [[causal_errors[2] description] UTF8String] : "none",
+          causal_errors[3] ? [[causal_errors[3] description] UTF8String] : "none");
+      if (!causal_ready) {
+        atomic_store_explicit(&macrunner_causal_invalid, true,
+                              memory_order_release);
+        for (unsigned i = 0; i < 4; i++) {
+          [causal_psos[i] release];
+          causal_psos[i] = nil;
+        }
+      }
+    }
+    fflush(stderr);
+  }
+  if (params->ret_pso &&
+      (macrunner_gpu_readback_probe_enabled() ||
+       macrunner_fragment_output_probe_enabled() ||
+       macrunner_force_magenta_fragment_enabled() ||
+       macrunner_force_fragment_magenta_global_enabled() || causal_target ||
+       macrunner_vertex_data_probe_enabled())) {
+    MacRunnerPipelineProbeInfo *probe = [[MacRunnerPipelineProbeInfo alloc] init];
+    probe->vertex_function = info->vertex_function;
+    probe->fragment_function = info->fragment_function;
+    probe->pso_id = pso_id;
+    probe->fragment_hash = fragment_hash;
+    snprintf(probe->vertex_name, sizeof(probe->vertex_name), "%s", vertex_name);
+    snprintf(probe->fragment_name, sizeof(probe->fragment_name), "%s", fragment_name);
+    MTLRenderPipelineColorAttachmentDescriptor *rt0 = descriptor.colorAttachments[0];
+    probe->metal_rt0_format = rt0.pixelFormat;
+    probe->metal_write_mask = rt0.writeMask;
+    probe->metal_blend_enabled = rt0.blendingEnabled;
+    probe->metal_rgb_op = rt0.rgbBlendOperation;
+    probe->metal_alpha_op = rt0.alphaBlendOperation;
+    probe->metal_src_rgb = rt0.sourceRGBBlendFactor;
+    probe->metal_dst_rgb = rt0.destinationRGBBlendFactor;
+    probe->metal_src_alpha = rt0.sourceAlphaBlendFactor;
+    probe->metal_dst_alpha = rt0.destinationAlphaBlendFactor;
+    probe->metal_depth_format = descriptor.depthAttachmentPixelFormat;
+    probe->metal_stencil_format = descriptor.stencilAttachmentPixelFormat;
+    probe->metal_sample_count = descriptor.rasterSampleCount;
+    probe->metal_input_topology = descriptor.inputPrimitiveTopology;
+    probe->metal_alpha_to_coverage = descriptor.alphaToCoverageEnabled;
+    probe->magenta_override = magenta_override;
+    probe->causal_ready = causal_ready;
+    if (causal_ready)
+      for (unsigned i = 0; i < 4; i++)
+        probe->causal_pso[i] = (obj_handle_t)causal_psos[i];
+    objc_setAssociatedObject((id)params->ret_pso, &macrunner_pipeline_probe_info_key, probe,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [probe release];
+  }
+  if (!err && !magenta_override && info->binary_archive_for_serialization) {
     [(id<MTLBinaryArchive>)info->binary_archive_for_serialization addRenderPipelineFunctionsWithDescriptor:descriptor
                                                                                                      error:&err];
   }
@@ -873,7 +3339,22 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
   struct unixcall_generic_obj_cmd_noret *params = obj;
   const struct wmtcmd_base *next = params->cmd_head.ptr;
   id<MTLRenderCommandEncoder> encoder = (id<MTLRenderCommandEncoder>)params->encoder;
+  BOOL has_pso = winemetal_render_encoder_has_pso(encoder);
+  MacRunnerRenderProbeState *probe_state = macrunner_render_probe_state_enabled()
+      ? objc_getAssociatedObject(encoder, &macrunner_render_probe_state_key) : nil;
+  MacRunnerPresentAttachmentTrace *attachment_trace =
+      macrunner_present_attachment_trace_enabled()
+          ? objc_getAssociatedObject(encoder, &macrunner_present_attachment_trace_key) : nil;
+  BOOL reported_missing_pso = NO;
+  unsigned command_count = 0;
+  unsigned set_pso_count = 0;
+  unsigned draw_count = 0;
+  unsigned missing_pso_count = 0;
+  const void *cmd_head = next;
+  macrunner_render_pipeline_probe_log("batch-begin", encoder, cmd_head, 0,
+                                      NULL, 0, 0, 0, 0);
   while (next) {
+    command_count++;
     switch ((enum WMTRenderCommandType)next->type) {
     default:
       assert(!next->type && "unhandled render command type");
@@ -890,21 +3371,33 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandSetVertexBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
       [encoder setVertexBuffer:(id<MTLBuffer>)body->buffer offset:body->offset atIndex:body->index];
+      if (probe_state && body->index < 31) {
+        probe_state->vertex_buffers[body->index] = body->buffer;
+        probe_state->vertex_buffer_offsets[body->index] = body->offset;
+      }
       break;
     }
     case WMTRenderCommandSetVertexBufferOffset: {
       struct wmtcmd_render_setbufferoffset *body = (struct wmtcmd_render_setbufferoffset *)next;
       [encoder setVertexBufferOffset:body->offset atIndex:body->index];
+      if (probe_state && body->index < 31)
+        probe_state->vertex_buffer_offsets[body->index] = body->offset;
       break;
     }
     case WMTRenderCommandSetFragmentBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
       [encoder setFragmentBuffer:(id<MTLBuffer>)body->buffer offset:body->offset atIndex:body->index];
+      if (probe_state && body->index < 31) {
+        probe_state->fragment_buffers[body->index] = body->buffer;
+        probe_state->fragment_buffer_offsets[body->index] = body->offset;
+      }
       break;
     }
     case WMTRenderCommandSetFragmentBufferOffset: {
       struct wmtcmd_render_setbufferoffset *body = (struct wmtcmd_render_setbufferoffset *)next;
       [encoder setFragmentBufferOffset:body->offset atIndex:body->index];
+      if (probe_state && body->index < 31)
+        probe_state->fragment_buffer_offsets[body->index] = body->offset;
       break;
     }
     case WMTRenderCommandSetMeshBuffer: {
@@ -935,6 +3428,8 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     case WMTRenderCommandSetFragmentTexture: {
       struct wmtcmd_render_settexture *body = (struct wmtcmd_render_settexture *)next;
       [encoder setFragmentTexture:(id<MTLTexture>)body->texture atIndex:body->index];
+      if (probe_state && body->index < 32)
+        probe_state->fragment_textures[body->index] = body->texture;
       break;
     }
     case WMTRenderCommandSetRasterizerState: {
@@ -944,33 +3439,66 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
       [encoder setDepthClipMode:(MTLDepthClipMode)body->depth_clip_mode];
       [encoder setDepthBias:body->depth_bias slopeScale:body->scole_scale clamp:body->depth_bias_clamp];
       [encoder setFrontFacingWinding:(MTLWinding)body->winding];
+      if (probe_state) {
+        probe_state->fill_mode = body->fill_mode;
+        probe_state->cull_mode = body->cull_mode;
+        probe_state->depth_clip_mode = body->depth_clip_mode;
+      }
       break;
     }
     case WMTRenderCommandSetViewports: {
       struct wmtcmd_render_setviewports *body = (struct wmtcmd_render_setviewports *)next;
       [encoder setViewports:(const MTLViewport *)body->viewports.ptr count:body->viewport_count];
+      if (probe_state && body->viewport_count && body->viewports.ptr) {
+        probe_state->viewport = *(const struct WMTViewport *)body->viewports.ptr;
+        probe_state->viewport_valid = YES;
+      }
       break;
     }
     case WMTRenderCommandSetScissorRects: {
       struct wmtcmd_render_setscissorrects *body = (struct wmtcmd_render_setscissorrects *)next;
       [encoder setScissorRects:(const MTLScissorRect *)body->scissor_rects.ptr count:body->rect_count];
+      if (probe_state && body->rect_count && body->scissor_rects.ptr) {
+        probe_state->scissor = *(const struct WMTScissorRect *)body->scissor_rects.ptr;
+        probe_state->scissor_valid = YES;
+      }
       break;
     }
     case WMTRenderCommandSetPSO: {
       struct wmtcmd_render_setpso *body = (struct wmtcmd_render_setpso *)next;
       [encoder setRenderPipelineState:(id<MTLRenderPipelineState>)body->pso];
+      has_pso = YES;
+      winemetal_render_encoder_set_has_pso(encoder, YES);
+      if (probe_state)
+        probe_state->pso = body->pso;
+      set_pso_count++;
+      macrunner_render_pipeline_probe_log(
+          "set-pso", encoder, cmd_head, next->type,
+          (const void *)(uintptr_t)body->pso, command_count,
+          set_pso_count, draw_count, missing_pso_count);
       break;
     }
     case WMTRenderCommandSetDSSO: {
       struct wmtcmd_render_setdsso *body = (struct wmtcmd_render_setdsso *)next;
       [encoder setDepthStencilState:(id<MTLDepthStencilState>)body->dsso];
       [encoder setStencilReferenceValue:body->stencil_ref];
+      if (probe_state) {
+        probe_state->depth_stencil_state = body->dsso;
+        probe_state->stencil_ref = body->stencil_ref;
+      }
       break;
     }
     case WMTRenderCommandSetBlendFactorAndStencilRef: {
       struct wmtcmd_render_setblendcolor *body = (struct wmtcmd_render_setblendcolor *)next;
       [encoder setBlendColorRed:body->red green:body->green blue:body->blue alpha:body->alpha];
       [encoder setStencilReferenceValue:body->stencil_ref];
+      if (probe_state) {
+        probe_state->blend_color[0] = body->red;
+        probe_state->blend_color[1] = body->green;
+        probe_state->blend_color[2] = body->blue;
+        probe_state->blend_color[3] = body->alpha;
+        probe_state->stencil_ref = body->stencil_ref;
+      }
       break;
     }
     case WMTRenderCommandSetVisibilityMode: {
@@ -979,45 +3507,192 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
       break;
     }
     case WMTRenderCommandDraw: {
+      draw_count++;
+      if (attachment_trace)
+        attachment_trace->draw_count++;
+      if (!has_pso) {
+        missing_pso_count++;
+        macrunner_render_pipeline_probe_log(
+            "draw-missing-pso", encoder, cmd_head, next->type, NULL,
+            command_count, set_pso_count, draw_count, missing_pso_count);
+        if (!reported_missing_pso) {
+          fprintf(stderr, "winemetal[render]: skipping draw commands because no render PSO was set\n");
+          reported_missing_pso = YES;
+        }
+        break;
+      }
       struct wmtcmd_render_draw *body = (struct wmtcmd_render_draw *)next;
+      macrunner_shader_inputs_log_draw(probe_state, "draw");
+      macrunner_fragment_output_log_draw(probe_state, "draw");
+      macrunner_vertex_data_log_draw(
+          probe_state, "draw", body->primitive_type, body->vertex_count,
+          body->instance_count, body->vertex_start, 0, body->base_instance,
+          0, 0, 0);
       [encoder drawPrimitives:(MTLPrimitiveType)body->primitive_type
                   vertexStart:body->vertex_start
                   vertexCount:body->vertex_count
                 instanceCount:body->instance_count
                  baseInstance:body->base_instance];
+      if (probe_state)
+        probe_state->draw_count++;
+      macrunner_gpu_readback_log_draw(probe_state, encoder, "draw", body->primitive_type,
+                                      body->vertex_count, body->instance_count,
+                                      body->vertex_start, 0, body->base_instance,
+                                      0, 0, 0, 0);
       break;
     }
     case WMTRenderCommandDrawIndexed: {
+      draw_count++;
+      if (attachment_trace)
+        attachment_trace->draw_count++;
+      if (!has_pso) {
+        missing_pso_count++;
+        macrunner_render_pipeline_probe_log(
+            "draw-indexed-missing-pso", encoder, cmd_head, next->type, NULL,
+            command_count, set_pso_count, draw_count, missing_pso_count);
+        if (!reported_missing_pso) {
+          fprintf(stderr, "winemetal[render]: skipping indexed draw commands because no render PSO was set\n");
+          reported_missing_pso = YES;
+        }
+        break;
+      }
       struct wmtcmd_render_draw_indexed *body = (struct wmtcmd_render_draw_indexed *)next;
-      [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
-                          indexCount:body->index_count
-                           indexType:(MTLIndexType)body->index_type
-                         indexBuffer:(id<MTLBuffer>)body->index_buffer
-                   indexBufferOffset:body->index_buffer_offset
-                       instanceCount:body->instance_count
-                          baseVertex:body->base_vertex
-                        baseInstance:body->base_instance];
+      macrunner_shader_inputs_log_draw(probe_state, "draw-indexed");
+      macrunner_fragment_output_log_draw(probe_state, "draw-indexed");
+      macrunner_vertex_data_log_draw(
+          probe_state, "draw-indexed", body->primitive_type, body->index_count,
+          body->instance_count, 0, body->base_vertex, body->base_instance,
+          body->index_buffer, body->index_buffer_offset, body->index_type);
+      BOOL causal_sequence_drawn = NO;
+      const unsigned causal_sequence_count = macrunner_causal_control_count();
+      for (unsigned causal_index = 0; causal_index < causal_sequence_count;
+           causal_index++) {
+        unsigned requested_phase =
+            macrunner_causal_control_phase_at(causal_index);
+        unsigned causal_phase = UINT32_MAX;
+        id<MTLBuffer> causal_sidechannel = nil;
+        id<MTLRenderPipelineState> causal_pso =
+            macrunner_causal_prepare_indexed_draw(
+                probe_state, encoder, body, requested_phase, &causal_phase,
+                &causal_sidechannel);
+        if (!causal_pso) {
+          if (causal_sequence_drawn) {
+            atomic_store_explicit(&macrunner_causal_invalid, true,
+                                  memory_order_release);
+            fprintf(stderr,
+                    "macrunner-hb-causal-ladder: phase=draw-select "
+                    "control=%s result=invalid "
+                    "reason=sequence-phase-missing sequence_index=%u "
+                    "sequence_count=%u same_logical_draw=1\n",
+                    macrunner_causal_phase_name(requested_phase),
+                    causal_index, causal_sequence_count);
+            fflush(stderr);
+          }
+          break;
+        }
+        causal_sequence_drawn = YES;
+        [encoder setRenderPipelineState:causal_pso];
+        [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
+                            indexCount:body->index_count
+                             indexType:(MTLIndexType)body->index_type
+                           indexBuffer:(id<MTLBuffer>)body->index_buffer
+                     indexBufferOffset:body->index_buffer_offset
+                         instanceCount:body->instance_count
+                            baseVertex:body->base_vertex
+                          baseInstance:body->base_instance];
+        [encoder setRenderPipelineState:
+            (id<MTLRenderPipelineState>)probe_state->pso];
+        [encoder setFragmentBuffer:
+            (id<MTLBuffer>)probe_state->fragment_buffers[
+                MACRUNNER_CAUSAL_SIDECHANNEL_BUFFER_INDEX]
+                            offset:probe_state->fragment_buffer_offsets[
+                                MACRUNNER_CAUSAL_SIDECHANNEL_BUFFER_INDEX]
+                           atIndex:MACRUNNER_CAUSAL_SIDECHANNEL_BUFFER_INDEX];
+        macrunner_causal_finish_draw(probe_state, causal_sidechannel,
+                                     causal_phase);
+      }
+      if (!causal_sequence_drawn)
+        [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
+                            indexCount:body->index_count
+                             indexType:(MTLIndexType)body->index_type
+                           indexBuffer:(id<MTLBuffer>)body->index_buffer
+                     indexBufferOffset:body->index_buffer_offset
+                         instanceCount:body->instance_count
+                            baseVertex:body->base_vertex
+                          baseInstance:body->base_instance];
+      if (probe_state)
+        probe_state->draw_count++;
+      macrunner_gpu_readback_log_draw(probe_state, encoder, "draw-indexed", body->primitive_type,
+                                      body->index_count, body->instance_count, 0,
+                                      body->base_vertex, body->base_instance,
+                                      body->index_buffer, body->index_buffer_offset, 0, 0);
       break;
     }
     case WMTRenderCommandDrawIndirect: {
+      draw_count++;
+      if (attachment_trace)
+        attachment_trace->draw_count++;
+      if (!has_pso) {
+        missing_pso_count++;
+        macrunner_render_pipeline_probe_log(
+            "draw-indirect-missing-pso", encoder, cmd_head, next->type, NULL,
+            command_count, set_pso_count, draw_count, missing_pso_count);
+        if (!reported_missing_pso) {
+          fprintf(stderr, "winemetal[render]: skipping indirect draw commands because no render PSO was set\n");
+          reported_missing_pso = YES;
+        }
+        break;
+      }
       struct wmtcmd_render_draw_indirect *body = (struct wmtcmd_render_draw_indirect *)next;
+      macrunner_shader_inputs_log_draw(probe_state, "draw-indirect");
+      macrunner_fragment_output_log_draw(probe_state, "draw-indirect");
       [encoder drawPrimitives:(MTLPrimitiveType)body->primitive_type
                 indirectBuffer:(id<MTLBuffer>)body->indirect_args_buffer
           indirectBufferOffset:body->indirect_args_offset];
+      if (probe_state)
+        probe_state->draw_count++;
+      macrunner_gpu_readback_log_draw(probe_state, encoder, "draw-indirect", body->primitive_type,
+                                      0, 0, 0, 0, 0, 0, 0,
+                                      body->indirect_args_buffer, body->indirect_args_offset);
       break;
     }
     case WMTRenderCommandDrawIndexedIndirect: {
+      draw_count++;
+      if (attachment_trace)
+        attachment_trace->draw_count++;
+      if (!has_pso) {
+        missing_pso_count++;
+        macrunner_render_pipeline_probe_log(
+            "draw-indexed-indirect-missing-pso", encoder, cmd_head,
+            next->type, NULL, command_count, set_pso_count, draw_count,
+            missing_pso_count);
+        if (!reported_missing_pso) {
+          fprintf(stderr, "winemetal[render]: skipping indexed indirect draw commands because no render PSO was set\n");
+          reported_missing_pso = YES;
+        }
+        break;
+      }
       struct wmtcmd_render_draw_indexed_indirect *body = (struct wmtcmd_render_draw_indexed_indirect *)next;
+      macrunner_shader_inputs_log_draw(probe_state, "draw-indexed-indirect");
+      macrunner_fragment_output_log_draw(probe_state, "draw-indexed-indirect");
       [encoder drawIndexedPrimitives:(MTLPrimitiveType)body->primitive_type
                            indexType:(MTLIndexType)body->index_type
                          indexBuffer:(id<MTLBuffer>)body->index_buffer
                    indexBufferOffset:body->index_buffer_offset
                       indirectBuffer:(id<MTLBuffer>)body->indirect_args_buffer
                 indirectBufferOffset:body->indirect_args_offset];
+      if (probe_state)
+        probe_state->draw_count++;
+      macrunner_gpu_readback_log_draw(probe_state, encoder, "draw-indexed-indirect",
+                                      body->primitive_type, 0, 0, 0, 0, 0,
+                                      body->index_buffer, body->index_buffer_offset,
+                                      body->indirect_args_buffer, body->indirect_args_offset);
       break;
     }
     case WMTRenderCommandDrawMeshThreadgroups: {
       struct wmtcmd_render_draw_meshthreadgroups *body = (struct wmtcmd_render_draw_meshthreadgroups *)next;
+      if (attachment_trace)
+        attachment_trace->draw_count++;
       [encoder drawMeshThreadgroups:MTLSizeMake(
                                         body->threadgroup_per_grid.width, body->threadgroup_per_grid.height,
                                         body->threadgroup_per_grid.depth
@@ -1152,6 +3827,10 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
         MTLViewport dst;
       } u = {.src = body->viewport};
       [encoder setViewport:u.dst];
+      if (probe_state) {
+        probe_state->viewport = body->viewport;
+        probe_state->viewport_valid = YES;
+      }
       break;
     }
     case WMTRenderCommandSetScissorRect: {
@@ -1161,6 +3840,10 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
         MTLScissorRect dst;
       } u = {.src = body->scissor_rect};
       [encoder setScissorRect:u.dst];
+      if (probe_state) {
+        probe_state->scissor = body->scissor_rect;
+        probe_state->scissor_valid = YES;
+      }
       break;
     }
     case WMTRenderCommandDispatchThreadsPerTile: {
@@ -1171,6 +3854,9 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
     }
     next = next->next.ptr;
   }
+  macrunner_render_pipeline_probe_log(
+      "batch-end", encoder, cmd_head, 0, NULL, command_count, set_pso_count,
+      draw_count, missing_pso_count);
   return STATUS_SUCCESS;
 }
 
@@ -1241,15 +3927,42 @@ _MTLBuffer_didModifyRange(void *obj) {
 static NTSTATUS
 _MTLCommandBuffer_presentDrawable(void *obj) {
   struct unixcall_generic_obj_obj_noret *params = obj;
-  [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg];
+  id<MTLCommandBuffer> command_buffer = (id<MTLCommandBuffer>)params->handle;
+  id<CAMetalDrawable> drawable = (id<CAMetalDrawable>)params->arg;
+  id<MTLTexture> drawable_texture = drawable ? drawable.texture : nil;
+  macrunner_present_surface_schedule(command_buffer, drawable);
+  NSNumber *armed_phase = macrunner_causal_present_surface_readback_enabled() ?
+      objc_getAssociatedObject(command_buffer, &macrunner_causal_present_surface_phase_key) : nil;
+  if (armed_phase) {
+    unsigned phase = armed_phase.unsignedIntValue;
+    id<MTLTexture> texture = drawable_texture;
+    if (!texture) {
+      fprintf(stderr,
+              "macrunner-hb-causal-present-surface: phase=schedule result=invalid "
+              "control=%s command_buffer=%p drawable=%p reason=null-texture\n",
+              macrunner_causal_phase_name(phase), command_buffer, drawable);
+    } else if (macrunner_causal_present_surface_apply_control(command_buffer, texture, phase)) {
+      fprintf(stderr,
+              "macrunner-hb-causal-present-surface: phase=schedule result=ok "
+              "control=%s command_buffer=%p drawable=%p texture=%p\n",
+              macrunner_causal_phase_name(phase), command_buffer, drawable, texture);
+      macrunner_gpu_readback_schedule(
+          command_buffer, texture, MacRunnerGPUReadbackCausalPresentC0 + phase, 0);
+    }
+    objc_setAssociatedObject(command_buffer, &macrunner_causal_present_surface_phase_key,
+                             nil, OBJC_ASSOCIATION_ASSIGN);
+  }
+  [command_buffer presentDrawable:(id<MTLDrawable>)params->arg];
   return STATUS_SUCCESS;
 }
 
 static NTSTATUS
 _MTLCommandBuffer_presentDrawableAfterMinimumDuration(void *obj) {
   struct unixcall_generic_obj_obj_double_noret *params = obj;
-  [(id<MTLCommandBuffer>)params->handle presentDrawable:(id<MTLDrawable>)params->arg0
-                                   afterMinimumDuration:params->arg1];
+  id<MTLCommandBuffer> command_buffer = (id<MTLCommandBuffer>)params->handle;
+  macrunner_present_surface_schedule(command_buffer, (id<CAMetalDrawable>)params->arg0);
+  [command_buffer presentDrawable:(id<MTLDrawable>)params->arg0
+                                    afterMinimumDuration:params->arg1];
   return STATUS_SUCCESS;
 }
 
@@ -1587,9 +4300,93 @@ struct macdrv_functions_t {
   void (*on_main_thread)(dispatch_block_t b);
 };
 
+static const CFSetCallBacks fallback_metal_layer_callbacks = {
+    0, NULL, NULL, NULL, NULL, NULL,
+};
+static CFMutableSetRef fallback_metal_layers;
+/* Maps CAMetalLayer* -> NSWindow* for real-window fallback cleanup. */
+static CFMutableDictionaryRef fallback_nswindow_map;
+
+static void
+register_fallback_metal_layer(CAMetalLayer *layer) {
+  if (!fallback_metal_layers)
+    fallback_metal_layers = CFSetCreateMutable(NULL, 0, &fallback_metal_layer_callbacks);
+  CFSetAddValue(fallback_metal_layers, layer);
+}
+
+static CAMetalLayer *
+create_fallback_metal_layer(macdrv_metal_device device) {
+  __block CAMetalLayer *layer = nil;
+
+  execute_on_main(^{
+    layer = [[CAMetalLayer alloc] init];
+    layer.device = (id<MTLDevice>)device;
+    layer.opaque = YES;
+    layer.framebufferOnly = NO;
+    layer.contentsScale = 1.0;
+    layer.drawableSize = CGSizeMake(1.0, 1.0);
+    layer.frame = CGRectMake(0.0, 0.0, 1.0, 1.0);
+    register_fallback_metal_layer(layer);
+  });
+
+  return layer;
+}
+
+/* Create a real, screen-sized NSWindow backed by a CAMetalLayer.
+ * Used as a fallback when the winemac HWND path is unavailable. */
+static CAMetalLayer *
+create_real_nswindow_metal_layer(macdrv_metal_device device, int trace, void *hwnd_trace) {
+  __block CAMetalLayer *layer = nil;
+
+  execute_on_main(^{
+    NSScreen *screen = [NSScreen mainScreen];
+    CGRect frame = screen ? NSRectToCGRect([screen frame]) : CGRectMake(0, 0, 1280, 720);
+    CGFloat scale = screen ? [screen backingScaleFactor] : 1.0;
+
+    NSWindow *window = [[NSWindow alloc]
+        initWithContentRect:NSRectFromCGRect(frame)
+                  styleMask:NSWindowStyleMaskBorderless
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    [window setOpaque:YES];
+    [window setLevel:NSNormalWindowLevel];
+
+    layer = [[CAMetalLayer alloc] init];
+    layer.device = (id<MTLDevice>)device;
+    layer.opaque = YES;
+    layer.framebufferOnly = NO;
+    layer.contentsScale = scale;
+    layer.drawableSize = CGSizeMake(frame.size.width * scale, frame.size.height * scale);
+
+    /* Attach the layer to the window's content view so it renders on screen. */
+    [[window contentView] setWantsLayer:YES];
+    [[window contentView] setLayer:layer];
+    [window makeKeyAndOrderFront:nil];
+
+    /* Register in fallback set so _ReleaseMetalView handles cleanup. */
+    register_fallback_metal_layer(layer);
+
+    /* Store layer->window mapping so we can close the window on release.
+     * Manually retain the window (no ARC); released in _ReleaseMetalView. */
+    if (!fallback_nswindow_map)
+      fallback_nswindow_map = CFDictionaryCreateMutable(NULL, 0, NULL, NULL);
+    [window retain];
+    CFDictionarySetValue(fallback_nswindow_map, (const void *)layer, (const void *)window);
+
+    if (trace)
+      fprintf(stderr, "winemetal[HWND]: hwnd=%p real-NSWindow fallback "
+              "window=%p layer=%p frame=%.0fx%.0f scale=%.1f\n",
+              hwnd_trace, (void *)window, (void *)layer,
+              frame.size.width, frame.size.height, scale);
+  });
+
+  return layer;
+}
+
 static NTSTATUS
 _CreateMetalViewFromHWND(void *obj) {
   struct unixcall_create_metal_view_from_hwnd *params = obj;
+  const int trace = getenv("WINEMETAL_TRACE_HWND") != NULL;
 
   struct macdrv_win_data *(*pfn_get_win_data)(HWND hwnd) = NULL;
   void (*pfn_release_win_data)(struct macdrv_win_data *data) = NULL;
@@ -1612,23 +4409,113 @@ _CreateMetalViewFromHWND(void *obj) {
   if (pfn_get_win_data && pfn_release_win_data && pfn_macdrv_view_create_metal_view &&
       pfn_macdrv_view_get_metal_layer) {
     struct macdrv_win_data *win_data = pfn_get_win_data((HWND)params->hwnd);
-    macdrv_metal_view view =
-        pfn_macdrv_view_create_metal_view(win_data->client_cocoa_view, (macdrv_metal_device)params->device);
-    params->ret_view = (obj_handle_t)view;
-    if (view) {
-      params->ret_layer = (obj_handle_t)pfn_macdrv_view_get_metal_layer(view);
+    macdrv_view client_cocoa_view = win_data ? win_data->client_cocoa_view : NULL;
+    if (win_data && win_data->client_cocoa_view) {
+      macdrv_metal_view view =
+          pfn_macdrv_view_create_metal_view(win_data->client_cocoa_view, (macdrv_metal_device)params->device);
+      params->ret_view = (obj_handle_t)view;
+      if (view)
+        params->ret_layer = (obj_handle_t)pfn_macdrv_view_get_metal_layer(view);
     }
-    pfn_release_win_data(win_data);
+    if (trace || !params->ret_view || !params->ret_layer)
+      fprintf(stderr, "winemetal[HWND]: hwnd=%p macdrv_functions=%p get_win_data=%p release_win_data=%p "
+              "create_metal_view=%p get_metal_layer=%p win_data=%p client_cocoa_view=%p "
+              "ret_view=%p ret_layer=%p attached_to_hwnd=%d\n",
+              (void *)params->hwnd, (void *)macdrv_functions, (void *)pfn_get_win_data,
+              (void *)pfn_release_win_data, (void *)pfn_macdrv_view_create_metal_view,
+              (void *)pfn_macdrv_view_get_metal_layer, (void *)win_data, (void *)client_cocoa_view,
+              (void *)params->ret_view, (void *)params->ret_layer,
+              (int)(win_data && win_data->hwnd == (HWND)params->hwnd && client_cocoa_view &&
+                    params->ret_view && params->ret_layer));
+    if (win_data)
+      pfn_release_win_data(win_data);
+    if (params->ret_view && params->ret_layer)
+      return STATUS_SUCCESS;
+  } else if (trace) {
+    fprintf(stderr, "winemetal[HWND]: hwnd=%p macdrv symbols not found"
+            " (macdrv_functions=%p get_win_data=%p)\n",
+            (void *)params->hwnd, (void *)macdrv_functions, (void *)pfn_get_win_data);
   }
 
-  return STATUS_SUCCESS;
+  /* macdrv path failed.
+   * DXMT_HEADLESS=1: use 1x1 detached fallback for headless tests.
+   * DXMT_ALLOW_ORPHAN_WINDOW=1: explicitly allow the diagnostic orphan NSWindow.
+   * Otherwise abort loudly: a live HWND path must attach CAMetalLayer to the game
+   * window, not silently present to a detached fallback. */
+  CAMetalLayer *fallback_layer;
+  if (getenv("DXMT_HEADLESS")) {
+    fallback_layer = create_fallback_metal_layer((macdrv_metal_device)params->device);
+    /* This is a 1x1 detached CAMetalLayer with no on-screen surface: every
+     * Present renders into a 1x1 offscreen drawable that is never displayed.
+     * That is acceptable ONLY for an explicit headless test (DXMT_HEADLESS=1);
+     * for a real game window it silently swallows every frame.  Warn
+     * UNCONDITIONALLY (not gated on WINEMETAL_TRACE_HWND) so this degenerate
+     * path can never drop frames silently -- e.g. a HK gate run that left
+     * DXMT_HEADLESS=1 set now logs this line instead of producing a mystery
+     * black window. */
+    fprintf(stderr, "winemetal[HWND]: hwnd=%p WARNING: DXMT_HEADLESS=1 -> degenerate 1x1 "
+            "detached fallback layer=%p; frames render offscreen and are NOT displayed\n",
+            (void *)params->hwnd, (void *)fallback_layer);
+    fflush(stderr);
+  } else if (getenv("DXMT_ALLOW_ORPHAN_WINDOW")) {
+    fprintf(stderr, "winemetal[HWND]: hwnd=%p DXMT_ALLOW_ORPHAN_WINDOW=1; "
+            "creating diagnostic orphan NSWindow because macdrv HWND binding failed\n",
+            (void *)params->hwnd);
+    fallback_layer = create_real_nswindow_metal_layer(
+        (macdrv_metal_device)params->device, trace, (void *)params->hwnd);
+  } else {
+    fprintf(stderr, "winemetal[HWND]: fatal: hwnd=%p macdrv HWND->CAMetalLayer binding failed; "
+            "refusing silent orphan NSWindow fallback. Set DXMT_HEADLESS=1 for headless tests "
+            "or DXMT_ALLOW_ORPHAN_WINDOW=1 for explicit diagnostic fallback.\n",
+            (void *)params->hwnd);
+    fflush(stderr);
+    abort();
+  }
+  if (fallback_layer) {
+    params->ret_view = (obj_handle_t)fallback_layer;
+    params->ret_layer = (obj_handle_t)fallback_layer;
+    return STATUS_SUCCESS;
+  }
+
+  /* Fallback layer allocation failed.  Do NOT fall through to STATUS_SUCCESS:
+   * that hands the caller success with ret_view/ret_layer = 0, and the swapchain
+   * is then built around a null CAMetalLayer whose nextDrawable() returns nil so
+   * every Present silently drops its frame.  Fail loudly instead, mirroring the
+   * macdrv guard above (only return SUCCESS when a usable layer exists). */
+  fprintf(stderr, "winemetal[HWND]: hwnd=%p fatal: fallback CAMetalLayer allocation failed; "
+          "returning STATUS_UNSUCCESSFUL instead of success-with-null\n",
+          (void *)params->hwnd);
+  fflush(stderr);
+  return STATUS_UNSUCCESSFUL;
 }
 
 static NTSTATUS
 _ReleaseMetalView(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
+  __block BOOL released_fallback = NO;
 
   void (*pfn_macdrv_view_release_metal_view)(macdrv_metal_view v) = NULL;
+
+  execute_on_main(^{
+    if (fallback_metal_layers &&
+        CFSetContainsValue(fallback_metal_layers, (const void *)params->handle)) {
+      /* Close the backing NSWindow if this was a real-window fallback. */
+      if (fallback_nswindow_map) {
+        const void *key = (const void *)(uintptr_t)params->handle;
+        NSWindow *window = (NSWindow *)CFDictionaryGetValue(fallback_nswindow_map, key);
+        if (window) {
+          [window close];
+          [window release];  /* balance [window retain] done at create time */
+          CFDictionaryRemoveValue(fallback_nswindow_map, key);
+        }
+      }
+      CFSetRemoveValue(fallback_metal_layers, (const void *)params->handle);
+      [(CAMetalLayer *)params->handle release];
+      released_fallback = YES;
+    }
+  });
+  if (released_fallback)
+    return STATUS_SUCCESS;
 
   struct macdrv_functions_t *macdrv_functions;
   if ((macdrv_functions = dlsym(RTLD_DEFAULT, "macdrv_functions"))) {
@@ -2080,6 +4967,14 @@ thunk32_SM50GetArgumentsInfo(void *args) {
 #endif /* DXMT_NATIVE */
 
 static NTSTATUS
+_MTLCommandBuffer_scheduleFrameDump(void *obj) {
+  struct unixcall_mtlcommandbuffer_frame_dump *params = obj;
+  macrunner_frame_dump_schedule((id<MTLCommandBuffer>)params->cmdbuf,
+                                (id<MTLTexture>)params->texture, params->frame);
+  return STATUS_SUCCESS;
+}
+
+static NTSTATUS
 _MTLCommandBuffer_error(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle error];
@@ -2255,14 +5150,18 @@ GetNSScreenForDisplayID(CGDirectDisplayID display_id) {
   return nil;
 }
 
-static NTSTATUS
-_WMTGetDisplayDescription(void *obj) {
-  struct unixcall_generic_obj_ptr_noret *params = obj;
-  CGDirectDisplayID display_id = params->handle;
-  struct WMTDisplayDescription *desc_out = params->arg.ptr;
+static void
+macrunner_fill_display_description(CGDirectDisplayID display_id, struct WMTDisplayDescription *desc_out) {
   ColorSyncProfileRef profile = ColorSyncProfileCreateWithDisplayID(display_id);
-  if (!profile || !GetDisplayColorGamut(profile, desc_out))
-    GetDisplayColorGamut(ColorSyncProfileCreateWithName(kColorSyncGenericRGBProfile), desc_out);
+  if (!profile || !GetDisplayColorGamut(profile, desc_out)) {
+    ColorSyncProfileRef generic = ColorSyncProfileCreateWithName(kColorSyncGenericRGBProfile);
+    GetDisplayColorGamut(generic, desc_out);
+    if (generic)
+      CFRelease(generic);
+  }
+  /* MacRunner 28.09.2026: both profiles used to leak on every call. */
+  if (profile)
+    CFRelease(profile);
   NSScreen *screen = GetNSScreenForDisplayID(display_id);
   if (screen) {
     desc_out->maximum_edr_color_component_value = [screen maximumExtendedDynamicRangeColorComponentValue];
@@ -2275,6 +5174,102 @@ _WMTGetDisplayDescription(void *obj) {
     desc_out->maximum_reference_edr_color_component_value = 0.0;
     desc_out->maximum_potential_edr_color_component_value = 1.0;
   }
+}
+
+/*
+ * MacRunner 28.09.2026: DXGI creates a new IDXGIOutput, whose constructor calls this, on every
+ * IDXGISwapChain::GetContainingOutput. Building the ColorSync profile each time (ICC files, MD5,
+ * gamma evaluation) took 20.9 % of Hollow Knight's main thread under FEX at 117 FPS and 5.0 % under
+ * HB (macOS sample, 28.09.2026). The description is cached per display for up to one second; a display
+ * reconfiguration drops the cache. MACRUNNER_DXMT_DISPLAY_DESC_CACHE=0 restores the per-call path.
+ * The EDR values can therefore be up to one second old.
+ */
+#define MACRUNNER_DISPLAY_DESC_SLOTS 4
+#define MACRUNNER_DISPLAY_DESC_TTL_NS 1000000000ull
+struct macrunner_display_desc_slot {
+  CGDirectDisplayID display_id;
+  uint64_t generation;
+  uint64_t stamp_ns;
+  struct WMTDisplayDescription desc;
+};
+static os_unfair_lock macrunner_display_desc_lock = OS_UNFAIR_LOCK_INIT;
+static struct macrunner_display_desc_slot macrunner_display_desc_slots[MACRUNNER_DISPLAY_DESC_SLOTS];
+static unsigned macrunner_display_desc_next;
+static _Atomic uint64_t macrunner_display_generation = 1;
+static _Atomic uint64_t macrunner_display_desc_hits;
+static _Atomic uint64_t macrunner_display_desc_misses;
+
+static void
+macrunner_display_reconfigured(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *user) {
+  (void)display;
+  (void)user;
+  if (!(flags & kCGDisplayBeginConfigurationFlag))
+    atomic_fetch_add_explicit(&macrunner_display_generation, 1, memory_order_relaxed);
+}
+
+static int
+macrunner_display_desc_cache_enabled(void) {
+  static int enabled;
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *value = getenv("MACRUNNER_DXMT_DISPLAY_DESC_CACHE");
+    enabled = !(value && value[0] == '0');
+    if (enabled)
+      CGDisplayRegisterReconfigurationCallback(macrunner_display_reconfigured, NULL);
+    fprintf(stderr, "macrunner-dxmt-display-desc-cache: enabled=%d\n", enabled);
+  });
+  return enabled;
+}
+
+static NTSTATUS
+_WMTGetDisplayDescription(void *obj) {
+  struct unixcall_generic_obj_ptr_noret *params = obj;
+  CGDirectDisplayID display_id = params->handle;
+  struct WMTDisplayDescription *desc_out = params->arg.ptr;
+  if (!macrunner_display_desc_cache_enabled()) {
+    macrunner_fill_display_description(display_id, desc_out);
+    return STATUS_SUCCESS;
+  }
+  uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+  uint64_t generation = atomic_load_explicit(&macrunner_display_generation, memory_order_relaxed);
+  os_unfair_lock_lock(&macrunner_display_desc_lock);
+  for (unsigned i = 0; i < MACRUNNER_DISPLAY_DESC_SLOTS; i++) {
+    struct macrunner_display_desc_slot *slot = &macrunner_display_desc_slots[i];
+    if (slot->stamp_ns && slot->display_id == display_id && slot->generation == generation &&
+        now - slot->stamp_ns < MACRUNNER_DISPLAY_DESC_TTL_NS) {
+      *desc_out = slot->desc;
+      os_unfair_lock_unlock(&macrunner_display_desc_lock);
+      uint64_t hits = atomic_fetch_add_explicit(&macrunner_display_desc_hits, 1, memory_order_relaxed) + 1;
+      if ((hits & (hits - 1)) == 0)
+        fprintf(stderr, "macrunner-dxmt-display-desc-cache: hits=%llu misses=%llu\n", (unsigned long long)hits,
+                (unsigned long long)atomic_load_explicit(&macrunner_display_desc_misses, memory_order_relaxed));
+      return STATUS_SUCCESS;
+    }
+  }
+  os_unfair_lock_unlock(&macrunner_display_desc_lock);
+
+  struct WMTDisplayDescription fresh = *desc_out;
+  macrunner_fill_display_description(display_id, &fresh);
+  os_unfair_lock_lock(&macrunner_display_desc_lock);
+  unsigned index = MACRUNNER_DISPLAY_DESC_SLOTS;
+  for (unsigned i = 0; i < MACRUNNER_DISPLAY_DESC_SLOTS; i++) {
+    if (macrunner_display_desc_slots[i].display_id == display_id && macrunner_display_desc_slots[i].stamp_ns) {
+      index = i;
+      break;
+    }
+  }
+  if (index == MACRUNNER_DISPLAY_DESC_SLOTS)
+    index = macrunner_display_desc_next++ % MACRUNNER_DISPLAY_DESC_SLOTS;
+  macrunner_display_desc_slots[index].display_id = display_id;
+  macrunner_display_desc_slots[index].generation = generation;
+  macrunner_display_desc_slots[index].stamp_ns = now;
+  macrunner_display_desc_slots[index].desc = fresh;
+  os_unfair_lock_unlock(&macrunner_display_desc_lock);
+  *desc_out = fresh;
+  uint64_t misses = atomic_fetch_add_explicit(&macrunner_display_desc_misses, 1, memory_order_relaxed) + 1;
+  if ((misses & (misses - 1)) == 0)
+    fprintf(stderr, "macrunner-dxmt-display-desc-cache: misses=%llu display=%u\n", (unsigned long long)misses,
+            (unsigned)display_id);
   return STATUS_SUCCESS;
 }
 
@@ -2831,6 +5826,171 @@ _MTLDevice_newTileRenderPipelineState(void *obj) {
   return STATUS_SUCCESS;
 }
 
+static const char *
+macrunner_gpu_readback_phase_name(uint32_t phase) {
+  switch ((enum MacRunnerGPUReadbackPhase)phase) {
+  case MacRunnerGPUReadbackAfterClear:
+    return "after-clear";
+  case MacRunnerGPUReadbackAfterRender:
+    return "after-draws";
+  case MacRunnerGPUReadbackPrePresent:
+    return "pre-present";
+  case MacRunnerGPUReadbackShaderTexture:
+    return "shader-texture";
+  case MacRunnerGPUReadbackCausalC0:
+    return "causal-C0";
+  case MacRunnerGPUReadbackCausalC1:
+    return "causal-C1";
+  case MacRunnerGPUReadbackCausalC2:
+    return "causal-C2";
+  case MacRunnerGPUReadbackCausalC3:
+    return "causal-C3";
+  case MacRunnerGPUReadbackCausalPresentC0:
+    return "causal-present-C0";
+  case MacRunnerGPUReadbackCausalPresentC1:
+    return "causal-present-C1";
+  case MacRunnerGPUReadbackCausalPresentC2:
+    return "causal-present-C2";
+  case MacRunnerGPUReadbackCausalPresentC3:
+    return "causal-present-C3";
+  case MacRunnerGPUReadbackPresentedSurface:
+    return "presented-surface";
+  default:
+    return "unknown";
+  }
+}
+
+static void
+macrunner_gpu_readback_schedule(id<MTLCommandBuffer> command_buffer,
+                                id<MTLTexture> texture, uint32_t phase_value,
+                                uint64_t tag) {
+  const char *phase = macrunner_gpu_readback_phase_name(phase_value);
+
+  BOOL causal_phase = phase_value >= MacRunnerGPUReadbackCausalC0 &&
+                      phase_value <= MacRunnerGPUReadbackCausalPresentC3;
+  BOOL presented_surface_phase = phase_value == MacRunnerGPUReadbackPresentedSurface;
+  if (!macrunner_gpu_readback_probe_enabled() && !causal_phase && !presented_surface_phase &&
+      !(macrunner_shader_inputs_probe_enabled() &&
+        phase_value == MacRunnerGPUReadbackShaderTexture))
+    return;
+  if (!command_buffer || !texture) {
+    fprintf(stderr, "macrunner-hb-gpu-probe: phase=readback-skip checkpoint=%s tag=0x%llx reason=null-object\n",
+            phase, (unsigned long long)tag);
+    return;
+  }
+
+  MTLPixelFormat format = texture.pixelFormat;
+  BOOL bgra = format == MTLPixelFormatBGRA8Unorm || format == MTLPixelFormatBGRA8Unorm_sRGB;
+  BOOL rgba = format == MTLPixelFormatRGBA8Unorm || format == MTLPixelFormatRGBA8Unorm_sRGB;
+  NSUInteger width = texture.width;
+  NSUInteger height = texture.height;
+  if ((!bgra && !rgba) || texture.textureType != MTLTextureType2D || texture.sampleCount != 1 ||
+      !width || !height || width > 16384 || height > 16384) {
+    fprintf(stderr,
+            "macrunner-hb-gpu-probe: phase=readback-skip checkpoint=%s tag=0x%llx "
+            "reason=unsupported format=%lu type=%lu samples=%lu size=%lux%lu\n",
+            phase, (unsigned long long)tag, (unsigned long)format,
+            (unsigned long)texture.textureType, (unsigned long)texture.sampleCount,
+            (unsigned long)width, (unsigned long)height);
+    return;
+  }
+
+  id<MTLDevice> device = texture.device;
+  NSUInteger alignment = [device minimumLinearTextureAlignmentForPixelFormat:format];
+  if (!alignment)
+    alignment = 256;
+  if (width > SIZE_MAX / 4) {
+    fprintf(stderr, "macrunner-hb-gpu-probe: phase=readback-skip checkpoint=%s tag=0x%llx reason=row-overflow\n",
+            phase, (unsigned long long)tag);
+    return;
+  }
+  NSUInteger packed_row_bytes = width * 4;
+  NSUInteger row_bytes = ((packed_row_bytes + alignment - 1) / alignment) * alignment;
+  if (row_bytes < packed_row_bytes || height > SIZE_MAX / row_bytes) {
+    fprintf(stderr, "macrunner-hb-gpu-probe: phase=readback-skip checkpoint=%s tag=0x%llx reason=size-overflow\n",
+            phase, (unsigned long long)tag);
+    return;
+  }
+  NSUInteger byte_count = row_bytes * height;
+  id<MTLBuffer> staging = [device newBufferWithLength:byte_count options:MTLResourceStorageModeShared];
+  id<MTLBlitCommandEncoder> blit = staging ? [command_buffer blitCommandEncoder] : nil;
+  if (!staging || !blit) {
+    fprintf(stderr, "macrunner-hb-gpu-probe: phase=readback-skip checkpoint=%s tag=0x%llx reason=allocation\n",
+            phase, (unsigned long long)tag);
+    [staging release];
+    return;
+  }
+
+  [blit copyFromTexture:texture
+            sourceSlice:0
+            sourceLevel:0
+           sourceOrigin:MTLOriginMake(0, 0, 0)
+             sourceSize:MTLSizeMake(width, height, 1)
+               toBuffer:staging
+      destinationOffset:0
+ destinationBytesPerRow:row_bytes
+destinationBytesPerImage:byte_count];
+  [blit endEncoding];
+  fprintf(stderr,
+          "macrunner-hb-gpu-probe: phase=readback-scheduled checkpoint=%s tag=0x%llx "
+          "texture=%p format=%lu size=%lux%lu row=%lu\n",
+          phase, (unsigned long long)tag, texture, (unsigned long)format,
+          (unsigned long)width, (unsigned long)height, (unsigned long)row_bytes);
+
+  [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+    const uint8_t *bytes = (const uint8_t *)staging.contents;
+    uint64_t fnv = UINT64_C(1469598103934665603);
+    uint64_t black = 0, nonblack = 0, colorful = 0;
+    uint64_t sum_r = 0, sum_g = 0, sum_b = 0, sum_a = 0;
+    uint8_t min_r = 255, min_g = 255, min_b = 255, min_a = 255;
+    uint8_t max_r = 0, max_g = 0, max_b = 0, max_a = 0;
+    uint64_t pixels = (uint64_t)width * (uint64_t)height;
+    for (NSUInteger y = 0; y < height; y++) {
+      const uint8_t *row = bytes + y * row_bytes;
+      for (NSUInteger x = 0; x < width; x++) {
+        const uint8_t *p = row + x * 4;
+        uint8_t r = bgra ? p[2] : p[0];
+        uint8_t g = p[1];
+        uint8_t b = bgra ? p[0] : p[2];
+        uint8_t a = p[3];
+        for (unsigned i = 0; i < 4; i++) {
+          fnv ^= p[i];
+          fnv *= UINT64_C(1099511628211);
+        }
+        uint8_t hi = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        uint8_t lo = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        if (hi <= 4)
+          black++;
+        else
+          nonblack++;
+        if (hi > 16 && (unsigned)(hi - lo) > 24)
+          colorful++;
+        sum_r += r; sum_g += g; sum_b += b; sum_a += a;
+        if (r < min_r) min_r = r; if (r > max_r) max_r = r;
+        if (g < min_g) min_g = g; if (g > max_g) max_g = g;
+        if (b < min_b) min_b = b; if (b > max_b) max_b = b;
+        if (a < min_a) min_a = a; if (a > max_a) max_a = a;
+      }
+    }
+    fprintf(stderr,
+            "macrunner-hb-gpu-probe: phase=readback-complete checkpoint=%s tag=0x%llx "
+            "status=%lu texture=%p format=%lu size=%lux%lu hash=0x%016llx "
+            "pixels=%llu black=%llu nonblack=%llu colorful=%llu "
+            "min=%u,%u,%u,%u max=%u,%u,%u,%u mean=%.3f,%.3f,%.3f,%.3f\n",
+            phase, (unsigned long long)tag, (unsigned long)completed.status, texture,
+            (unsigned long)format, (unsigned long)width, (unsigned long)height,
+            (unsigned long long)fnv, (unsigned long long)pixels,
+            (unsigned long long)black, (unsigned long long)nonblack,
+            (unsigned long long)colorful, min_r, min_g, min_b, min_a,
+            max_r, max_g, max_b, max_a,
+            pixels ? (double)sum_r / pixels : 0.0, pixels ? (double)sum_g / pixels : 0.0,
+            pixels ? (double)sum_b / pixels : 0.0, pixels ? (double)sum_a / pixels : 0.0);
+    fflush(stderr);
+    [staging release];
+  }];
+  fflush(stderr);
+}
+
 /*
  * Definition from cache.c
  */
@@ -2974,6 +6134,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers,
     &_MTLCommandBuffer_property,
     &_MTLDevice_newTileRenderPipelineState,
+    &_MTLCommandBuffer_scheduleFrameDump,
 };
 
 #ifndef DXMT_NATIVE
@@ -3110,5 +6271,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers,
     &_MTLCommandBuffer_property,
     &_MTLDevice_newTileRenderPipelineState,
+    &_MTLCommandBuffer_scheduleFrameDump,
 };
 #endif

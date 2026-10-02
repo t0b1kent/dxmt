@@ -21,6 +21,41 @@ template<typename Object> Rc<Object> forward_rc(Rc<Object>& obj) {
 
 using ImmediateContextBase = MTLD3D11DeviceContextImplBase<ContextInternalState>;
 
+static bool IsDefaultMapSubresource(ID3D11Resource *resource, UINT subresource) {
+  D3D11_RESOURCE_DIMENSION dimension = D3D11_RESOURCE_DIMENSION_UNKNOWN;
+  resource->GetType(&dimension);
+
+  switch (dimension) {
+  case D3D11_RESOURCE_DIMENSION_BUFFER: {
+    return false;
+  }
+  case D3D11_RESOURCE_DIMENSION_TEXTURE1D: {
+    D3D11_TEXTURE1D_DESC desc = {};
+    static_cast<ID3D11Texture1D *>(resource)->GetDesc(&desc);
+    return desc.Usage == D3D11_USAGE_DEFAULT &&
+           subresource < desc.MipLevels * desc.ArraySize;
+  }
+  case D3D11_RESOURCE_DIMENSION_TEXTURE2D: {
+    D3D11_TEXTURE2D_DESC desc = {};
+    static_cast<ID3D11Texture2D *>(resource)->GetDesc(&desc);
+    return desc.Usage == D3D11_USAGE_DEFAULT &&
+           subresource < desc.MipLevels * desc.ArraySize;
+  }
+  case D3D11_RESOURCE_DIMENSION_TEXTURE3D: {
+    D3D11_TEXTURE3D_DESC desc = {};
+    static_cast<ID3D11Texture3D *>(resource)->GetDesc(&desc);
+    return desc.Usage == D3D11_USAGE_DEFAULT && subresource < desc.MipLevels;
+  }
+  default:
+    return false;
+  }
+}
+
+static bool IsDefaultMapType(D3D11_MAP map_type) {
+  return map_type == D3D11_MAP_READ || map_type == D3D11_MAP_WRITE ||
+         map_type == D3D11_MAP_READ_WRITE;
+}
+
 template <>
 template <CommandWithContext<ArgumentEncodingContext> cmd>
 void
@@ -139,13 +174,15 @@ public:
       D3D11_MAPPED_SUBRESOURCE *pMappedResource) override {
     std::lock_guard<d3d11_device_mutex> lock(mutex);
 
-    if (unlikely(!pResource || !pMappedResource))
+    if (unlikely(!pResource))
       return E_INVALIDARG;
     UINT buffer_length = 0, &row_pitch = buffer_length;
     UINT bind_flag = 0, &depth_pitch = bind_flag;
     auto current_seq_id = cmd_queue.CurrentSeqId();
     auto coherent_seq_id = cmd_queue.CoherentSeqId();
     if (auto dynamic = GetDynamicBuffer(pResource, &buffer_length, &bind_flag)) {
+      if (!pMappedResource)
+        return E_INVALIDARG;
       switch (MapType) {
       case D3D11_MAP_READ:
       case D3D11_MAP_WRITE:
@@ -169,18 +206,38 @@ public:
         pMappedResource->pData = MapDynamicBuffer(dynamic, current_seq_id, coherent_seq_id);
         pMappedResource->RowPitch = buffer_length;
         pMappedResource->DepthPitch = buffer_length;
+        if (bind_flag & D3D11_BIND_VERTEX_BUFFER) {
+          auto [allocation, sub] = GetDynamicBufferAllocation(dynamic);
+          macrunner_vertex_data_log_bytes(
+              "map", pResource, nullptr, dynamic->buffer, allocation,
+              allocation ? allocation->gpuAddress() +
+                               allocation->currentSuballocationOffset()
+                         : 0,
+              sub, bind_flag, MapType, pMappedResource->pData, buffer_length, 0);
+        }
         break;
       }
       case D3D11_MAP_WRITE_NO_OVERWRITE: {
         pMappedResource->pData = dynamic->immediateMappedMemory();
         pMappedResource->RowPitch = buffer_length;
         pMappedResource->DepthPitch = buffer_length;
+        if (bind_flag & D3D11_BIND_VERTEX_BUFFER) {
+          auto [allocation, sub] = GetDynamicBufferAllocation(dynamic);
+          macrunner_vertex_data_log_bytes(
+              "map", pResource, nullptr, dynamic->buffer, allocation,
+              allocation ? allocation->gpuAddress() +
+                               allocation->currentSuballocationOffset()
+                         : 0,
+              sub, bind_flag, MapType, pMappedResource->pData, buffer_length, 0);
+        }
         break;
       }
       }
       return S_OK;
     }
     if (auto dynamic = GetDynamicTexture(pResource, Subresource, &row_pitch, &depth_pitch)) {
+      if (!pMappedResource)
+        return E_INVALIDARG;
       switch (MapType) {
       case D3D11_MAP_READ:
       case D3D11_MAP_WRITE:
@@ -201,6 +258,8 @@ public:
       return S_OK;
     }
     if (auto dynamic = GetDynamicLinearTexture(pResource, &row_pitch, &depth_pitch)) {
+      if (!pMappedResource)
+        return E_INVALIDARG;
       switch (MapType) {
       case D3D11_MAP_READ:
       case D3D11_MAP_WRITE:
@@ -232,6 +291,8 @@ public:
       return S_OK;
     }
     if (auto staging = GetStagingResource(pResource, Subresource)) {
+      if (!pMappedResource)
+        return E_INVALIDARG;
       if (MapType > 3 || MapType == 0)
           return E_INVALIDARG;
 
@@ -279,7 +340,10 @@ public:
       };
     };
     if (pMappedResource == nullptr) {
-      UNIMPLEMENTED("map-on-default: map");
+      if (!IsDefaultMapType(MapType) ||
+          !IsDefaultMapSubresource(pResource, Subresource))
+        return E_INVALIDARG;
+      return S_OK;
     }
     return E_INVALIDARG;
   }
@@ -293,6 +357,20 @@ public:
       return;
     UINT row_pitch = 0;
     UINT depth_pitch = 0;
+    UINT buffer_length = 0;
+    UINT bind_flags = 0;
+    if (auto dynamic = GetDynamicBuffer(pResource, &buffer_length, &bind_flags)) {
+      if (bind_flags & D3D11_BIND_VERTEX_BUFFER) {
+        auto [allocation, sub] = GetDynamicBufferAllocation(dynamic);
+        macrunner_vertex_data_log_bytes(
+            "unmap", pResource, nullptr, dynamic->buffer, allocation,
+            allocation ? allocation->gpuAddress() +
+                             allocation->currentSuballocationOffset()
+                       : 0,
+            sub, bind_flags, 0, dynamic->immediateMappedMemory(), buffer_length,
+            0);
+      }
+    }
     if (auto staging = GetStagingResource(pResource, Subresource)) {
       staging->unmap();
     };
@@ -329,7 +407,27 @@ public:
       break;
     }
     case D3D11_QUERY_PIPELINE_STATISTICS: {
-      // ignore
+      static_cast<MTLD3D11ImmediateQuery<D3D11_QUERY_DATA_PIPELINE_STATISTICS> *>(pAsync)->Begin();
+      break;
+    }
+    case D3D11_QUERY_SO_STATISTICS:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
+    case D3D11_QUERY_SO_STATISTICS_STREAM0:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0:
+    case D3D11_QUERY_SO_STATISTICS_STREAM1:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
+    case D3D11_QUERY_SO_STATISTICS_STREAM2:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
+    case D3D11_QUERY_SO_STATISTICS_STREAM3:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3: {
+      if (desc.Query == D3D11_QUERY_SO_STATISTICS ||
+          desc.Query == D3D11_QUERY_SO_STATISTICS_STREAM0 ||
+          desc.Query == D3D11_QUERY_SO_STATISTICS_STREAM1 ||
+          desc.Query == D3D11_QUERY_SO_STATISTICS_STREAM2 ||
+          desc.Query == D3D11_QUERY_SO_STATISTICS_STREAM3)
+        static_cast<MTLD3D11ImmediateQuery<D3D11_QUERY_DATA_SO_STATISTICS> *>(pAsync)->Begin();
+      else
+        static_cast<MTLD3D11ImmediateQuery<BOOL> *>(pAsync)->Begin();
       break;
     }
     default:
@@ -386,7 +484,27 @@ public:
       break;
     }
     case D3D11_QUERY_PIPELINE_STATISTICS: {
-      // ignore
+      static_cast<MTLD3D11ImmediateQuery<D3D11_QUERY_DATA_PIPELINE_STATISTICS> *>(pAsync)->End();
+      break;
+    }
+    case D3D11_QUERY_SO_STATISTICS:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
+    case D3D11_QUERY_SO_STATISTICS_STREAM0:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0:
+    case D3D11_QUERY_SO_STATISTICS_STREAM1:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
+    case D3D11_QUERY_SO_STATISTICS_STREAM2:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
+    case D3D11_QUERY_SO_STATISTICS_STREAM3:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3: {
+      if (desc.Query == D3D11_QUERY_SO_STATISTICS ||
+          desc.Query == D3D11_QUERY_SO_STATISTICS_STREAM0 ||
+          desc.Query == D3D11_QUERY_SO_STATISTICS_STREAM1 ||
+          desc.Query == D3D11_QUERY_SO_STATISTICS_STREAM2 ||
+          desc.Query == D3D11_QUERY_SO_STATISTICS_STREAM3)
+        static_cast<MTLD3D11ImmediateQuery<D3D11_QUERY_DATA_SO_STATISTICS> *>(pAsync)->End();
+      else
+        static_cast<MTLD3D11ImmediateQuery<BOOL> *>(pAsync)->End(FALSE);
       break;
     }
     default:
@@ -460,10 +578,27 @@ public:
       break;
     }
     case D3D11_QUERY_PIPELINE_STATISTICS: {
-      if (pData) {
-        (*static_cast<D3D11_QUERY_DATA_PIPELINE_STATISTICS *>(pData)) = {};
-      }
-      return S_OK;
+      D3D11_QUERY_DATA_PIPELINE_STATISTICS null_data;
+      auto data_ptr = pData ? static_cast<D3D11_QUERY_DATA_PIPELINE_STATISTICS *>(pData) : &null_data;
+      return static_cast<MTLD3D11ImmediateQuery<D3D11_QUERY_DATA_PIPELINE_STATISTICS> *>(pAsync)->GetData(data_ptr);
+    }
+    case D3D11_QUERY_SO_STATISTICS:
+    case D3D11_QUERY_SO_STATISTICS_STREAM0:
+    case D3D11_QUERY_SO_STATISTICS_STREAM1:
+    case D3D11_QUERY_SO_STATISTICS_STREAM2:
+    case D3D11_QUERY_SO_STATISTICS_STREAM3: {
+      D3D11_QUERY_DATA_SO_STATISTICS null_data;
+      auto data_ptr = pData ? static_cast<D3D11_QUERY_DATA_SO_STATISTICS *>(pData) : &null_data;
+      return static_cast<MTLD3D11ImmediateQuery<D3D11_QUERY_DATA_SO_STATISTICS> *>(pAsync)->GetData(data_ptr);
+    }
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM0:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM1:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM2:
+    case D3D11_QUERY_SO_OVERFLOW_PREDICATE_STREAM3: {
+      BOOL null_data;
+      auto data_ptr = pData ? static_cast<BOOL *>(pData) : &null_data;
+      return static_cast<MTLD3D11ImmediateQuery<BOOL> *>(pAsync)->GetData(data_ptr);
     }
     default:
       ERR("Unknown query type ", desc.Query);

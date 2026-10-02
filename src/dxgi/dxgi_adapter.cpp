@@ -217,12 +217,12 @@ public:
   HRESULT STDMETHODCALLTYPE
   RegisterHardwareContentProtectionTeardownStatusEvent(HANDLE event,
                                                        DWORD *cookie) override {
-    assert(0 && "TODO");
+    return AllocateNotificationCookie(event, cookie);
   }
 
   void STDMETHODCALLTYPE
   UnregisterHardwareContentProtectionTeardownStatus(DWORD cookie) override {
-    assert(0 && "TODO");
+    (void)cookie;
   }
 
   HRESULT STDMETHODCALLTYPE QueryVideoMemoryInfo(
@@ -260,23 +260,36 @@ public:
 
   HRESULT STDMETHODCALLTYPE RegisterVideoMemoryBudgetChangeNotificationEvent(
       HANDLE event, DWORD *cookie) override {
-    assert(0 && "TODO");
+    return AllocateNotificationCookie(event, cookie);
   }
 
   void STDMETHODCALLTYPE
   UnregisterVideoMemoryBudgetChangeNotification(DWORD cookie) override {
-    assert(0 && "TODO");
+    (void)cookie;
   }
 
   WMT::Device STDMETHODCALLTYPE GetMTLDevice() final { return device_; }
   D3DKMT_HANDLE STDMETHODCALLTYPE GetLocalD3DKMT() final { return local_kmt_; }
 
 private:
+  HRESULT AllocateNotificationCookie(HANDLE event, DWORD *cookie) {
+    if (cookie)
+      *cookie = 0;
+    if (!event || !cookie)
+      return DXGI_ERROR_INVALID_CALL;
+
+    *cookie = next_notification_cookie_++;
+    if (!*cookie)
+      *cookie = next_notification_cookie_++;
+    return S_OK;
+  }
+
   WMT::Reference<WMT::Device> device_;
   D3DKMT_HANDLE local_kmt_ = 0;
   Com<IDXGIFactory> factory_;
   DxgiOptions options_;
   uint64_t mem_reserved_[2] = {0, 0};
+  DWORD next_notification_cookie_ = 1;
 };
 
 Com<IMTLDXGIAdapter> CreateAdapter(WMT::Device Device,
