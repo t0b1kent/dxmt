@@ -18,6 +18,29 @@
 namespace dxmt {
 
 static bool
+macrunner_wmt_record_enabled() {
+  static const bool enabled = [] {
+    const char *directory = std::getenv("MACRUNNER_WMT_RECORD");
+    return directory && directory[0];
+  }();
+  return enabled;
+}
+
+static void
+macrunner_wmt_trace_owner(WMT::Buffer buffer, uint64_t offset, uint64_t length,
+                          WMTTraceOwnerAction action) {
+  if (macrunner_wmt_record_enabled())
+    MTLBuffer_traceOwnership(buffer, offset, length, action);
+}
+
+static void
+macrunner_wmt_trace_fields(WMT::Buffer buffer, uint64_t offset, uint64_t count,
+                           uint64_t stride, WMTTraceFieldKind kind) {
+  if (macrunner_wmt_record_enabled())
+    MTLBuffer_traceFields(buffer, offset, count, stride, kind);
+}
+
+static bool
 macrunner_shader_inputs_probe_enabled() {
   static const bool enabled = [] {
     const char *value = std::getenv("MACRUNNER_HB_SHADER_INPUTS_PROBE");
@@ -356,6 +379,8 @@ ArgumentEncodingContext::encodeVertexBuffers(uint32_t slot_mask, uint64_t offset
     // FIXME: did we intended to use the whole buffer?
     makeResident<PipelineStage::Vertex, kind>(buffer.ptr());
   };
+  macrunner_wmt_trace_fields(getFinalArgumentBuffer(), getFinalArgumentBufferOffset(offset),
+      __builtin_popcount(slot_mask), sizeof(VERTEX_BUFFER_ENTRY), WMTTraceGPUAddress);
   {
     auto &cmd = encodeRenderCommand<wmtcmd_render_setbufferoffset>();
     cmd.offset = getFinalArgumentBufferOffset(offset);
@@ -421,6 +446,9 @@ ArgumentEncodingContext::encodeConstantBuffers(const MTL_SHADER_REFLECTION *refl
       auto &cbuf = cbuf_[slot];
       if (!cbuf.buffer.ptr()) {
         encoded_buffer[arg.StructurePtrOffset] = dummy_cbuffer_info_.gpu_address;
+        macrunner_wmt_trace_fields(getFinalArgumentBuffer<stage == PipelineStage::Compute>(),
+            getFinalArgumentBufferOffset<stage == PipelineStage::Compute>(offset) +
+                arg.StructurePtrOffset * sizeof(uint64_t), 1, 8, WMTTraceGPUAddress);
         makeResident<stage, kind>(dummy_cbuffer_, GetResidencyMask<kind>(stage, true, false));
         continue;
       }
@@ -428,6 +456,9 @@ ArgumentEncodingContext::encodeConstantBuffers(const MTL_SHADER_REFLECTION *refl
       auto valid_length = argbuf->length() > cbuf.offset ? argbuf->length() - cbuf.offset : 0;
       auto [argbuf_alloc, argbuf_offset] = access<stage>(argbuf, cbuf.offset, valid_length, ResourceAccess::Read);
       encoded_buffer[arg.StructurePtrOffset] = argbuf_alloc->gpuAddress() + argbuf_offset + cbuf.offset;
+      macrunner_wmt_trace_fields(getFinalArgumentBuffer<stage == PipelineStage::Compute>(),
+          getFinalArgumentBufferOffset<stage == PipelineStage::Compute>(offset) +
+              arg.StructurePtrOffset * sizeof(uint64_t), 1, 8, WMTTraceGPUAddress);
       macrunner_shader_inputs_log_cbuffer(stage, arg.SM50BindingSlot, argbuf_alloc,
                                           encoded_buffer[arg.StructurePtrOffset],
                                           cbuf.offset, valid_length);
@@ -645,6 +676,21 @@ ArgumentEncodingContext::encodeShaderResources(
       }
       break;
     }
+    }
+    if (macrunner_wmt_record_enabled()) {
+      auto destination = getFinalArgumentBuffer<stage == PipelineStage::Compute>();
+      auto field_offset = getFinalArgumentBufferOffset<stage == PipelineStage::Compute>(offset) +
+          arg.StructurePtrOffset * sizeof(uint64_t);
+      if (arg.Type == SM50BindingType::Sampler) {
+        macrunner_wmt_trace_fields(destination, field_offset, 2, 8, WMTTraceSamplerID);
+      } else if (arg.Type == SM50BindingType::SRV || arg.Type == SM50BindingType::UAV) {
+        if (arg.Flags & MTL_SM50_SHADER_ARGUMENT_BUFFER)
+          macrunner_wmt_trace_fields(destination, field_offset, 1, 8, WMTTraceGPUAddress);
+        else if (arg.Flags & MTL_SM50_SHADER_ARGUMENT_TEXTURE)
+          macrunner_wmt_trace_fields(destination, field_offset, 1, 8, WMTTraceTextureID);
+        if (arg.Type == SM50BindingType::UAV && (arg.Flags & MTL_SM50_SHADER_ARGUMENT_UAV_COUNTER))
+          macrunner_wmt_trace_fields(destination, field_offset + 16, 1, 8, WMTTraceGPUAddress);
+      }
     }
     unsigned table_words = arg.Type == SM50BindingType::Sampler ? 3 :
         ((arg.Type == SM50BindingType::UAV &&
@@ -881,12 +927,16 @@ ArgumentEncodingContext::startRenderPass(
   encoder_info->dsv_readonly_flags = dsv_readonly_flags;
   encoder_info->render_target_count = render_target_count;
   auto [gpu_buffer_contents, gpu_buffer_, offset] = queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size);
+  macrunner_wmt_trace_owner(gpu_buffer_, offset, encoder_argbuf_size, WMTTraceOwnerBegin);
+  macrunner_wmt_trace_fields(gpu_buffer_, offset, encoder_argbuf_size, 1, WMTTraceClearRange);
   encoder_info->allocated_argbuf = gpu_buffer_;
   encoder_info->allocated_argbuf_offset = offset;
+  encoder_info->trace_argbuf_length = encoder_argbuf_size;
   encoder_info->allocated_argbuf_mapping = gpu_buffer_contents;
   encoder_current = encoder_info;
 
   currentFrameStatistics().render_pass_count++;
+  traceBufferRead(gpu_buffer_, offset, encoder_argbuf_size);
 
   vro_state_.beginEncoder();
 
@@ -905,12 +955,16 @@ ArgumentEncodingContext::startComputePass(uint64_t encoder_argbuf_size) {
   encoder_info->cmd_head.next.set(0);
   encoder_info->cmd_tail = (wmtcmd_base *)&encoder_info->cmd_head;
   auto [gpu_buffer_contents, gpu_buffer_, offset] = queue_.AllocateArgumentBuffer(seq_id_, encoder_argbuf_size);
+  macrunner_wmt_trace_owner(gpu_buffer_, offset, encoder_argbuf_size, WMTTraceOwnerBegin);
+  macrunner_wmt_trace_fields(gpu_buffer_, offset, encoder_argbuf_size, 1, WMTTraceClearRange);
   encoder_info->allocated_argbuf = gpu_buffer_;
   encoder_info->allocated_argbuf_offset = offset;
+  encoder_info->trace_argbuf_length = encoder_argbuf_size;
   encoder_info->allocated_argbuf_mapping = gpu_buffer_contents;
   encoder_current = encoder_info;
 
   currentFrameStatistics().compute_pass_count++;
+  traceBufferRead(gpu_buffer_, offset, encoder_argbuf_size);
 
   return encoder_info;
 }
@@ -936,6 +990,15 @@ ArgumentEncodingContext::startBlitPass() {
 void
 ArgumentEncodingContext::endPass() {
   assert(encoder_current);
+  if (encoder_current->type == EncoderType::Render) {
+    auto data = static_cast<RenderEncoderData *>(encoder_current);
+    macrunner_wmt_trace_owner(data->allocated_argbuf, data->allocated_argbuf_offset,
+        data->trace_argbuf_length, WMTTraceOwnerEnd);
+  } else if (encoder_current->type == EncoderType::Compute) {
+    auto data = static_cast<ComputeEncoderData *>(encoder_current);
+    macrunner_wmt_trace_owner(data->allocated_argbuf, data->allocated_argbuf_offset,
+        data->trace_argbuf_length, WMTTraceOwnerEnd);
+  }
   encoder_last->next = encoder_current;
   encoder_last = encoder_current;
 
@@ -1231,6 +1294,14 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
         };
         auto [mapped_task_data, task_data_buffer, task_data_buffer_offset] =
             queue_.AllocateArgumentBuffer(seq_id_, sizeof(GS_MARSHAL_TASK) * task_count);
+        macrunner_wmt_trace_owner(task_data_buffer, task_data_buffer_offset,
+            sizeof(GS_MARSHAL_TASK) * task_count, WMTTraceOwnerBegin);
+        macrunner_wmt_trace_fields(task_data_buffer, task_data_buffer_offset,
+            sizeof(GS_MARSHAL_TASK) * task_count, 1, WMTTraceClearRange);
+        macrunner_wmt_trace_fields(task_data_buffer, task_data_buffer_offset,
+            task_count, sizeof(GS_MARSHAL_TASK), WMTTraceGPUAddress);
+        macrunner_wmt_trace_fields(task_data_buffer, task_data_buffer_offset + 8,
+            task_count, sizeof(GS_MARSHAL_TASK), WMTTraceGPUAddress);
         auto tasks_data = (GS_MARSHAL_TASK *)mapped_task_data;
         for (unsigned i = 0; i<task_count; i++) {
           auto & task = data->gs_arg_marshal_tasks[i];
@@ -1243,6 +1314,15 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
           encoder.useResource(task.dispatch_arguments_buffer, WMTResourceUsageWrite, WMTRenderStageVertex);
         }
         tasks_data[task_count - 1].end_of_command = 1;
+        macrunner_wmt_trace_owner(task_data_buffer, task_data_buffer_offset,
+            sizeof(GS_MARSHAL_TASK) * task_count, WMTTraceOwnerEnd);
+        if (const char *gate = std::getenv("MACRUNNER_WMT_RECORD"); gate && *gate) {
+          wmtcmd_trace_buffer_read span = {};
+          span.type = WMTRenderCommandTraceBufferRead;
+          span.buffer = task_data_buffer; span.offset = task_data_buffer_offset;
+          span.length = sizeof(GS_MARSHAL_TASK) * task_count;
+          encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&span));
+        }
         emulated_cmd.MarshalGSDispatchArguments(encoder, task_data_buffer, task_data_buffer_offset);
       }
       if (data->ts_arg_marshal_tasks.size()) {
@@ -1257,6 +1337,14 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
         };
         auto [mapped_task_data, task_data_buffer, task_data_buffer_offset] =
             queue_.AllocateArgumentBuffer(seq_id_, sizeof(TS_MARSHAL_TASK) * task_count);
+        macrunner_wmt_trace_owner(task_data_buffer, task_data_buffer_offset,
+            sizeof(TS_MARSHAL_TASK) * task_count, WMTTraceOwnerBegin);
+        macrunner_wmt_trace_fields(task_data_buffer, task_data_buffer_offset,
+            sizeof(TS_MARSHAL_TASK) * task_count, 1, WMTTraceClearRange);
+        macrunner_wmt_trace_fields(task_data_buffer, task_data_buffer_offset,
+            task_count, sizeof(TS_MARSHAL_TASK), WMTTraceGPUAddress);
+        macrunner_wmt_trace_fields(task_data_buffer, task_data_buffer_offset + 8,
+            task_count, sizeof(TS_MARSHAL_TASK), WMTTraceGPUAddress);
         auto tasks_data = (TS_MARSHAL_TASK *)mapped_task_data;
         for (unsigned i = 0; i<task_count; i++) {
           auto & task = data->ts_arg_marshal_tasks[i];
@@ -1270,6 +1358,15 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
           encoder.useResource(task.dispatch_arguments_buffer, WMTResourceUsageWrite, WMTRenderStageVertex);
         }
         tasks_data[task_count - 1].end_of_command = 1;
+        macrunner_wmt_trace_owner(task_data_buffer, task_data_buffer_offset,
+            sizeof(TS_MARSHAL_TASK) * task_count, WMTTraceOwnerEnd);
+        if (const char *gate = std::getenv("MACRUNNER_WMT_RECORD"); gate && *gate) {
+          wmtcmd_trace_buffer_read span = {};
+          span.type = WMTRenderCommandTraceBufferRead;
+          span.buffer = task_data_buffer; span.offset = task_data_buffer_offset;
+          span.length = sizeof(TS_MARSHAL_TASK) * task_count;
+          encoder.encodeCommands(reinterpret_cast<const wmtcmd_render_nop *>(&span));
+        }
         emulated_cmd.MarshalTSDispatchArguments(encoder, task_data_buffer, task_data_buffer_offset);
       }
       if (data->gs_arg_marshal_tasks.size() > 0 || data->ts_arg_marshal_tasks.size() > 0) {

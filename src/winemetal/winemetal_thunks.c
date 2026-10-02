@@ -1189,3 +1189,26 @@ MTLCommandBuffer_scheduleFrameDump(obj_handle_t cmdbuf, obj_handle_t texture,
   params.frame = frame;
   UNIX_CALL(132, &params);
 }
+
+WINEMETAL_API void
+MTLBuffer_traceFields(obj_handle_t buffer, uint64_t offset, uint64_t count,
+                      uint64_t stride, enum WMTTraceFieldKind kind) {
+  struct unixcall_mtlbuffer_tracefields params = {0};
+  params.buffer = buffer;
+  params.offset = offset;
+  params.count = count;
+  params.stride = stride;
+  params.kind = kind;
+  UNIX_CALL(133, &params);
+}
+
+WINEMETAL_API void
+MTLBuffer_traceOwnership(obj_handle_t buffer, uint64_t offset, uint64_t length,
+                         enum WMTTraceOwnerAction action) {
+  struct unixcall_mtlbuffer_traceownership params = {0};
+  params.buffer = buffer;
+  params.offset = offset;
+  params.length = length;
+  params.action = action;
+  UNIX_CALL(134, &params);
+}

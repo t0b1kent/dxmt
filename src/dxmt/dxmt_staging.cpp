@@ -56,6 +56,10 @@ StagingResource::tryMap(uint64_t coherent_seq_id, bool read, bool write) {
 
 void
 StagingResource::unmap() {
+  if (trace_write_allocation_ != ~0ull) {
+    buffer_pool[trace_write_allocation_]->traceMappedWrite(0, length, WMTTraceOwnerEnd);
+    trace_write_allocation_ = ~0ull;
+  }
   mapped = false;
 }
 

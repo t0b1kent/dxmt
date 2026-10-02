@@ -47,7 +47,7 @@ CreateStagingBuffer(MTLD3D11Device *pDevice, const D3D11_BUFFER_DESC *pDesc,
   auto byte_width = pDesc->ByteWidth;
   auto buffer = new StagingResource(metal, byte_width, byte_width, byte_width);
   if (pInitialData) {
-    memcpy(buffer->mappedImmediateMemory(), pInitialData->pSysMem, byte_width);
+    buffer->updateImmediateContents(0, pInitialData->pSysMem, byte_width);
   }
   *ppBuffer = reinterpret_cast<ID3D11Buffer *>(ref(new StagingBuffer(pDesc, pDevice, buffer)));
   return S_OK;
@@ -119,14 +119,12 @@ HRESULT CreateStagingTextureInternal(MTLD3D11Device *pDevice,
     D3D11_ASSERT(subresources.size() == sub.SubresourceId);
     auto buffer = new StagingResource(metal, buf_len, bpr, bpi);
     if (pInitialData) {
-      auto mapped = buffer->mappedImmediateMemory();
       auto bpi_read = is_3d_tex ? pInitialData[sub.SubresourceId].SysMemSlicePitch : 0;
       auto bpr_read = is_1d_tex ? 0 : pInitialData[sub.SubresourceId].SysMemPitch;
       for (auto image = 0u; image < d; image++) {
         for (auto row = 0u; row < (bpi / bpr); row++) {
-          auto dst_data = ptr_add(mapped, image * bpi + row * bpr);
           auto src_data = ptr_add(pInitialData[sub.SubresourceId].pSysMem, image * bpi_read + row * bpr_read);
-          memcpy(dst_data, src_data, std::min(bpr, bpr_read));
+          buffer->updateImmediateContents(image * bpi + row * bpr, src_data, std::min(bpr, bpr_read));
         }
       }
     }

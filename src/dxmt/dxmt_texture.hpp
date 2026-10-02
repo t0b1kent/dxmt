@@ -7,6 +7,8 @@
 #include "thread.hpp"
 #include "util_flags.hpp"
 #include "util_svector.hpp"
+#include <cstdlib>
+#include <cstring>
 
 namespace dxmt {
 
@@ -119,6 +121,21 @@ public:
 
   WMT::Texture texture() const {
     return obj_;
+  }
+
+  void traceMappedWrite(uint64_t offset, uint64_t size, WMTTraceOwnerAction action) noexcept {
+    static const bool recording = [] {
+      const char *value = std::getenv("MACRUNNER_WMT_RECORD");
+      return value && *value;
+    }();
+    if (recording && mappedMemory)
+      MTLBuffer_traceOwnership(buffer_, offset, size, action);
+  }
+
+  void updateMappedContents(uint64_t offset, const void *data, uint64_t size) noexcept {
+    traceMappedWrite(offset, size, WMTTraceOwnerBegin);
+    memcpy(static_cast<char *>(mappedMemory) + offset, data, size);
+    traceMappedWrite(offset, size, WMTTraceOwnerEnd);
   }
 
   Flags<TextureAllocationFlag>

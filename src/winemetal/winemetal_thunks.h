@@ -377,6 +377,23 @@ struct unixcall_mtlcommandbuffer_frame_dump {
   uint64_t frame;
 };
 
+struct unixcall_mtlbuffer_tracefields {
+  obj_handle_t buffer;
+  uint64_t offset;
+  uint64_t count;
+  uint64_t stride;
+  uint32_t kind;
+  uint32_t reserved;
+};
+
+struct unixcall_mtlbuffer_traceownership {
+  obj_handle_t buffer;
+  uint64_t offset;
+  uint64_t length;
+  uint32_t action;
+  uint32_t reserved;
+};
+
 #pragma pack(pop)
 
 #endif

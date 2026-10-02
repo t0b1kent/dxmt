@@ -15,6 +15,7 @@
 #include "rc/util_rc_ptr.hpp"
 #include "airconv_public.h"
 #include <cassert>
+#include <cstdlib>
 
 #define DXMT_IMPLEMENT_ME __builtin_unreachable();
 #define DXMT_UNREACHABLE __builtin_unreachable();
@@ -170,6 +171,7 @@ struct RenderEncoderData : EncoderData {
   wmtcmd_base *cmd_tail;
   WMT::Buffer allocated_argbuf;
   uint64_t allocated_argbuf_offset;
+  uint64_t trace_argbuf_length;
   uint64_t encoder_id_vertex;
   FenceSet fence_wait_vertex;
   FenceSet fence_update_vertex;
@@ -189,6 +191,7 @@ struct ComputeEncoderData : EncoderData {
   wmtcmd_base *cmd_tail;
   WMT::Buffer allocated_argbuf;
   uint64_t allocated_argbuf_offset;
+  uint64_t trace_argbuf_length;
   void *allocated_argbuf_mapping;
 };
 
@@ -310,6 +313,18 @@ private:
   template <PipelineStage stage> void track(GenericAccessTracker &tracker, int flags);
 
 public:
+  void traceBufferRead(WMT::Buffer buffer, uint64_t offset, uint64_t length) {
+    const char *gate = std::getenv("MACRUNNER_WMT_RECORD");
+    if (!gate || !*gate || !encoder_current || !length) return;
+    if (encoder_current->type != EncoderType::Render && encoder_current->type != EncoderType::Compute) return;
+    auto &cmd = encoder_current->type == EncoderType::Compute ?
+        encodeComputeCommand<wmtcmd_trace_buffer_read>() : encodeRenderCommand<wmtcmd_trace_buffer_read>();
+    cmd.type = encoder_current->type == EncoderType::Compute ?
+        uint16_t(WMTComputeCommandTraceBufferRead) : uint16_t(WMTRenderCommandTraceBufferRead);
+    cmd.reserved[0] = cmd.reserved[1] = cmd.reserved[2] = 0;
+    cmd.buffer = buffer; cmd.offset = offset; cmd.length = length;
+  }
+
   template <PipelineStage stage>
   void
   trackBuffer(BufferAllocation *allocation, int flags) {
@@ -326,6 +341,8 @@ public:
   access(Rc<Buffer> const &buffer, unsigned offset, unsigned length, int flags) {
     auto allocation = buffer->current();
     trackBuffer<stage>(allocation, flags);
+    if (flags & ResourceAccess::Read)
+      traceBufferRead(allocation->buffer(), allocation->currentSuballocationOffset(), buffer->length());
     return {allocation, allocation->currentSuballocationOffset()};
   }
 
@@ -334,6 +351,8 @@ public:
   access(Rc<Buffer> const &buffer, uint64_t viewId, int flags) {
     auto allocation = buffer->current();
     trackBuffer<stage>(allocation, flags);
+    if (flags & ResourceAccess::Read)
+      traceBufferRead(allocation->buffer(), allocation->currentSuballocationOffset(), buffer->length());
     auto &view = buffer->view_(viewId, allocation);
     return {view, allocation->currentSuballocationOffset(view.suballocation_texel)};
   }

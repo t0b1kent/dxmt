@@ -1,4 +1,16 @@
+wmt_trace_api_guard = custom_target('wmt-trace-api-guard',
+  output : 'wmt_trace_api_guard.h',
+  command : [
+    find_program('python3'),
+    join_paths(meson.project_source_root(), 'tools/wmt_trace_api_codegen.py'),
+    '--declaration', join_paths(meson.project_source_root(), 'tools/wmt_trace_api_contracts.json'),
+    '--check', '--stamp', '@OUTPUT@'
+  ],
+  build_always_stale : true,
+)
+
 winemetal_unix_src = [
+  wmt_trace_api_guard,
   'winemetal_unix.c',
   'cache.c',
 ]
@@ -20,6 +32,7 @@ winemetal_unix_ld_args = [
   '-framework', 'MetalFX', '-weak_framework', 'Foundation',
   '-weak_framework', 'CoreGraphics', '-weak_framework', 'QuartzCore',
   '-weak_framework', 'ColorSync',  '-weak_framework', 'Cocoa',
+  '-weak_framework', 'ImageIO',
   '-lsqlite3',
 ]
 winemetal_unix_link_depends = []

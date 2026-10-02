@@ -25,12 +25,25 @@ public:
   StagingMapResult tryMap(uint64_t coherent_seq_id, bool read, bool write);
   void unmap();
 
+  // Called only after Map's wait/rename loop selected the returned allocation.
+  // READ maps do not turn GPU-produced bytes into CPU-owned replay inputs.
+  void traceMap(bool write) {
+    if (write) {
+      trace_write_allocation_ = immediate_name_;
+      buffer_pool[immediate_name_]->traceMappedWrite(0, length, WMTTraceOwnerBegin);
+    }
+  }
+
   uint64_t allocate(uint64_t coherent_seq_id);
   void updateImmediateName(uint64_t current_seq_id, uint64_t allocation);
 
   void *
   mappedImmediateMemory() {
     return buffer_pool[immediate_name_]->mappedMemory(0);
+  }
+
+  void updateImmediateContents(uint64_t offset, const void *data, uint64_t size) {
+    buffer_pool[immediate_name_]->updateContents(offset, data, size);
   }
 
   void *
@@ -76,6 +89,7 @@ private:
   std::queue<QueueEntry> fifo;
   dxmt::mutex mutex_;
   bool mapped = false;
+  uint64_t trace_write_allocation_ = ~0ull;
   // prevent read from staging before
   uint64_t cpu_coherent_after_finished_seq_id = 0;
   // prevent write to staging before

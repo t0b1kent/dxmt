@@ -165,6 +165,8 @@ public:
       });
     }
 
+    dynamic->immediateName()->traceMappedWrite(
+        dynamic->immediateSuballocation(), dynamic->buffer->length(), WMTTraceOwnerBegin);
     return dynamic->immediateMappedMemory();
   }
 
@@ -218,6 +220,11 @@ public:
         break;
       }
       case D3D11_MAP_WRITE_NO_OVERWRITE: {
+        // Preserve prior CPU authority while bracketing the actual Map/Unmap.
+        // The Unix ledger rejects unknown bytes and pending GPU writes; GPU
+        // reads alone do not change the shared-memory contents.
+        dynamic->immediateName()->traceMappedWrite(
+            dynamic->immediateSuballocation(), buffer_length, WMTTraceOwnerNoOverwriteBegin);
         pMappedResource->pData = dynamic->immediateMappedMemory();
         pMappedResource->RowPitch = buffer_length;
         pMappedResource->DepthPitch = buffer_length;
@@ -276,12 +283,14 @@ public:
           auto _ = texture->rename(forward_rc(allocation));
         });
 
+        dynamic->immediateName()->traceMappedWrite(0, depth_pitch, WMTTraceOwnerBegin);
         pMappedResource->pData = dynamic->mappedMemory();
         pMappedResource->RowPitch = row_pitch;
         pMappedResource->DepthPitch = depth_pitch;
         break;
       }
       case D3D11_MAP_WRITE_NO_OVERWRITE: {
+        dynamic->immediateName()->traceMappedWrite(0, depth_pitch, WMTTraceOwnerNoOverwriteBegin);
         pMappedResource->pData = dynamic->mappedMemory();
         pMappedResource->RowPitch = row_pitch;
         pMappedResource->DepthPitch = depth_pitch;
@@ -307,7 +316,7 @@ public:
           // when write to a buffer that is gpu-readonly
           auto next_name = staging->allocate(coherent_seq_id);
           // can't guarantee a full overwrite
-          std::memcpy(staging->mappedMemory(next_name), staging->mappedImmediateMemory(), staging->length);
+          staging->allocation(next_name)->updateContents(0, staging->mappedImmediateMemory(), staging->length);
           staging->updateImmediateName(current_seq_id, next_name);
           EmitST([staging, next_name](ArgumentEncodingContext &enc) mutable { 
             auto _ = staging->buffer()->rename(staging->allocation(next_name));
@@ -316,6 +325,7 @@ public:
         }
         if (result == StagingMapResult::Mappable) {
           TRACE("staging map ready");
+          staging->traceMap(MapType & D3D11_MAP_WRITE);
           pMappedResource->pData = staging->mappedImmediateMemory();
           pMappedResource->RowPitch = staging->bytesPerRow;
           pMappedResource->DepthPitch = staging->bytesPerImage;
@@ -360,6 +370,8 @@ public:
     UINT buffer_length = 0;
     UINT bind_flags = 0;
     if (auto dynamic = GetDynamicBuffer(pResource, &buffer_length, &bind_flags)) {
+      dynamic->immediateName()->traceMappedWrite(
+          dynamic->immediateSuballocation(), buffer_length, WMTTraceOwnerEnd);
       if (bind_flags & D3D11_BIND_VERTEX_BUFFER) {
         auto [allocation, sub] = GetDynamicBufferAllocation(dynamic);
         macrunner_vertex_data_log_bytes(
@@ -374,7 +386,11 @@ public:
     if (auto staging = GetStagingResource(pResource, Subresource)) {
       staging->unmap();
     };
+    if (auto linear = GetDynamicLinearTexture(pResource, &row_pitch, &depth_pitch))
+      linear->immediateName()->traceMappedWrite(0, depth_pitch, WMTTraceOwnerEnd);
     if (auto dynamic = GetDynamicTexture(pResource, Subresource, &row_pitch, &depth_pitch)) {
+      dynamic->immediateName()->traceMappedWrite(
+          dynamic->immediateSuballocation(), dynamic->buffer->length(), WMTTraceOwnerEnd);
       BlitObject texture(device, pResource);
       UpdateTexture(TextureUpdateCommand(texture, Subresource, nullptr),
                     dynamic->buffer, row_pitch, depth_pitch);

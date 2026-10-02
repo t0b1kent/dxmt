@@ -8,6 +8,7 @@
 #include "thread.hpp"
 #include "util_flags.hpp"
 #include "util_svector.hpp"
+#include <cstdlib>
 
 namespace dxmt {
 
@@ -100,10 +101,31 @@ public:
     return current_suballocation_;
   }
 
+  /* Map calls run on the producer, before the queued useSuballocation command.
+   * Never derive this offset from current_suballocation_: the encoder may lag. */
+  void
+  traceMappedWrite(uint32_t suballocation, uint64_t length, WMTTraceOwnerAction action) noexcept {
+    static const bool recording = [] {
+      const char *value = std::getenv("MACRUNNER_WMT_RECORD");
+      return value && *value;
+    }();
+    if (recording)
+      MTLBuffer_traceOwnership(obj_, uint64_t(suballocation) * suballocation_size_, length, action);
+  }
+
   void
   updateContents(uint64_t offset, const void *data, uint64_t length, uint32_t suballocation = 0) noexcept {
+    static const bool recording = [] {
+      const char *value = std::getenv("MACRUNNER_WMT_RECORD");
+      return value && *value;
+    }();
+    const uint64_t absolute_offset = suballocation * suballocation_size_ + offset;
     if (likely(mappedMemory_ != nullptr && !flags_.test(BufferAllocationFlag::GpuManaged))) {
+      if (recording)
+        MTLBuffer_traceOwnership(obj_, absolute_offset, length, WMTTraceOwnerBegin);
       memcpy(reinterpret_cast<char *>(mappedMemory_) + suballocation * suballocation_size_ + offset, data, length);
+      if (recording)
+        MTLBuffer_traceOwnership(obj_, absolute_offset, length, WMTTraceOwnerEnd);
       return;
     }
     obj_.updateContents(suballocation * suballocation_size_ + offset, data, length);

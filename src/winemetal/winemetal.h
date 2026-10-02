@@ -1077,6 +1077,17 @@ enum WMTComputeCommandType : uint16_t {
   WMTComputeCommandWaitForFence,
   WMTComputeCommandUpdateFence,
   WMTComputeCommandMemoryBarrier,
+  WMTComputeCommandTraceBufferRead,
+};
+
+/* Recording metadata only: a producer-declared logical resource span. */
+struct wmtcmd_trace_buffer_read {
+  uint16_t type;
+  uint16_t reserved[3];
+  struct WMTMemoryPointer next;
+  obj_handle_t buffer;
+  uint64_t offset;
+  uint64_t length;
 };
 
 struct wmtcmd_compute_nop {
@@ -1221,6 +1232,7 @@ enum WMTRenderCommandType : uint16_t {
   WMTRenderCommandDXMTTessellationMeshDrawIndirect,
   WMTRenderCommandDXMTTessellationMeshDrawIndexedIndirect,
   WMTRenderCommandDispatchThreadsPerTile,
+  WMTRenderCommandTraceBufferRead,
 };
 
 struct wmtcmd_render_nop {
@@ -1975,6 +1987,28 @@ WINEMETAL_API bool MTLSharedEvent_waitUntilSignaledValue(obj_handle_t event, uin
 
 WINEMETAL_API void MTLCommandBuffer_scheduleFrameDump(
     obj_handle_t cmdbuf, obj_handle_t texture, uint64_t frame
+);
+
+/* Trace ABI: only declared 8-byte fields are relocated. Metadata is scalar. */
+enum WMTTraceFieldKind {
+  WMTTraceClearRange = 0,
+  WMTTraceGPUAddress = 1,
+  WMTTraceTextureID = 2,
+  WMTTraceSamplerID = 3,
+};
+WINEMETAL_API void MTLBuffer_traceFields(
+    obj_handle_t buffer, uint64_t offset, uint64_t count, uint64_t stride,
+    enum WMTTraceFieldKind kind
+);
+
+enum WMTTraceOwnerAction {
+  WMTTraceOwnerBegin = 1,
+  WMTTraceOwnerEnd = 2,
+  WMTTraceOwnerGPU = 3,
+  WMTTraceOwnerNoOverwriteBegin = 4,
+};
+WINEMETAL_API void MTLBuffer_traceOwnership(
+    obj_handle_t buffer, uint64_t offset, uint64_t length, enum WMTTraceOwnerAction action
 );
 
 WINEMETAL_API obj_handle_t

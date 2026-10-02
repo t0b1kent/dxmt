@@ -25,10 +25,84 @@
 #define WINEMETAL_API
 #include "../winemetal_thunks.h"
 #include "../airconv_thunks.h"
+#include "wmt_trace_fields.h"
+#include "wmt_trace_ownership.h"
+#include "wmt_trace_registry.h"
+#include "wmt_trace_record.h"
+#include "wmt_trace_snapshot.h"
+#include "wmt_trace_descriptors.h"
+#include "wmt_trace_pass.h"
+#include "wmt_trace_frame.h"
+#include "wmt_trace_device_identity.h"
+
+static char wmt_trace_drawable_recorded_key;
+static uint64_t wmt_trace_frame_index;
+static char wmt_trace_device_recorded_key;
+
+static void wmt_trace_api_device(id<MTLDevice> device) {
+  const char *gate=getenv("MACRUNNER_WMT_RECORD");
+  if(!gate||!*gate||!device)return;
+  @synchronized([NSPropertyListSerialization class]) {
+    if(objc_getAssociatedObject(device,&wmt_trace_device_recorded_key))return;
+    wmt_trace_record_event(@"device",device,@{@"name":device.name?:@"",
+        @"registryID":@(device.registryID),@"unified-memory":@(device.hasUnifiedMemory),
+        @"capabilities":wmt_trace_device_capabilities(device)});
+    objc_setAssociatedObject(device,&wmt_trace_device_recorded_key,@YES,OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+}
+
+static void wmt_trace_drawable_texture(id<MTLTexture> texture) {
+  const char *gate = getenv("MACRUNNER_WMT_RECORD");
+  if (!gate || !*gate || !texture) return;
+  @synchronized([NSPropertyListSerialization class]) {
+    if (objc_getAssociatedObject(texture, &wmt_trace_drawable_recorded_key)) return;
+    wmt_trace_register_resource(texture, 2, 0, 0, texture.gpuResourceID._impl);
+    NSDictionary *fields = @{@"textureType": @(texture.textureType), @"pixelFormat": @(texture.pixelFormat),
+        @"width": @(texture.width), @"height": @(texture.height), @"depth": @(texture.depth),
+        @"arrayLength": @(texture.arrayLength), @"mipmapLevelCount": @(texture.mipmapLevelCount),
+        @"sampleCount": @(texture.sampleCount), @"usage": @(texture.usage),
+        @"resourceOptions": @(texture.resourceOptions)};
+    wmt_trace_record_event(@"texture", texture, fields);
+    objc_setAssociatedObject(texture, &wmt_trace_drawable_recorded_key, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+  }
+}
+
+static void wmt_trace_present(id<MTLCommandBuffer> command, id<MTLTexture> texture) {
+  const char *gate = getenv("MACRUNNER_WMT_RECORD");
+  if (!gate || !*gate) return;
+  @synchronized([NSPropertyListSerialization class]) {
+    wmt_trace_drawable_texture(texture);
+    uint64_t frame = wmt_trace_frame_index++;
+    NSString *directory = [[NSString stringWithUTF8String:gate] stringByAppendingPathComponent:@"truth-frames"];
+    BOOL success = wmt_trace_frame_schedule(command, texture, directory, frame);
+    wmt_trace_record_event(@"frame-readback", command, @{@"texture": @(wmt_trace_object_id(texture)),
+        @"frame": @(frame), @"status": success ? @"PRESENT" : @"FAILED",
+        @"pixelFormat": @(texture.pixelFormat), @"framebufferOnly": @(texture.framebufferOnly),
+        @"sampleCount": @(texture.sampleCount), @"width": @(texture.width), @"height": @(texture.height),
+        @"PNG-bits-per-component": @((texture.pixelFormat == MTLPixelFormatRGB10A2Unorm ||
+            texture.pixelFormat == MTLPixelFormatBGR10A2Unorm) ? 16 : 8)});
+  }
+}
+
+static uint64_t wmt_trace_pass_identify(id object, void *context) {
+  return wmt_trace_object_id(object);
+}
+
+static void wmt_trace_track_resource(id resource, uint32_t kind,
+    uint64_t address, uint64_t length, uint64_t resource_id) {
+  const char *directory = getenv("MACRUNNER_WMT_RECORD");
+  if (directory && *directory &&
+      !wmt_trace_register_resource(resource, kind, address, length, resource_id))
+    fprintf(stderr, "WMT_TRACE FAILED resource registration kind=%u\n", kind);
+}
 
 typedef int NTSTATUS;
 #define STATUS_SUCCESS 0
 #define STATUS_UNSUCCESSFUL 0xC0000001
+
+/* Retained in the private image for later selected/loaded-build verification. */
+__attribute__((used, visibility("default")))
+const char macrunner_wmt_trace_build_marker[] = "MACRUNNER_WMT_TRACE_ABI135_OBJECTS11_COMMANDS65_OWNER5_CB5_FRAME2_FILE1_NOVER2_FENCE1_API2_LIFE1_PNG10_20261001";
 
 /*
  * Metal render state persists for the lifetime of an MTLRenderCommandEncoder,
@@ -2258,6 +2332,7 @@ static NTSTATUS
 _MTLDevice_newCommandQueue(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle newCommandQueueWithMaxCommandBufferCount:params->arg];
+  wmt_trace_record_event(@"queue", (id)params->ret, @{@"maxCommandBuffers": @(params->arg)});
   return STATUS_SUCCESS;
 }
 
@@ -2272,12 +2347,60 @@ static NTSTATUS
 _MTLCommandQueue_commandBuffer(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBuffer];
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_cb_associate(nil, (id)params->ret);
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_record_event(@"command-buffer", (id)params->ret,
+        @{@"queue": @(wmt_trace_object_id((id)params->handle))});
   return STATUS_SUCCESS;
 }
 
 static NTSTATUS
 _MTLCommandBuffer_commit(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
+  const char *directory = getenv("MACRUNNER_WMT_RECORD");
+  if (directory && *directory) {
+    NSString *failure = nil;
+    NSDictionary *cb_state = wmt_trace_cb_copy((id)params->handle);
+    if (!cb_state) failure = @"CB association absent";
+    else if ([cb_state[@"failure"] length]) failure = cb_state[@"failure"];
+    NSArray *read_ids = [[cb_state[@"reads"] allKeys] sortedArrayUsingSelector:@selector(compare:)];
+    /* One bounded packet per allocation. Initial upload batches can legitimately
+     * reference many 32MiB staging pools; that is not an invalid resource range.
+     * Native restore_inputs already applies each packet before the common commit. */
+    if (failure) wmt_trace_record_event(@"commit-inputs", (id)params->handle,
+        @{@"status": @"FAILED", @"reason": failure});
+    else if (!read_ids.count) {
+      NSDictionary *inputs = wmt_trace_copy_ranged_owned_inputs(UINT64_C(64)*1024*1024,
+          [NSSet set], cb_state[@"reads"], &failure);
+      wmt_trace_record_event(@"commit-inputs", (id)params->handle, inputs ?:
+          @{@"status": @"FAILED", @"reason": failure ?: @"unknown snapshot error"});
+      [inputs release];
+    } else for (NSNumber *read_id in read_ids) {
+      @autoreleasepool {
+        NSDictionary *inputs = wmt_trace_copy_ranged_owned_inputs(UINT64_C(64)*1024*1024,
+            [NSSet setWithObject:read_id], cb_state[@"reads"], &failure);
+        wmt_trace_record_event(@"commit-inputs", (id)params->handle, inputs ?:
+            @{@"status": @"FAILED", @"reason": failure ?: @"unknown snapshot error", @"buffer": read_id});
+        [inputs release];
+        if (failure) break;
+      }
+    }
+    uint64_t ticket = wmt_trace_object_id((id)params->handle);
+    BOOL armed = wmt_trace_cb_arm_writes((id<MTLCommandBuffer>)params->handle,
+        cb_state[@"writes"], ticket, ^(id<MTLCommandBuffer> completed, NSDictionary *completion) {
+          wmt_trace_record_event(@"command-buffer-completed", completed, completion);
+        });
+    if (!armed) failure = @"queued GPU invalidation rejected";
+    wmt_trace_record_event(@"commit-resources", (id)params->handle,
+        @{@"status": failure ? @"FAILED" : @"INCOMPLETE",
+          @"reason": failure ?: @"texture aliases and implicit shader access NOT_ENABLED",
+          @"resources": cb_state[@"resources"] ?: @[],
+          @"gpu-write-invalidation": @"explicit-buffer-whole-allocation",
+          @"queued-buffer-count": armed ? @([cb_state[@"writes"] count]) : @0});
+    [cb_state release];
+  }
+  wmt_trace_record_event(@"command-buffer-commit", (id)params->handle, @{});
   [(id<MTLCommandBuffer>)params->handle commit];
   return STATUS_SUCCESS;
 }
@@ -2285,6 +2408,7 @@ _MTLCommandBuffer_commit(void *obj) {
 static NTSTATUS
 _MTLCommandBuffer_waitUntilCompleted(void *obj) {
   struct unixcall_generic_obj_noret *params = obj;
+  wmt_trace_record_event(@"command-buffer-wait", (id)params->handle, @{});
   [(id<MTLCommandBuffer>)params->handle waitUntilCompleted];
   return STATUS_SUCCESS;
 }
@@ -2323,6 +2447,7 @@ _MTLDevice_newBuffer(void *obj) {
   id<MTLDevice> device = (id<MTLDevice>)params->device;
   struct WMTBufferInfo *info = params->info.ptr;
   id<MTLBuffer> buffer;
+  BOOL external_memory = info->memory.ptr != NULL;
   if (info->memory.ptr) {
     buffer = [device newBufferWithBytesNoCopy:info->memory.ptr
                                        length:info->length
@@ -2334,6 +2459,20 @@ _MTLDevice_newBuffer(void *obj) {
   }
   params->ret = (obj_handle_t)buffer;
   info->gpu_address = [buffer gpuAddress];
+  wmt_trace_track_resource(buffer, 1, info->gpu_address, info->length, 0);
+  if (getenv("MACRUNNER_WMT_RECORD")) {
+    /* The newly allocated bytes have not escaped to PE or any command buffer.
+     * Preserve their actual initial state as CPU authority, including linear
+     * texture storage with no subsequent CPU producer. No-copy external memory
+     * has no such exclusivity and is never promoted here. Commit copies remain
+     * bounded by selected read ranges and the existing snapshot budget. */
+    BOOL initial_owned = !external_memory && buffer && [buffer storageMode] < MTLStorageModePrivate &&
+        wmt_trace_owner_change(buffer, 0, info->length, WMT_OWNER_BEGIN) &&
+        wmt_trace_owner_change(buffer, 0, info->length, WMT_OWNER_END);
+    wmt_trace_record_event(@"buffer", buffer,
+        @{@"length": @(info->length), @"options": @(info->options),
+          @"initial-CPU-authority": initial_owned ? @"exclusive-native-allocation-before-PE-return" : @"NOT_ENABLED"});
+  }
   return STATUS_SUCCESS;
 }
 
@@ -2361,7 +2500,10 @@ _MTLDevice_newSamplerState(void *obj) {
 
   id<MTLSamplerState> sampler = [device newSamplerStateWithDescriptor:sampler_desc];
   info->gpu_resource_id = info->support_argument_buffers ? [sampler gpuResourceID]._impl : 0;
+  wmt_trace_track_resource(sampler, 3, 0, 0, info->gpu_resource_id);
   params->ret = (obj_handle_t)sampler;
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_record_event(@"sampler", sampler, wmt_trace_sampler_fields(sampler_desc));
   [sampler_desc release];
   return STATUS_SUCCESS;
 }
@@ -2395,6 +2537,8 @@ _MTLDevice_newDepthStencilState(void *obj) {
   }
 
   params->ret = (obj_handle_t)[device newDepthStencilStateWithDescriptor:desc];
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_record_event(@"depth-stencil", (id)params->ret, wmt_trace_depth_fields(desc));
   [desc release];
   return STATUS_SUCCESS;
 }
@@ -2443,6 +2587,9 @@ _MTLDevice_newTexture(void *obj) {
   id<MTLTexture> ret = [device newTextureWithDescriptor:desc];
   params->ret = (obj_handle_t)ret;
   info->gpu_resource_id = [ret gpuResourceID]._impl;
+  wmt_trace_track_resource(ret, 2, 0, 0, info->gpu_resource_id);
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_record_event(@"texture", ret, wmt_trace_texture_fields(desc));
   macrunner_shader_texture_register(info->gpu_resource_id, ret);
   info->mach_port = 0;
 
@@ -2459,8 +2606,15 @@ _MTLBuffer_newTexture(void *obj) {
   fill_texture_descriptor(desc, info);
 
   id<MTLTexture> ret = [buffer newTextureWithDescriptor:desc offset:params->offset bytesPerRow:params->bytes_per_row];
+  if (getenv("MACRUNNER_WMT_RECORD")) wmt_trace_cb_alias(ret, buffer, YES);
   params->ret = (obj_handle_t)ret;
   info->gpu_resource_id = [ret gpuResourceID]._impl;
+  wmt_trace_track_resource(ret, 2, 0, 0, info->gpu_resource_id);
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_record_event(@"buffer-texture", ret,
+        @{@"descriptor": wmt_trace_texture_fields(desc),
+          @"buffer": @(wmt_trace_object_id(buffer)), @"offset": @(params->offset),
+          @"bytesPerRow": @(params->bytes_per_row)});
   macrunner_shader_texture_register(info->gpu_resource_id, ret);
   info->mach_port = 0;
 
@@ -2510,6 +2664,18 @@ _MTLTexture_newTextureView(void *obj) {
                             swizzle:to_metal_swizzle(params->swizzle, params->format)];
   params->ret = (obj_handle_t)ret;
   params->gpu_resource_id = [ret gpuResourceID]._impl;
+  if (getenv("MACRUNNER_WMT_RECORD")) wmt_trace_cb_alias(ret, texture, NO);
+  wmt_trace_track_resource(ret, 2, 0, 0, params->gpu_resource_id);
+  if (getenv("MACRUNNER_WMT_RECORD")) {
+    MTLTextureSwizzleChannels swizzle = to_metal_swizzle(params->swizzle, params->format);
+    wmt_trace_record_event(@"texture-view", ret,
+        @{@"texture": @(wmt_trace_object_id(texture)),
+          @"pixelFormat": @(to_metal_pixel_format(params->format)),
+          @"textureType": @(params->texture_type),
+          @"levelStart": @(params->level_start), @"levelCount": @(params->level_count),
+          @"sliceStart": @(params->slice_start), @"sliceCount": @(params->slice_count),
+          @"swizzle": @[@(swizzle.red), @(swizzle.green), @(swizzle.blue), @(swizzle.alpha)]});
+  }
   macrunner_shader_texture_register(params->gpu_resource_id, ret);
   return STATUS_SUCCESS;
 }
@@ -2527,6 +2693,18 @@ _MTLDevice_newLibrary(void *obj) {
   id<MTLDevice> device = (id<MTLDevice>)params->device;
   NSError *err = NULL;
   params->ret_library = (obj_handle_t)[device newLibraryWithData:(dispatch_data_t)params->data error:&err];
+  if (getenv("MACRUNNER_WMT_RECORD")) {
+    dispatch_data_t data = (dispatch_data_t)params->data;
+    __block NSMutableData *bytes = [NSMutableData data];
+    BOOL valid = dispatch_data_get_size(data) <= UINT64_C(64) * 1024 * 1024;
+    if (valid) valid = dispatch_data_apply(data, ^bool(dispatch_data_t region, size_t offset,
+          const void *buffer, size_t size) {
+      if (offset != bytes.length || size > UINT64_C(64) * 1024 * 1024 - bytes.length) return false;
+      [bytes appendBytes:buffer length:size]; return true;
+    });
+    wmt_trace_record_event(@"library", (id)params->ret_library,
+        valid ? @{@"metallib": bytes} : nil);
+  }
   params->ret_error = (obj_handle_t)err;
   return STATUS_SUCCESS;
 }
@@ -2537,6 +2715,9 @@ _MTLLibrary_newFunction(void *obj) {
   id<MTLLibrary> library = (id<MTLLibrary>)params->handle;
   NSString *name = [[NSString alloc] initWithCString:(char *)params->arg encoding:NSUTF8StringEncoding];
   params->ret = (obj_handle_t)[library newFunctionWithName:name];
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_record_event(@"function", (id)params->ret,
+        @{@"library": @(wmt_trace_object_id(library)), @"name": name});
   [name release];
   return STATUS_SUCCESS;
 }
@@ -2588,6 +2769,11 @@ static NTSTATUS
 _MTLCommandBuffer_blitCommandEncoder(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle blitCommandEncoder];
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_cb_associate((id)params->ret, (id)params->handle);
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_record_event(@"blit-encoder", (id)params->ret,
+        @{@"commandBuffer": @(wmt_trace_object_id((id)params->handle))});
   return STATUS_SUCCESS;
 }
 
@@ -2596,6 +2782,12 @@ _MTLCommandBuffer_computeCommandEncoder(void *obj) {
   struct unixcall_generic_obj_uint64_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle
       computeCommandEncoderWithDispatchType:params->arg ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial];
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_cb_associate((id)params->ret, (id)params->handle);
+  if (getenv("MACRUNNER_WMT_RECORD"))
+    wmt_trace_record_event(@"compute-encoder", (id)params->ret,
+        @{@"commandBuffer": @(wmt_trace_object_id((id)params->handle)),
+          @"dispatchType": @(params->arg ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial)});
   return STATUS_SUCCESS;
 }
 
@@ -2655,6 +2847,22 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
   macrunner_present_attachment_trace_record((id<MTLCommandBuffer>)params->handle, info);
   id<MTLRenderCommandEncoder> encoder =
       [(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+  const char *pass_record_gate = getenv("MACRUNNER_WMT_RECORD");
+  if (pass_record_gate && *pass_record_gate && encoder) {
+    wmt_trace_cb_associate(encoder, (id)params->handle);
+    for (unsigned i = 0; i < 8; ++i) {
+      wmt_trace_cb_use(encoder, descriptor.colorAttachments[i].texture, YES);
+      wmt_trace_cb_use(encoder, descriptor.colorAttachments[i].resolveTexture, YES);
+    }
+    wmt_trace_cb_use(encoder, descriptor.depthAttachment.texture, YES);
+    wmt_trace_cb_use(encoder, descriptor.depthAttachment.resolveTexture, YES);
+    wmt_trace_cb_use(encoder, descriptor.stencilAttachment.texture, YES);
+    wmt_trace_cb_use(encoder, descriptor.stencilAttachment.resolveTexture, YES);
+    wmt_trace_cb_use(encoder, descriptor.visibilityResultBuffer, YES);
+    NSDictionary *pass_fields = wmt_trace_pass_fields(descriptor, wmt_trace_pass_identify, NULL);
+    wmt_trace_record_event(@"render-encoder", encoder, pass_fields ?
+        @{@"commandBuffer": @(wmt_trace_object_id((id)params->handle)), @"pass": pass_fields} : nil);
+  }
   MacRunnerPresentAttachmentTrace *attachment_trace =
       macrunner_present_attachment_trace_for_command_buffer(
           (id<MTLCommandBuffer>)params->handle, NO);
@@ -2692,6 +2900,7 @@ _MTLCommandEncoder_endEncoding(void *obj) {
       ? objc_getAssociatedObject(encoder, &macrunner_render_probe_state_key) : nil;
   winemetal_render_encoder_set_has_pso((id<MTLRenderCommandEncoder>)params->handle, NO);
   [(id<MTLCommandEncoder>)params->handle endEncoding];
+  wmt_trace_record_event(@"encoder-end", (id)params->handle, @{});
   macrunner_causal_finish_encoder(state);
   if (state && state->causal_target_seen && state->causal_phase < 4 &&
       state->causal_signature_match && macrunner_causal_target_readback_enabled()) {
@@ -2943,6 +3152,16 @@ _MTLDevice_newRenderPipelineState(void *obj) {
                                                                                            reflection:nil
                                                                                                 error:&err];
   params->ret_error = (obj_handle_t)err;
+  const char *record_gate = getenv("MACRUNNER_WMT_RECORD");
+  if (record_gate && *record_gate && params->ret_pso) {
+    NSDictionary *trace_fields = nil;
+    if (!info->logic_operation_enabled && !causal_target && !magenta_override)
+      trace_fields = wmt_trace_pipeline_fields(descriptor,
+          wmt_trace_object_id(descriptor.vertexFunction),
+          wmt_trace_object_id(descriptor.fragmentFunction));
+    /* Unsupported private/alternate state fails recording, never changes PSO. */
+    wmt_trace_record_event(@"render-pipeline", (id)params->ret_pso, trace_fields);
+  }
   if (causal_target && params->ret_pso) {
     id<MTLFunction> c0_fragment =
         (id<MTLFunction>)info->causal_fragment_capture_function;
@@ -3144,6 +3363,7 @@ _MTLDevice_newMeshRenderPipelineState(void *obj) {
 static NTSTATUS
 _MTLBlitCommandEncoder_encodeCommands(void *obj) {
   struct unixcall_generic_obj_cmd_noret *params = obj;
+  wmt_trace_record_commands(1, (id)params->encoder, params->cmd_head.ptr);
   const struct wmtcmd_base *next = params->cmd_head.ptr;
   id<MTLBlitCommandEncoder> encoder = (id<MTLBlitCommandEncoder>)params->encoder;
   while (next) {
@@ -3252,6 +3472,7 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
 static NTSTATUS
 _MTLComputeCommandEncoder_encodeCommands(void *obj) {
   struct unixcall_generic_obj_cmd_noret *params = obj;
+  wmt_trace_record_commands(2, (id)params->encoder, params->cmd_head.ptr);
   const struct wmtcmd_base *next = params->cmd_head.ptr;
   id<MTLComputeCommandEncoder> encoder = (id<MTLComputeCommandEncoder>)params->encoder;
   MTLSize threadgroup_size = {0, 0, 0};
@@ -3297,6 +3518,7 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
       [encoder setBufferOffset:body->offset atIndex:body->index];
       break;
     }
+    case WMTComputeCommandTraceBufferRead: break; /* recorder metadata only */
     case WMTComputeCommandUseResource: {
       struct wmtcmd_compute_useresource *body = (struct wmtcmd_compute_useresource *)next;
       [encoder useResource:(id<MTLResource>)body->resource usage:(MTLResourceUsage)body->usage];
@@ -3337,6 +3559,7 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
 static NTSTATUS
 _MTLRenderCommandEncoder_encodeCommands(void *obj) {
   struct unixcall_generic_obj_cmd_noret *params = obj;
+  wmt_trace_record_commands(3, (id)params->encoder, params->cmd_head.ptr);
   const struct wmtcmd_base *next = params->cmd_head.ptr;
   id<MTLRenderCommandEncoder> encoder = (id<MTLRenderCommandEncoder>)params->encoder;
   BOOL has_pso = winemetal_render_encoder_has_pso(encoder);
@@ -3400,6 +3623,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
         probe_state->fragment_buffer_offsets[body->index] = body->offset;
       break;
     }
+    case WMTRenderCommandTraceBufferRead: break; /* recorder metadata only */
     case WMTRenderCommandSetMeshBuffer: {
       struct wmtcmd_render_setbuffer *body = (struct wmtcmd_render_setbuffer *)next;
       [encoder setMeshBuffer:(id<MTLBuffer>)body->buffer offset:body->offset atIndex:body->index];
@@ -3952,6 +4176,7 @@ _MTLCommandBuffer_presentDrawable(void *obj) {
     objc_setAssociatedObject(command_buffer, &macrunner_causal_present_surface_phase_key,
                              nil, OBJC_ASSOCIATION_ASSIGN);
   }
+  wmt_trace_present(command_buffer, drawable_texture);
   [command_buffer presentDrawable:(id<MTLDrawable>)params->arg];
   return STATUS_SUCCESS;
 }
@@ -3961,6 +4186,7 @@ _MTLCommandBuffer_presentDrawableAfterMinimumDuration(void *obj) {
   struct unixcall_generic_obj_obj_double_noret *params = obj;
   id<MTLCommandBuffer> command_buffer = (id<MTLCommandBuffer>)params->handle;
   macrunner_present_surface_schedule(command_buffer, (id<CAMetalDrawable>)params->arg0);
+  wmt_trace_present(command_buffer, [(id<CAMetalDrawable>)params->arg0 texture]);
   [command_buffer presentDrawable:(id<MTLDrawable>)params->arg0
                                     afterMinimumDuration:params->arg1];
   return STATUS_SUCCESS;
@@ -4215,6 +4441,7 @@ static NTSTATUS
 _MetalDrawable_texture(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<CAMetalDrawable>)params->handle texture];
+  wmt_trace_drawable_texture((id<MTLTexture>)params->ret);
   return STATUS_SUCCESS;
 }
 
@@ -5320,6 +5547,20 @@ _MTLLibrary_newFunctionWithConstants(void *obj) {
     [values setConstantValue:constants[i].data.ptr type:(MTLDataType)constants[i].type atIndex:constants[i].index];
 
   params->ret = (obj_handle_t)[library newFunctionWithName:name constantValues:values error:&err];
+  if (getenv("MACRUNNER_WMT_RECORD")) {
+    NSMutableArray *record_constants = [NSMutableArray array];
+    BOOL valid = params->num_constants <= 4096;
+    for (uint64_t i = 0; valid && i < params->num_constants; ++i) {
+      NSUInteger size = wmt_trace_constant_scalar_size((MTLDataType)constants[i].type);
+      valid = size && constants[i].data.ptr;
+      if (valid) [record_constants addObject:@{@"type": @(constants[i].type),
+          @"index": @(constants[i].index),
+          @"data": [NSData dataWithBytes:constants[i].data.ptr length:size]}];
+    }
+    wmt_trace_record_event(@"function-specialized", (id)params->ret,
+        valid ? @{@"library": @(wmt_trace_object_id(library)), @"name": name,
+          @"constants": record_constants} : nil);
+  }
   params->ret_error = (obj_handle_t)err;
   [name release];
   [values release];
@@ -5506,6 +5747,8 @@ static NTSTATUS
 _MTLDevice_newFence(void *obj) {
   struct unixcall_generic_obj_obj_ret *params = obj;
   params->ret = (obj_handle_t)[(id<MTLDevice>)params->handle newFence];
+  wmt_trace_record_event(@"fence", (id)params->ret,
+      params->ret ? @{} : @{@"status": @"FAILED", @"reason": @"Metal fence constructor returned nil"});
   return STATUS_SUCCESS;
 }
 
@@ -5519,9 +5762,23 @@ _MTLDevice_newEvent(void *obj) {
 static NTSTATUS
 _MTLBuffer_updateContents(void *obj) {
   struct unixcall_mtlbuffer_updatecontents *params = obj;
+  const char *record_gate = getenv("MACRUNNER_WMT_RECORD");
+  BOOL recording = record_gate && *record_gate;
+  BOOL borrowed = recording && wmt_trace_owner_borrow_write((id)params->buffer, params->offset, params->length);
+  BOOL begin_valid = !recording || borrowed || wmt_trace_owner_change((id)params->buffer,
+      params->offset, params->length, WMT_OWNER_BEGIN);
+  if (recording && !borrowed)
+    wmt_trace_record_event(@"buffer-ownership", (id)params->buffer,
+        wmt_audit_owner_fields((id)params->buffer, params->offset, params->length, WMT_OWNER_BEGIN, 107, begin_valid));
   memcpy((void *)((char *)[(id<MTLBuffer>)params->buffer contents] + params->offset), params->data.ptr, params->length);
   if ([(id<MTLBuffer>)params->buffer storageMode] == MTLStorageModeManaged)
     [(id<MTLBuffer>)params->buffer didModifyRange:NSMakeRange(params->offset, params->length)];
+  if (recording && !borrowed) {
+    BOOL end_valid = begin_valid && wmt_trace_owner_change((id)params->buffer,
+        params->offset, params->length, WMT_OWNER_END);
+    wmt_trace_record_event(@"buffer-ownership", (id)params->buffer,
+        wmt_audit_owner_fields((id)params->buffer, params->offset, params->length, WMT_OWNER_END, 107, end_valid));
+  }
   return STATUS_SUCCESS;
 }
 
@@ -5596,6 +5853,7 @@ _MTLDevice_newSharedTexture(void *obj) {
     extract_texture_descriptor(ret, info);
     params->ret = (obj_handle_t)ret;
     info->gpu_resource_id = [ret gpuResourceID]._impl;
+    wmt_trace_track_resource(ret, 2, 0, 0, info->gpu_resource_id);
     [handle release];
   } else {
     MTLTextureDescriptor *desc = [[MTLTextureDescriptor alloc] init];
@@ -5604,6 +5862,7 @@ _MTLDevice_newSharedTexture(void *obj) {
     MTLSharedTextureHandle *handle = [ret newSharedTextureHandle];
     params->ret = (obj_handle_t)ret;
     info->gpu_resource_id = [ret gpuResourceID]._impl;
+    wmt_trace_track_resource(ret, 2, 0, 0, info->gpu_resource_id);
     info->mach_port = [handle createMachPort]; // implicitly add ref to underlying IOSurface
     [handle release];
     [desc release];
@@ -6001,276 +6260,41 @@ NTSTATUS _CacheWriter_alloc_init(void *obj);
 NTSTATUS _CacheWriter_set(void *obj);
 NTSTATUS _WMTSetMetalShaderCachePath(void *obj);
 
-const void *__wine_unix_call_funcs[] = {
-    &_NSObject_retain,
-    &_NSObject_release,
-    &_NSArray_object,
-    &_NSArray_count,
-    &_MTLCopyAllDevices,
-    &_MTLDevice_recommendedMaxWorkingSetSize,
-    &_MTLDevice_currentAllocatedSize,
-    &_MTLDevice_name,
-    &_NSString_getCString,
-    &_MTLDevice_newCommandQueue,
-    &_NSAutoreleasePool_alloc_init,
-    &_MTLCommandQueue_commandBuffer,
-    &_MTLCommandBuffer_commit,
-    &_MTLCommandBuffer_waitUntilCompleted,
-    &_MTLCommandBuffer_status,
-    &_MTLDevice_newSharedEvent,
-    &_MTLSharedEvent_signaledValue,
-    &_MTLCommandBuffer_encodeSignalEvent,
-    &_MTLDevice_newBuffer,
-    &_MTLDevice_newSamplerState,
-    &_MTLDevice_newDepthStencilState,
-    &_MTLDevice_newTexture,
-    &_MTLBuffer_newTexture,
-    &_MTLTexture_newTextureView,
-    &_MTLDevice_minimumLinearTextureAlignmentForPixelFormat,
-    &_MTLDevice_newLibrary,
-    &_MTLLibrary_newFunction,
-    &_NSString_lengthOfBytesUsingEncoding,
-    &_NSObject_description,
-    &_MTLDevice_newComputePipelineState,
-    &_MTLCommandBuffer_blitCommandEncoder,
-    &_MTLCommandBuffer_computeCommandEncoder,
-    &_MTLCommandBuffer_renderCommandEncoder,
-    &_MTLCommandEncoder_endEncoding,
-    &_MTLDevice_newRenderPipelineState,
-    &_MTLDevice_newMeshRenderPipelineState,
-    &_MTLBlitCommandEncoder_encodeCommands,
-    &_MTLComputeCommandEncoder_encodeCommands,
-    &_MTLRenderCommandEncoder_encodeCommands,
-    &_MTLTexture_pixelFormat,
-    &_MTLTexture_width,
-    &_MTLTexture_height,
-    &_MTLTexture_depth,
-    &_MTLTexture_arrayLength,
-    &_MTLTexture_mipmapLevelCount,
-    &_MTLTexture_replaceRegion,
-    &_MTLBuffer_didModifyRange,
-    &_MTLCommandBuffer_presentDrawable,
-    &_MTLCommandBuffer_presentDrawableAfterMinimumDuration,
-    &_MTLDevice_supportsFamily,
-    &_MTLDevice_supportsBCTextureCompression,
-    &_MTLDevice_supportsTextureSampleCount,
-    &_MTLDevice_hasUnifiedMemory,
-    &_MTLCaptureManager_sharedCaptureManager,
-    &_MTLCaptureManager_startCapture,
-    &_MTLCaptureManager_stopCapture,
-    &_MTLDevice_newTemporalScaler,
-    &_MTLDevice_newSpatialScaler,
-    &_MTLCommandBuffer_encodeTemporalScale,
-    &_MTLCommandBuffer_encodeSpatialScale,
-    &_NSString_string,
-    &_NSString_alloc_init,
-    &_DeveloperHUDProperties_instance,
-    &_DeveloperHUDProperties_addLabel,
-    &_DeveloperHUDProperties_updateLabel,
-    &_DeveloperHUDProperties_remove,
-    &_MetalDrawable_texture,
-    &_MetalLayer_nextDrawable,
-    &_MTLDevice_supportsFXSpatialScaler,
-    &_MTLDevice_supportsFXTemporalScaler,
-    &_MetalLayer_setProps,
-    &_MetalLayer_getProps,
-    &_CreateMetalViewFromHWND,
-    &_ReleaseMetalView,
-    &thunk_SM50Initialize,
-    &thunk_SM50Destroy,
-    &thunk_SM50Compile,
-    &thunk_SM50GetCompiledBitcode,
-    &thunk_SM50DestroyBitcode,
-    &thunk_SM50GetErrorMessage,
-    &thunk_SM50FreeError,
-    &thunk_SM50CompileGeometryPipelineVertex,
-    &thunk_SM50CompileGeometryPipelineGeometry,
-    NULL,
-    &thunk_SM50CompileTessellationPipelineHull,
-    &thunk_SM50CompileTessellationPipelineDomain,
-    &_MTLCommandEncoder_setLabel,
-    &_MTLDevice_setShouldMaximizeConcurrentCompilation,
-    &thunk_SM50GetArgumentsInfo,
-    &_MTLCommandBuffer_error,
-    &_MTLCommandBuffer_logs,
-    &_MTLLogContainer_enumerate,
-    &_CGColorSpace_checkColorSpaceSupported,
-    &_MetalLayer_setColorSpace,
-    &_WMTGetPrimaryDisplayId,
-    &_WMTGetSecondaryDisplayId,
-    &_WMTGetDisplayDescription,
-    &_MetalLayer_getEDRValue,
-    &_MTLLibrary_newFunctionWithConstants,
-    &_WMTQueryDisplaySetting,
-    &_WMTUpdateDisplaySetting,
-    &_WMTQueryDisplaySettingForLayer,
-    &_MTLCommandBuffer_encodeWaitForEvent,
-    &_MTLSharedEvent_signalValue,
-    &_MTLSharedEvent_setWin32EventAtValue,
-    &_MTLDevice_newFence,
-    &_MTLDevice_newEvent,
-    &_MTLBuffer_updateContents,
-    &_SharedEventListener_create,
-    &_SharedEventListener_start,
-    &_SharedEventListener_destroy,
-    &_WMTGetOSVersion,
-    &_MTLDevice_newBinaryArchive,
-    &_MTLBinaryArchive_serialize,
-    &_DispatchData_alloc_init,
-    &_CacheReader_alloc_init,
-    &_CacheReader_get,
-    &_CacheWriter_alloc_init,
-    &_CacheWriter_set,
-    &_WMTSetMetalShaderCachePath,
-    &_MTLDevice_newSharedTexture,
-    &_WMTBootstrapRegister,
-    &_WMTBootstrapLookUp,
-    &_MTLSharedEvent_createMachPort,
-    &_MTLDevice_newSharedEventWithMachPort,
-    &_MTLDevice_registryID,
-    &_MTLSharedEvent_waitUntilSignaledValue,
-    &_MTLCounterSampleBuffer_newTimestampBuffer,
-    &_MTLCounterSampleBuffer_resolveCounterRange,
-    &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers,
-    &_MTLCommandBuffer_property,
-    &_MTLDevice_newTileRenderPipelineState,
-    &_MTLCommandBuffer_scheduleFrameDump,
-};
+static NTSTATUS
+_MTLBuffer_traceFields(void *obj) {
+  const char *directory = getenv("MACRUNNER_WMT_RECORD");
+  if (!directory || !directory[0])
+    return STATUS_SUCCESS;
+  struct unixcall_mtlbuffer_tracefields *params = obj;
+  if (params->reserved || !wmt_trace_declare_fields((id)params->buffer,
+          params->offset, params->count, params->stride, params->kind)) {
+    fprintf(stderr, "MACRUNNER_WMT_RECORD FAILED relocation declaration\n");
+    return STATUS_UNSUCCESSFUL;
+  }
+  return STATUS_SUCCESS;
+}
 
-#ifndef DXMT_NATIVE
-const void *__wine_unix_call_wow64_funcs[] = {
-    &_NSObject_retain,
-    &_NSObject_release,
-    &_NSArray_object,
-    &_NSArray_count,
-    &_MTLCopyAllDevices,
-    &_MTLDevice_recommendedMaxWorkingSetSize,
-    &_MTLDevice_currentAllocatedSize,
-    &_MTLDevice_name,
-    &_NSString_getCString,
-    &_MTLDevice_newCommandQueue,
-    &_NSAutoreleasePool_alloc_init,
-    &_MTLCommandQueue_commandBuffer,
-    &_MTLCommandBuffer_commit,
-    &_MTLCommandBuffer_waitUntilCompleted,
-    &_MTLCommandBuffer_status,
-    &_MTLDevice_newSharedEvent,
-    &_MTLSharedEvent_signaledValue,
-    &_MTLCommandBuffer_encodeSignalEvent,
-    &_MTLDevice_newBuffer,
-    &_MTLDevice_newSamplerState,
-    &_MTLDevice_newDepthStencilState,
-    &_MTLDevice_newTexture,
-    &_MTLBuffer_newTexture,
-    &_MTLTexture_newTextureView,
-    &_MTLDevice_minimumLinearTextureAlignmentForPixelFormat,
-    &_MTLDevice_newLibrary,
-    &_MTLLibrary_newFunction,
-    &_NSString_lengthOfBytesUsingEncoding,
-    &_NSObject_description,
-    &_MTLDevice_newComputePipelineState,
-    &_MTLCommandBuffer_blitCommandEncoder,
-    &_MTLCommandBuffer_computeCommandEncoder,
-    &_MTLCommandBuffer_renderCommandEncoder,
-    &_MTLCommandEncoder_endEncoding,
-    &_MTLDevice_newRenderPipelineState,
-    &_MTLDevice_newMeshRenderPipelineState,
-    &_MTLBlitCommandEncoder_encodeCommands,
-    &_MTLComputeCommandEncoder_encodeCommands,
-    &_MTLRenderCommandEncoder_encodeCommands,
-    &_MTLTexture_pixelFormat,
-    &_MTLTexture_width,
-    &_MTLTexture_height,
-    &_MTLTexture_depth,
-    &_MTLTexture_arrayLength,
-    &_MTLTexture_mipmapLevelCount,
-    &_MTLTexture_replaceRegion,
-    &_MTLBuffer_didModifyRange,
-    &_MTLCommandBuffer_presentDrawable,
-    &_MTLCommandBuffer_presentDrawableAfterMinimumDuration,
-    &_MTLDevice_supportsFamily,
-    &_MTLDevice_supportsBCTextureCompression,
-    &_MTLDevice_supportsTextureSampleCount,
-    &_MTLDevice_hasUnifiedMemory,
-    &_MTLCaptureManager_sharedCaptureManager,
-    &_MTLCaptureManager_startCapture,
-    &_MTLCaptureManager_stopCapture,
-    &_MTLDevice_newTemporalScaler,
-    &_MTLDevice_newSpatialScaler,
-    &_MTLCommandBuffer_encodeTemporalScale,
-    &_MTLCommandBuffer_encodeSpatialScale,
-    &_NSString_string,
-    &_NSString_alloc_init,
-    &_DeveloperHUDProperties_instance,
-    &_DeveloperHUDProperties_addLabel,
-    &_DeveloperHUDProperties_updateLabel,
-    &_DeveloperHUDProperties_remove,
-    &_MetalDrawable_texture,
-    &_MetalLayer_nextDrawable,
-    &_MTLDevice_supportsFXSpatialScaler,
-    &_MTLDevice_supportsFXTemporalScaler,
-    &_MetalLayer_setProps,
-    &_MetalLayer_getProps,
-    &_CreateMetalViewFromHWND,
-    &_ReleaseMetalView,
-    &thunk32_SM50Initialize,
-    &thunk_SM50Destroy,
-    &thunk32_SM50Compile,
-    &thunk32_SM50GetCompiledBitcode,
-    &thunk_SM50DestroyBitcode,
-    &thunk32_SM50GetErrorMessage,
-    &thunk_SM50FreeError,
-    &thunk32_SM50CompileGeometryPipelineVertex,
-    &thunk32_SM50CompileGeometryPipelineGeometry,
-    NULL,
-    &thunk32_SM50CompileTessellationPipelineHull,
-    &thunk32_SM50CompileTessellationPipelineDomain,
-    &_MTLCommandEncoder_setLabel,
-    &_MTLDevice_setShouldMaximizeConcurrentCompilation,
-    &thunk32_SM50GetArgumentsInfo,
-    &_MTLCommandBuffer_error,
-    &_MTLCommandBuffer_logs,
-    &_MTLLogContainer_enumerate,
-    &_CGColorSpace_checkColorSpaceSupported,
-    &_MetalLayer_setColorSpace,
-    &_WMTGetPrimaryDisplayId,
-    &_WMTGetSecondaryDisplayId,
-    &_WMTGetDisplayDescription,
-    &_MetalLayer_getEDRValue,
-    &_MTLLibrary_newFunctionWithConstants,
-    &_WMTQueryDisplaySetting,
-    &_WMTUpdateDisplaySetting,
-    &_WMTQueryDisplaySettingForLayer,
-    &_MTLCommandBuffer_encodeWaitForEvent,
-    &_MTLSharedEvent_signalValue,
-    &_MTLSharedEvent_setWin32EventAtValue,
-    &_MTLDevice_newFence,
-    &_MTLDevice_newEvent,
-    &_MTLBuffer_updateContents,
-    &_SharedEventListener_create,
-    &_SharedEventListener_start,
-    &_SharedEventListener_destroy,
-    &_WMTGetOSVersion,
-    &_MTLDevice_newBinaryArchive,
-    &_MTLBinaryArchive_serialize,
-    &_DispatchData_alloc_init,
-    &_CacheReader_alloc_init,
-    &_CacheReader_get,
-    &_CacheWriter_alloc_init,
-    &_CacheWriter_set,
-    &_WMTSetMetalShaderCachePath,
-    &_MTLDevice_newSharedTexture,
-    &_WMTBootstrapRegister,
-    &_WMTBootstrapLookUp,
-    &_MTLSharedEvent_createMachPort,
-    &_MTLDevice_newSharedEventWithMachPort,
-    &_MTLDevice_registryID,
-    &_MTLSharedEvent_waitUntilSignaledValue,
-    &_MTLCounterSampleBuffer_newTimestampBuffer,
-    &_MTLCounterSampleBuffer_resolveCounterRange,
-    &_MTLCommandBuffer_blitCommandEncoderWithSampleBuffers,
-    &_MTLCommandBuffer_property,
-    &_MTLDevice_newTileRenderPipelineState,
-    &_MTLCommandBuffer_scheduleFrameDump,
-};
-#endif
+static NTSTATUS
+_MTLBuffer_traceOwnership(void *obj) {
+  const char *directory = getenv("MACRUNNER_WMT_RECORD");
+  if (!directory || !*directory) return STATUS_SUCCESS;
+  struct unixcall_mtlbuffer_traceownership *params = obj;
+  BOOL valid = !params->reserved && wmt_trace_owner_change((id)params->buffer,
+      params->offset, params->length, params->action);
+  NSDictionary *fields = wmt_audit_owner_fields((id)params->buffer, params->offset,
+      params->length, params->action, 134, valid);
+  if (!valid) {
+    NSDictionary *ledger = params->buffer ? wmt_trace_owner_copy((id)params->buffer) : nil;
+    fprintf(stderr, "WMT_TRACE ownership rejected buffer=%llx offset=%llu length=%llu action=%u "
+        "reserved=%u pending=%lu owned=%lu gpu=%lu\n", (unsigned long long)params->buffer,
+        (unsigned long long)params->offset, (unsigned long long)params->length,
+        params->action, params->reserved, (unsigned long)[ledger[@"pending"] count],
+        (unsigned long)[ledger[@"owned"] count], (unsigned long)[ledger[@"gpu"] count]);
+    [ledger release];
+  }
+  wmt_trace_record_event(@"buffer-ownership", (id)params->buffer, fields);
+  return valid ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+#include "wmt_trace_api_record.h"
+#include "wmt_trace_api_dispatch.h"

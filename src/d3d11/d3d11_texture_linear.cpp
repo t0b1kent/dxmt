@@ -62,13 +62,13 @@ TDynamicLinearTexture(
     if (pInitialData) {
       if (pInitialData->SysMemPitch != bytes_per_row_) {
         for (unsigned row = 0; row < this->texture_->height(); row++) {
-          memcpy(
-              ptr_add(allocation->mappedMemory, row * bytes_per_row_),
+          allocation->updateMappedContents(
+              row * bytes_per_row_,
               ptr_add(pInitialData->pSysMem, row * pInitialData->SysMemPitch),
               pInitialData->SysMemPitch);
         }
       } else {
-        memcpy(allocation->mappedMemory, pInitialData->pSysMem, bytes_per_image);
+        allocation->updateMappedContents(0, pInitialData->pSysMem, bytes_per_image);
       }
     }
     dynamic_ = new DynamicLinearTexture(this->texture_.ptr(), flags);

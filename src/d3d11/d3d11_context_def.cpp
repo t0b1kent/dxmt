@@ -119,6 +119,7 @@ public:
         EmitST([allocation, sub = suballocation](ArgumentEncodingContext &enc) mutable {
           allocation->useSuballocation(sub);
         });
+        allocation->traceMappedWrite(suballocation, dynamic->buffer->length(), WMTTraceOwnerBegin);
         return allocation->mappedMemory(suballocation);
       }
     }
@@ -140,6 +141,7 @@ public:
       allocation->useSuballocation(0);
       auto _ = buffer->rename(forward_rc(allocation));
     });
+    new_allocation->traceMappedWrite(0, dynamic->buffer->length(), WMTTraceOwnerBegin);
     return new_allocation->mappedMemory(0);
   }
 
@@ -184,6 +186,8 @@ public:
           return E_INVALIDARG;
         }
         auto &allocation_state = ret->second;
+        allocation_state.allocation->traceMappedWrite(
+            allocation_state.suballocation, buffer_length, WMTTraceOwnerGPU);
         pMappedResource->pData = allocation_state.allocation->mappedMemory(allocation_state.suballocation);
         pMappedResource->RowPitch = buffer_length;
         pMappedResource->DepthPitch = buffer_length;
@@ -222,6 +226,7 @@ public:
           auto _ = texture->rename(forward_rc(allocation));
         });
 
+        new_allocation->traceMappedWrite(0, depth_pitch, WMTTraceOwnerBegin);
         pMappedResource->pData = new_allocation->mappedMemory;
         pMappedResource->RowPitch = row_pitch;
         pMappedResource->DepthPitch = depth_pitch;
@@ -233,6 +238,7 @@ public:
           ERR("DeferredContext: Invalid NO_OVERWRITE map on deferred context occurs without any prior DISCARD map.");
           return E_INVALIDARG;
         }
+        ret->second.first->traceMappedWrite(0, depth_pitch, WMTTraceOwnerGPU);
         pMappedResource->pData = ret->second.first->mappedMemory;
         pMappedResource->RowPitch = row_pitch;
         pMappedResource->DepthPitch = depth_pitch;
@@ -270,6 +276,20 @@ public:
   Unmap(ID3D11Resource *pResource, UINT Subresource) override {
     UINT buffer_length = 0, &row_pitch = buffer_length;
     UINT bind_flag = 0, &depth_pitch = bind_flag;
+    auto mapped = GetDynamicBuffer(pResource, &buffer_length, &bind_flag);
+    if (!mapped)
+      mapped = GetDynamicTexture(pResource, Subresource, &row_pitch, &depth_pitch);
+    if (mapped) {
+      auto ret = ctx_state.current_dynamic_buffer_allocations.find(mapped.ptr());
+      if (ret != ctx_state.current_dynamic_buffer_allocations.end())
+        ret->second.allocation->traceMappedWrite(
+            ret->second.suballocation, mapped->buffer->length(), WMTTraceOwnerEnd);
+    }
+    if (auto linear = GetDynamicLinearTexture(pResource, &row_pitch, &depth_pitch)) {
+      auto ret = ctx_state.current_dynamic_texture_allocations.find(linear.ptr());
+      if (ret != ctx_state.current_dynamic_texture_allocations.end())
+        ret->second.first->traceMappedWrite(0, depth_pitch, WMTTraceOwnerEnd);
+    }
     if (auto dynamic = GetDynamicTexture(pResource, Subresource, &row_pitch, &depth_pitch)) {
       BlitObject texture(device, pResource);
       UpdateTexture(TextureUpdateCommand(texture, Subresource, nullptr),
