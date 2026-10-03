@@ -23,6 +23,7 @@
 #include "com/com_pointer.hpp"
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
+#include "d3d12_root_validation.hpp"
 #include "dxmt_sampler.hpp"
 #include "util_math.hpp"
 #include "util_md5.hpp"
@@ -403,6 +404,12 @@ public:
       return hr;
 
     auto &desc = deserializer.desc_1_1_.Desc_1_1;
+
+    try {
+      if (!ValidateRootBindingLayout(desc)) return E_INVALIDARG;
+    } catch (const std::bad_alloc &) {
+      return E_OUTOFMEMORY;
+    }
 
     static_assert(D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE == unsigned(local_root::Table));
     static_assert(D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS == unsigned(local_root::Constants));

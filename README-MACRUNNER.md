@@ -17,6 +17,13 @@ to the upstream project.
 
 ### Optional bounded diagnostic counters (2026-10-03)
 
+Root signatures now reject ambiguous shader-register bindings across tables,
+root descriptors/constants and static samplers, accounting for resource type,
+register space and intersecting shader visibility. Bounded register/descriptor
+offset overflow, empty ranges, and APPEND after an unbounded range are rejected.
+Physical heap aliasing remains legal; distinct visibility/space stays legal.
+Both root-signature versions 1.0 and 1.1 share this validation.
+
 `MACRUNNER_DX12_COUNTERS=1` records process-wide residency mutex acquisitions,
 failed `try_lock` observations, QPC acquisition/hold ticks, both CPU GPUVA lookup
 paths, explicit root-state reset bytes, actual root-upload bytes, and all ordinary
