@@ -1,9 +1,21 @@
 #include "dxmt_device.hpp"
+#include "dxmt_shader_metal.hpp"
 #include "config/config.hpp"
 #include "dxmt_command_queue.hpp"
 #include "Metal.hpp"
 
 namespace dxmt {
+
+WMTMetalVersion
+GetShaderMetalVersion(WMT::Device device) {
+  int version_conf = Config::getInstance().getOption<int>("dxmt.shaderMetalVersion", 0);
+  auto version = version_conf == WMTMetal310 || version_conf == WMTMetal320
+                     ? (WMTMetalVersion)version_conf : WMTMetalVersionMax;
+  uint64_t macos_major_version = 0;
+  WMTGetOSVersion(&macos_major_version, nullptr, nullptr);
+  version = std::min(macos_major_version >= 15 ? WMTMetal320 : WMTMetal310, version);
+  return device.supportsFamily(WMTGPUFamilyApple7) ? version : WMTMetal310;
+}
 
 class DeviceImpl : public Device {
 public:
@@ -26,25 +38,10 @@ public:
 
   DeviceImpl(const DEVICE_DESC &desc) : device_(desc.device), cmd_queue_(device_) {
     uint64_t macos_major_version = 0, macos_minor_version = 0;
-    int version_conf = Config::getInstance().getOption<int>("dxmt.shaderMetalVersion", 0);
-    switch (version_conf) {
-    case WMTMetal310:
-    case WMTMetal320:
-      metal_version_ = (WMTMetalVersion)version_conf;
-      break;
-    default:
-      metal_version_ = WMTMetalVersionMax;
-      break;
-    }
+    metal_version_ = GetShaderMetalVersion(device_);
     WMTGetOSVersion(&macos_major_version, &macos_minor_version, nullptr);
-    if (macos_major_version >= 15) {
-      metal_version_ = std::min(WMTMetal320, metal_version_);
-    } else {
-      metal_version_ = std::min(WMTMetal310, metal_version_);
-    }
     if (!device_.supportsFamily(WMTGPUFamilyApple7)) {
       WARN("Experimental non-Apple GPU support");
-      metal_version_ = WMTMetal310; // Metal 3.2 features we need are basically not available
       max_object_threadgroups_ = 1024;
       // macOS 26 bug: setShouldMaximizeConcurrentCompilation crashes on AMDGPU
       if (!(macos_major_version >= 16 && macos_major_version <= 26 && macos_minor_version < 2))

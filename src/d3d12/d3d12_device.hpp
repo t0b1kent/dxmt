@@ -623,6 +623,8 @@ public:
 
   virtual HRESULT RegisterFence(std::shared_ptr<D3D12RemovableFence> fence) = 0;
   virtual void UnregisterFence(D3D12RemovableFence *fence) = 0;
+  // Append internal methods to preserve existing virtual-slot indices.
+  virtual WMTMetalVersion GetShaderMetalVersion() = 0;
 
   EventListener event_listener;
 

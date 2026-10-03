@@ -1650,7 +1650,7 @@ public:
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
-    common.metal_version = SM50_SHADER_METAL_310;
+    common.metal_version = (SM50_SHADER_METAL_VERSION)device_->GetShaderMetalVersion();
     common.next = nullptr;
 
     SM50_SHADER_GS_PASS_THROUGH_DATA gs_passthrough = {};

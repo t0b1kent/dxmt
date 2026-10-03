@@ -18,6 +18,7 @@
  */
 
 #include "d3d12_device.hpp"
+#include "dxmt_shader_metal.hpp"
 #include "d3d12_device_child.hpp"
 #include "d3d12_lifetime.hpp"
 #include "d3d12_frame_trace.hpp"
@@ -100,6 +101,7 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
   Com<IMTLDXGIAdapter> adapter_;
   std::shared_ptr<D3D12DeviceCache> device_cache_;
   const uint64_t adapter_luid_;
+  const WMTMetalVersion shader_metal_version_;
 
   bool advertise_numa_ = false;
 
@@ -124,6 +126,7 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
 public:
   MTLD3D12DeviceImpl(IMTLDXGIAdapter *adapter, std::shared_ptr<D3D12DeviceCache> cache, uint64_t adapter_luid) :
       adapter_(adapter), device_cache_(std::move(cache)), adapter_luid_(adapter_luid),
+      shader_metal_version_(dxmt::GetShaderMetalVersion(adapter_->GetMTLDevice())),
       command_library(adapter_->GetMTLDevice()) {
     static std::atomic<uint32_t> trace_enabled{0};
     TraceFrame(trace_enabled, "enabled", this, "MACRUNNER_DX12_FRAME_TRACE=1 type=device");
@@ -172,6 +175,11 @@ public:
   GetMTLDevice() {
     return adapter_->GetMTLDevice();
   };
+
+  WMTMetalVersion
+  GetShaderMetalVersion() override {
+    return shader_metal_version_;
+  }
 
   D3D_FEATURE_LEVEL
   GetFeatureLevel() {
