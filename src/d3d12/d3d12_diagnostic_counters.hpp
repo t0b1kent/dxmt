@@ -31,7 +31,8 @@ inline uint64_t Tick() {
 
 enum class LockPath : unsigned { RegisterVA, UnregisterVA, RegisterSource, UnregisterSource, Identity, CaptureVA, BufferVA, Count };
 enum class Counter : unsigned { RootUploadCalls, RootUploadBytes, StaticSamplerBytes, RootStateZeroCalls, RootStateZeroBytes,
-                               CompileCS, CompileVS, CompileHS, CompileDS, CompileGS, CompilePS, Count };
+                               CompileCS, CompileVS, CompileHS, CompileDS, CompileGS, CompilePS,
+                               ResidencyRetain, ResidencyRelease, ResidencyAdd, ResidencyRemove, ResidencyCommit, Count };
 struct LockCounters {
   std::atomic<uint64_t> calls{0}, contended{0}, wait_ticks{0}, held_ticks{0};
 };
@@ -92,7 +93,8 @@ inline void Dump(const void *device) {
         (unsigned long long)c.wait_ticks.load(), (unsigned long long)c.held_ticks.load()));
   }
   constexpr const char *names[] = {"root_upload_calls", "root_upload_bytes", "static_sampler_bytes", "root_state_zero_calls",
-      "root_state_zero_bytes", "compile_cs", "compile_vs", "compile_hs", "compile_ds", "compile_gs", "compile_ps"};
+      "root_state_zero_bytes", "compile_cs", "compile_vs", "compile_hs", "compile_ds", "compile_gs", "compile_ps",
+      "residency_retain", "residency_release", "residency_add", "residency_remove", "residency_commit"};
   for (unsigned i = 0; i < unsigned(Counter::Count); ++i)
     write(std::snprintf(line, sizeof(line), "dx12_counters counter=%s value=%llu\n", names[i],
         (unsigned long long)data.values[i].load()));

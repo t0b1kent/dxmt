@@ -11,6 +11,11 @@ working tree before this publication.
 
 ## Modified upstream files (45)
 
+2026-10-03: `src/d3d12/d3d12_device.hpp` additionally counts existing residency
+retain/release and membership add/remove/commit paths when diagnostics are enabled.
+The policy and ownership transitions are unchanged; observed add/remove balance
+is reported separately from native memory retirement.
+
 2026-10-03: added `src/d3d12/d3d12_root_validation.hpp` and call it during root
 creation before sampler allocation. Covers register namespaces, visibility,
 spaces, bounded/unbounded ranges, APPEND, constants and static samplers.

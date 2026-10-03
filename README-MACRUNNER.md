@@ -30,8 +30,12 @@ paths, explicit root-state reset bytes, actual root-upload bytes, and all ordina
 SM50 compiler entry points. The device destructor prints the cumulative counts.
 The default is off. These measurements include observer overhead and are not
 production performance comparisons. Native-wave and external-artifact compiler
-paths are outside the SM50 counters. Reset bytes exclude initial object construction;
+paths are outside the SM50 counters. Reset bytes count logical explicit State
+clear assignments, including calls made during recording initialization. Implicit
+member initialization and optimized physical store traffic are not counted;
 upload bytes exclude heap alignment padding. Multiple devices share the counters.
+Residency retain/release and membership add/remove/commit counters measure the
+existing reference-count transition paths, without changing their commit policy.
 `MACRUNNER_DX12_FRAME_TRACE=1` retains its bounded sampling and adds thread, QPC,
 frequency and UTC anchors to each emitted event.
 

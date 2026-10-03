@@ -21,6 +21,7 @@
 #include "d3d12_acceleration_capture.hpp"
 #include "d3d12_acceleration_build.hpp"
 #include "d3d12.h"
+#include "d3d12_diagnostic_counters.hpp"
 #include "d3d12_command_encoder.hpp"
 #include "d3d12_command_list.hpp"
 #include "d3d12_local_root_layout.hpp"
@@ -130,17 +131,23 @@ struct D3D12ResidencyState {
   std::unordered_map<obj_handle_t, uint32_t> references;
   void Retain(WMT::Allocation allocation) {
     std::lock_guard lock(mutex);
+    diagnostic::Add(diagnostic::Counter::ResidencyRetain);
     if (++references[allocation.handle] == 1) {
       set.addAllocations(&allocation, 1);
+      diagnostic::Add(diagnostic::Counter::ResidencyAdd);
       set.commit();
+      diagnostic::Add(diagnostic::Counter::ResidencyCommit);
     }
   }
   void Release(WMT::Allocation allocation) {
     std::lock_guard lock(mutex);
+    diagnostic::Add(diagnostic::Counter::ResidencyRelease);
     auto entry = references.find(allocation.handle);
     if (entry != references.end() && !--entry->second) {
       set.removeAllocations(&allocation, 1);
+      diagnostic::Add(diagnostic::Counter::ResidencyRemove);
       set.commit();
+      diagnostic::Add(diagnostic::Counter::ResidencyCommit);
       references.erase(entry);
     }
   }
