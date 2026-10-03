@@ -45,12 +45,21 @@ TraceFrame(std::atomic<uint32_t> &counter, const char *stage, const void *self, 
     return;
   const DWORD error = GetLastError();
   char detail[320];
-  char line[512];
+  char line[640];
   if constexpr (sizeof...(args) == 0)
     std::snprintf(detail, sizeof(detail), "%s", format);
   else
     std::snprintf(detail, sizeof(detail), format, args...);
-  const int length = std::snprintf(line, sizeof(line), "dx12_frame stage=%s n=%u self=%p %s\n", stage, n, self, detail);
+  LARGE_INTEGER qpc, frequency;
+  FILETIME utc;
+  QueryPerformanceCounter(&qpc);
+  QueryPerformanceFrequency(&frequency);
+  GetSystemTimeAsFileTime(&utc);
+  const uint64_t utc_ticks = (uint64_t(utc.dwHighDateTime) << 32) | utc.dwLowDateTime;
+  const int length = std::snprintf(line, sizeof(line),
+      "dx12_frame stage=%s n=%u self=%p tid=%lu qpc=%llu frequency=%llu utc_filetime=%llu %s\n", stage, n, self,
+      (unsigned long)GetCurrentThreadId(), (unsigned long long)qpc.QuadPart,
+      (unsigned long long)frequency.QuadPart, (unsigned long long)utc_ticks, detail);
   DWORD written;
   if (length > 0 && size_t(length) < sizeof(line))
     WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, DWORD(length), &written, nullptr);

@@ -11,6 +11,11 @@ working tree before this publication.
 
 ## Modified upstream files (45)
 
+2026-10-03: added `src/d3d12/d3d12_diagnostic_counters.hpp` and optional hooks in
+device, command-list and both pipeline implementations. FrameTrace now includes
+QPC/UTC/thread anchors. The counter gate defaults off; no game or test-suite
+implementation code was imported.
+
 - `AGENTS.md`
 - `src/airconv/airconv_cli.cpp`
 - `src/airconv/airconv_public.h`

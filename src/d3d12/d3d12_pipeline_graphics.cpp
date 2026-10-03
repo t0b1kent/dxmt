@@ -20,6 +20,7 @@
 #include "d3d12_device.hpp"
 #include "stage_linkage.hpp"
 #include "d3d12_frame_trace.hpp"
+#include "d3d12_diagnostic_counters.hpp"
 #include "d3d12_pageable.hpp"
 #include "d3d12_pipeline.hpp"
 #include "d3d12_shader_capture.hpp"
@@ -1802,6 +1803,7 @@ public:
         tess_split.applied = 0;
         tess_vertex_link.applied = 0;
         auto *args = (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig;
+        diagnostic::Add(tessellation ? diagnostic::Counter::CompileHS : diagnostic::Counter::CompileVS);
         const int result = geometry
             ? SM50CompileGeometryPipelineVertex(shader_vs, shader_gs, args, name, &bitcode, &compile_error)
             : tessellation
@@ -1861,6 +1863,7 @@ public:
         SM50ShaderBitcode ds_bitcode;
         SM50Error ds_error;
         tess_split.applied = 0;
+        diagnostic::Add(diagnostic::Counter::CompileDS);
         if (SM50CompileTessellationPipelineDomain(
                 shader_hs, shader_ds, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig_ds,
                 "ds_main", &ds_bitcode, &ds_error
@@ -1893,6 +1896,7 @@ public:
         rootsig_gs.next = &gs_args;
         SM50ShaderBitcode gs_bitcode;
         SM50Error gs_error;
+        diagnostic::Add(diagnostic::Counter::CompileGS);
         if (SM50CompileGeometryPipelineGeometry(
                 shader_vs, shader_gs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig_gs,
                 "gs_main", &gs_bitcode, &gs_error
@@ -1985,6 +1989,7 @@ public:
       }
 
       SM50ShaderBitcode ps_bitcode;
+      diagnostic::Add(diagnostic::Counter::CompilePS);
       if (SM50Compile(
               shader_ps, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&rootsig, ps_name.c_str(), &ps_bitcode, &sm50_err
           ) || !sm50_bitcode_t(ps_bitcode)) {

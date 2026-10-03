@@ -24,6 +24,7 @@
 #include "d3d12_pipeline.hpp"
 #include "wave_native_bundle.hpp"
 #include "d3d12_shader_capture.hpp"
+#include "d3d12_diagnostic_counters.hpp"
 #include "log/log.hpp"
 
 namespace dxmt {
@@ -213,6 +214,7 @@ public:
 
     SM50ShaderBitcode cs_bitcode;
 
+    diagnostic::Add(diagnostic::Counter::CompileCS);
     if (SM50Compile(shader_cs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&common, "cs_main", &cs_bitcode, &sm50_err)) {
       ERR("Failed to compile cs shader");
       return E_FAIL;

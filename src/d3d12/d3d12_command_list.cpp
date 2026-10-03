@@ -23,6 +23,7 @@
 #include "d3d12_command_allocator.hpp"
 #include "d3d12_command_list.hpp"
 #include "d3d12_frame_trace.hpp"
+#include "d3d12_diagnostic_counters.hpp"
 #include "d3d12_command_failure_trace.hpp"
 #include "d3d12_recording_guard.hpp"
 #include "com/com_pointer.hpp"
@@ -342,9 +343,13 @@ public:
 
     rootsig_graphics_ = nullptr;
     rootarg_graphics_staging_ = {};
+    diagnostic::Add(diagnostic::Counter::RootStateZeroCalls);
+    diagnostic::Add(diagnostic::Counter::RootStateZeroBytes, sizeof(rootarg_graphics_staging_));
 
     rootsig_compute_ = nullptr;
     rootarg_compute_staging_ = {};
+    diagnostic::Add(diagnostic::Counter::RootStateZeroCalls);
+    diagnostic::Add(diagnostic::Counter::RootStateZeroBytes, sizeof(rootarg_compute_staging_));
 
     bound_heaps_ = {};
     bound_heap_ranges_ = {};
@@ -1108,6 +1113,8 @@ public:
   uint64_t
   EncodeRootArgument(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], UINT Count = 1) {
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(sizeof(uint64_t) * pRootSig->UploadQwords * Count, 64);
+    diagnostic::Add(diagnostic::Counter::RootUploadCalls);
+    diagnostic::Add(diagnostic::Counter::RootUploadBytes, sizeof(uint64_t) * pRootSig->UploadQwords * Count);
     for (unsigned i = 0; i < Count; i++)
       memcpy(
           reinterpret_cast<uint64_t *>(Ptr) + i * pRootSig->UploadQwords, pStaging,
@@ -1120,6 +1127,7 @@ public:
   EncodeStaticSamplers(MTLD3D12RootSignature *pRootSig) {
     auto static_sampler_encode_size = sizeof(uint64_t) * pRootSig->NumStaticSamplers * 4;
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(static_sampler_encode_size, 64);
+    diagnostic::Add(diagnostic::Counter::StaticSamplerBytes, static_sampler_encode_size);
     memcpy(Ptr, pRootSig->EncodedStaticSamplers, static_sampler_encode_size);
     return Offset;
   }
@@ -2070,6 +2078,8 @@ public:
     }
     rootsig_compute_ = impl.ptr();
     rootarg_compute_staging_ = {};
+    diagnostic::Add(diagnostic::Counter::RootStateZeroCalls);
+    diagnostic::Add(diagnostic::Counter::RootStateZeroBytes, sizeof(rootarg_compute_staging_));
     dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature);
     } catch (const GPUHeapExhausted &e) {
       SetRecordingError(E_OUTOFMEMORY, "SetComputeRootSignature", __LINE__);
@@ -2191,6 +2201,8 @@ public:
     }
     rootsig_graphics_ = impl.ptr();
     rootarg_graphics_staging_ = {};
+    diagnostic::Add(diagnostic::Counter::RootStateZeroCalls);
+    diagnostic::Add(diagnostic::Counter::RootStateZeroBytes, sizeof(rootarg_graphics_staging_));
     dirty_state_.set(DirtyState::GraphicsRootArguments, DirtyState::GraphicsRootSignature);
     } catch (const GPUHeapExhausted &e) {
       SetRecordingError(E_OUTOFMEMORY, "SetGraphicsRootSignature", __LINE__);

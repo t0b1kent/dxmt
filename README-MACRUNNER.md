@@ -15,6 +15,19 @@ to the upstream project.
 
 ## Why a fork, and why it is not submitted upstream
 
+### Optional bounded diagnostic counters (2026-10-03)
+
+`MACRUNNER_DX12_COUNTERS=1` records process-wide residency mutex acquisitions,
+failed `try_lock` observations, QPC acquisition/hold ticks, both CPU GPUVA lookup
+paths, explicit root-state reset bytes, actual root-upload bytes, and all ordinary
+SM50 compiler entry points. The device destructor prints the cumulative counts.
+The default is off. These measurements include observer overhead and are not
+production performance comparisons. Native-wave and external-artifact compiler
+paths are outside the SM50 counters. Reset bytes exclude initial object construction;
+upload bytes exclude heap alignment padding. Multiple devices share the counters.
+`MACRUNNER_DX12_FRAME_TRACE=1` retains its bounded sampling and adds thread, QPC,
+frequency and UTC anchors to each emitted event.
+
 MacRunner runs x86-64 Windows games on Apple Silicon Macs. It uses DXMT's
 experimental, opt-in D3D12 frontend (meson option `enable_d3d12`) and extends
 it here, together with the parts of the shader converter (`airconv`) and of
