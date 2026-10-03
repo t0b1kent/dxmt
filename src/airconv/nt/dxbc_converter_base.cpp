@@ -479,7 +479,7 @@ Converter::LoadTexture(const SrcOperandUAV &SrcOp) {
 
   return llvm::Optional<TextureResourceHandle>(
       {texture, descriptor->ResourceKindLogical, descriptor->ResourceHandle, descriptor->Metadata, SrcOp.read_swizzle,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->MayAlias}
   );
 }
 
@@ -498,7 +498,7 @@ Converter::LoadTexture(const AtomicDstOperandUAV &DstOp) {
 
   return llvm::Optional<TextureResourceHandle>(
       {texture, descriptor->ResourceKindLogical, descriptor->ResourceHandle, descriptor->Metadata, swizzle_identity,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->MayAlias}
   );
 }
 
@@ -527,7 +527,7 @@ Converter::LoadBuffer(const SrcOperandUAV &SrcOp) {
 
   return llvm::Optional<BufferResourceHandle>(
       {descriptor->Pointer, descriptor->Metadata, descriptor->StructureStride, SrcOp.read_swizzle,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->MayAlias}
   );
 }
 
@@ -541,7 +541,7 @@ Converter::LoadBuffer(const AtomicDstOperandUAV &DstOp) {
 
   return llvm::Optional<AtomicBufferResourceHandle>(
       {descriptor->Pointer, descriptor->Metadata, descriptor->StructureStride, DstOp.mask,
-       descriptor->GlobalCoherent && SupportsMemoryCoherency()}
+       descriptor->GlobalCoherent && SupportsMemoryCoherency(), descriptor->MayAlias}
   );
 }
 
@@ -574,7 +574,7 @@ Converter::LoadCounter(const AtomicDstOperandUAV &SrcOp) {
   if (!descriptor)
     return {};
 
-  return llvm::Optional<UAVCounterHandle>({descriptor->Pointer});
+  return llvm::Optional<UAVCounterHandle>({descriptor->Pointer, descriptor->MayAlias});
 }
 
 llvm::Optional<SamplerHandle>
@@ -1548,6 +1548,11 @@ Converter::operator()(const InstStoreUAVTyped &store) {
   auto Value = LoadOperand(store.src, kMaskAll);
 
   air.CreateWrite(Tex->Texture, Tex->Handle, Address, ArrayIndex, nullptr, ir.getInt32(0), Value, Tex->GlobalCoherent);
+  // Publish a typed write before a different UAV view reads the same backing.
+  // The reader may be a raw/structured buffer, so fencing only typed loads is
+  // insufficient. This is per-invocation ordering, not an execution barrier.
+  if (Tex->MayAlias)
+    air.CreateTextureFence(Tex->Texture, Tex->Handle);
 }
 
 llvm::Value *
@@ -2343,6 +2348,16 @@ Converter::operator()(const InstLoadStructured &load) {
 }
 
 void
+Converter::FenceUAVAliasWrite(bool MayAlias) {
+  // A second UAV can read this backing through a texture view. Preserve that
+  // dependency across both memory representations without an execution barrier.
+  if (MayAlias && SupportsNonExecutionBarrier())
+    air.CreateAtomicFence(
+        llvm::air::MemFlags::Device | llvm::air::MemFlags::Texture, llvm::air::ThreadScope::Device
+    );
+}
+
+void
 Converter::operator()(const InstStoreRaw &store) {
   using namespace llvm::air;
 
@@ -2372,6 +2387,7 @@ Converter::operator()(const InstStoreRaw &store) {
     else
       ir.CreateStore(ExtractElement(Value, DstComp), Ptr, Volatile);
   }
+  FenceUAVAliasWrite(Buf->MayAlias);
 }
 
 void
@@ -2406,6 +2422,7 @@ Converter::operator()(const InstStoreStructured &store) {
     else
       ir.CreateStore(ExtractElement(Value, DstComp), Ptr, Volatile);
   }
+  FenceUAVAliasWrite(Buf->MayAlias);
 }
 
 llvm::Value *
@@ -2467,6 +2484,7 @@ Converter::operator()(const InstAtomicBinOp &atomic) {
     auto IntPtrOffset = LoadAtomicOpAddress(Buf.getValue(), atomic.dst_address);
     auto Ptr = ir.CreateGEP(ir.getInt32Ty(), Buf->Pointer, {IntPtrOffset});
     auto Value = air.CreateAtomicRMW(Op, Ptr, LoadOperand(atomic.src, kMaskComponentX));
+    FenceUAVAliasWrite(Buf->MayAlias);
     StoreOperand(atomic.dst_original, Value);
     return;
   }
@@ -2510,6 +2528,8 @@ Converter::operator()(const InstAtomicBinOp &atomic) {
       Address = ir.CreateSelect(OOB, llvm::ConstantInt::getAllOnesValue(Address->getType()), Address);
     auto Value =
         air.CreateAtomicRMW(Tex->Texture, Tex->Handle, Op, Address, LoadOperand(atomic.src, kMaskAll), ArrayIndex);
+    if (Tex->MayAlias)
+      air.CreateTextureFence(Tex->Texture, Tex->Handle);
     StoreOperand(atomic.dst_original, Value);
     return;
   }
@@ -2529,6 +2549,7 @@ Converter::operator()(const InstAtomicImmCmpExchange &atomic) {
         Ptr, LoadOperand(atomic.src0, kMaskComponentX), LoadOperand(atomic.src1, kMaskComponentX), {},
         AtomicOrdering::Monotonic, AtomicOrdering::Monotonic
     );
+    FenceUAVAliasWrite(Buf->MayAlias);
     StoreOperand(atomic.dst, ir.CreateExtractValue(Value, 0));
     return;
   }
@@ -2570,6 +2591,8 @@ Converter::operator()(const InstAtomicImmCmpExchange &atomic) {
         Tex->Texture, Tex->Handle, Address, LoadOperand(atomic.src0, kMaskAll), LoadOperand(atomic.src1, kMaskAll),
         ArrayIndex
     );
+    if (Tex->MayAlias)
+      air.CreateTextureFence(Tex->Texture, Tex->Handle);
     StoreOperand(atomic.dst, Value);
     return;
   }
@@ -2585,6 +2608,7 @@ Converter::operator()(const InstAtomicImmIncrement &atomic) {
     return;
 
   auto Value = air.CreateAtomicRMW(AtomicRMWInst::Add, Ctr->Pointer, ir.getInt32(1));
+  FenceUAVAliasWrite(Ctr->MayAlias);
   StoreOperand(atomic.dst, Value);
 }
 void
@@ -2597,6 +2621,7 @@ Converter::operator()(const InstAtomicImmDecrement &atomic) {
     return;
 
   auto Value = air.CreateAtomicRMW(AtomicRMWInst::Sub, Ctr->Pointer, ir.getInt32(1));
+  FenceUAVAliasWrite(Ctr->MayAlias);
   // imm_atomic_consume returns new value
   StoreOperand(atomic.dst, ir.CreateSub(Value, ir.getInt32(1)));
 }

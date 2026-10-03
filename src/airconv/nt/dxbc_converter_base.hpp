@@ -52,6 +52,7 @@ struct TextureResourceHandle {
   llvm::Value *Metadata;
   Swizzle Swizzle;
   bool GlobalCoherent;
+  bool MayAlias = false;
 };
 
 struct BufferResourceHandle {
@@ -60,6 +61,7 @@ struct BufferResourceHandle {
   uint32_t StructureStride; // 0 if not structured
   Swizzle Swizzle;
   bool GlobalCoherent;
+  bool MayAlias = false;
 };
 
 struct AtomicBufferResourceHandle {
@@ -68,10 +70,12 @@ struct AtomicBufferResourceHandle {
   uint32_t StructureStride; // 0 if not structured
   mask_t Mask;
   bool GlobalCoherent;
+  bool MayAlias = false;
 };
 
 struct UAVCounterHandle {
   llvm::Value *Pointer;
+  bool MayAlias = false;
 };
 
 struct SamplerHandle {
@@ -180,6 +184,8 @@ public:
   llvm::Optional<UAVCounterHandle> LoadCounter(const AtomicDstOperandUAV &SrcOp);
 
   llvm::Value *LoadAtomicOpAddress(const AtomicBufferResourceHandle &Handle, const SrcOperand &Address);
+
+  void FenceUAVAliasWrite(bool MayAlias);
 
   llvm::Optional<InterpolantHandle> LoadInterpolant(uint32_t Index);
 

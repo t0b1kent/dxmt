@@ -26,7 +26,8 @@ struct TextureDescirptor {
   llvm::air::Texture::ResourceKind ResourceKindLogical;
   llvm::air::Texture::MemoryAccess MemoryAccess;
   llvm::air::Texture::SampleType SampleType;
-
+  // Root-table UAVs can share backing storage with another shader binding.
+  bool MayAlias = false;
 };
 
 struct BufferDescriptor {
@@ -34,10 +35,12 @@ struct BufferDescriptor {
   llvm::Value *Metadata;
   uint32_t StructureStride;
   bool GlobalCoherent;
+  bool MayAlias = false;
 };
 
 struct CounterDescriptor {
   llvm::Value *Pointer;
+  bool MayAlias = false;
 };
 
 using RangeId = uint32_t;

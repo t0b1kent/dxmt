@@ -266,13 +266,15 @@ public:
         },
         air::to_air_scaler_type(UAV.scaler_type)
     );
-    auto MemoryAccess = UAV.written
-                            ? (UAV.read ? Texture::MemoryAccess::acesss_readwrite : Texture::MemoryAccess::access_write)
-                            : Texture::MemoryAccess::access_read;
+    // Root-bound UAV descriptors can alias across shader ranges and registers.
+    // Per-register usage cannot make a UAV read-only: a different UAV may have
+    // written this same native texture in the current invocation. Preserve the
+    // read/write access so typed loads issue the existing AIR texture fence.
+    auto MemoryAccess = Texture::MemoryAccess::acesss_readwrite;
     auto [Handle, Metadata] =
         GetTextureDescriptor(Builder, HeapPointer, Index, ResourceKind, UAV.range.lower_bound, DescriptorOffset);
     return TextureDescirptor{Handle,       Metadata,  UAV.global_coherent, ResourceKind, ResourceKindLogical,
-                             MemoryAccess, SampleType};
+                             MemoryAccess, SampleType, true};
   }
 
   virtual llvm::Optional<BufferDescriptor>
@@ -311,14 +313,14 @@ public:
     auto HeapPointer = GetArgument(Builder, RootSignatureArgumentIndex, UAV.arg_index);
     if (DescriptorOffset == ~0u) {
       return BufferDescriptor{
-          HeapPointer, Builder.builder.getInt64(0xffffffff), UAV.structure_stride, UAV.global_coherent
+          HeapPointer, Builder.builder.getInt64(0xffffffff), UAV.structure_stride, UAV.global_coherent, true
       };
     }
     auto [Pointer, Metadata] = GetBufferDescriptor(
         Builder, HeapPointer, Index, Builder.getIntTy()->getPointerTo(1), UAV.range.lower_bound, DescriptorOffset
     );
 
-    return BufferDescriptor{Pointer, Metadata, UAV.structure_stride, UAV.global_coherent};
+    return BufferDescriptor{Pointer, Metadata, UAV.structure_stride, UAV.global_coherent, true};
   }
 
   virtual llvm::Optional<CounterDescriptor>
@@ -337,7 +339,7 @@ public:
       return {}; // root descriptor can not have counters associated
     auto Pointer = GetUAVCounterDescriptor(Builder, HeapPointer, Index, UAV.range.lower_bound, DescriptorOffset);
 
-    return CounterDescriptor{Pointer};
+    return CounterDescriptor{Pointer, true};
   }
 
   uint32_t RootSignatureArgumentIndex = ~0u;
