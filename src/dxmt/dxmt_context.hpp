@@ -768,6 +768,11 @@ public:
   uint32_t tess_num_output_control_point_element;
   uint32_t tess_threads_per_patch;
 
+private:
+  /* Command helpers may call back into this context during construction. */
+  WMT::Device device_;
+
+public:
   EmulatedCommandContext emulated_cmd;
   ClearRenderTargetContext clear_rt_cmd;
   DepthStencilBlitContext blit_depth_stencil_cmd;
@@ -856,7 +861,6 @@ private:
 
   uint64_t intrapass_barrier_control_bits_ = 0;
 
-  WMT::Device device_;
   CommandQueue& queue_;
 };
 

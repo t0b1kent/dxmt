@@ -259,6 +259,7 @@ macrunner_shader_inputs_log_resource(PipelineStage stage, unsigned slot,
 }
 
 ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Device device, InternalCommandLibrary &lib) :
+    device_(device),
     emulated_cmd(device, lib, *this),
     clear_rt_cmd(device, lib, *this),
     blit_depth_stencil_cmd(device, lib, *this),
@@ -266,7 +267,6 @@ ArgumentEncodingContext::ArgumentEncodingContext(CommandQueue &queue, WMT::Devic
     mv_scale_cmd(device, lib, *this),
     tile_barrier_cmd(device, lib, *this),
     timestamp_state_(device),
-    device_(device),
     queue_(queue) {
   dummy_sampler_info_.support_argument_buffers = true;
   dummy_sampler_info_.border_color = WMTSamplerBorderColorTransparentBlack;
