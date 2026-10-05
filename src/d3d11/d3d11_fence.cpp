@@ -144,7 +144,7 @@ CreateFence(MTLD3D11Device *pDevice, UINT64 InitialValue, D3D11_FENCE_FLAG Flags
     fprintf(stderr, "macrunner-dxmt-fence: shared=false, local fence\n");
   }
   event.signalValue(InitialValue);
-  auto fence = new MTLD3D11FenceImpl(pDevice, std::move(event), local_kmt);
+  auto fence = Com(new MTLD3D11FenceImpl(pDevice, std::move(event), local_kmt));
   HRESULT hr = fence->QueryInterface(riid, ppFence);
   fprintf(stderr, "macrunner-dxmt-fence: CreateFence EXIT hr=0x%08x local_kmt=0x%x\n",
           (unsigned)hr, (unsigned)local_kmt);
@@ -197,10 +197,10 @@ OpenSharedFence(MTLD3D11Device *pDevice, HANDLE hResource,
     return E_INVALIDARG;
   }
 
-  auto fence = new MTLD3D11FenceImpl(
+  auto fence = Com(new MTLD3D11FenceImpl(
       pDevice,
       pDevice->GetMTLDevice().newSharedEventWithMachPort(mach_port),
-      open.hSyncObject);
+      open.hSyncObject));
   return fence->QueryInterface(riid, ppFence);
 }
 
