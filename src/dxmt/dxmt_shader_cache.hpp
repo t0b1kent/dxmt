@@ -5,7 +5,7 @@
 
 namespace dxmt {
 
-inline const int kDXMTShaderCacheVersion = sm50_binding_remap_enabled() ? 19 : 18;
+inline const int kDXMTShaderCacheVersion = sm50_binding_remap_enabled() ? 20 : 18;
 
 class ShaderCache {
 public:
