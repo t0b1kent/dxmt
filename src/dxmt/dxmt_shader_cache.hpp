@@ -1,10 +1,11 @@
 #pragma once
 #include "Metal.hpp"
+#include "airconv_public.h"
 #include "thread.hpp"
 
 namespace dxmt {
 
-constexpr int kDXMTShaderCacheVersion = 18;
+inline const int kDXMTShaderCacheVersion = sm50_binding_remap_enabled() ? 19 : 18;
 
 class ShaderCache {
 public:

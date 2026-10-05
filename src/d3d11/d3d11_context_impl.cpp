@@ -5704,7 +5704,7 @@ public:
           cmd.type = WMTRenderCommandSetVertexBuffer;
           cmd.buffer = buffer->buffer();
           cmd.offset = buffer_offset;
-          cmd.index = 20;
+          cmd.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
           enc.makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(slot0.ptr(), false, true);
           enc.setCompatibilityFlag(FeatureCompatibility::UnsupportedStreamOutputAppending);
         });
@@ -5716,7 +5716,7 @@ public:
           cmd.type = WMTRenderCommandSetVertexBuffer;
           cmd.buffer = buffer->buffer();
           cmd.offset = offset + buffer_offset;
-          cmd.index = 20;
+          cmd.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
           enc.makeResident<PipelineStage::Vertex, PipelineKind::Ordinary>(slot0.ptr(), false, true);
         });
       }
@@ -5726,7 +5726,7 @@ public:
         cmd.type = WMTRenderCommandSetVertexBuffer;
         cmd.buffer = NULL_OBJECT_HANDLE;
         cmd.offset = 0;
-        cmd.index = 20;
+        cmd.index = SM50_BINDING_INDEX_STREAM_OUTPUT0;
       });
     }
     state_.StreamOutput.Targets.clear_dirty(0);

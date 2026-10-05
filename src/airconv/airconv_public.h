@@ -7,22 +7,6 @@
 
 #ifdef __cplusplus
 #include <string>
-enum class ShaderType {
-  Vertex,
-  /* Metal: fragment function */
-  Pixel,
-  /* Metal: kernel function */
-  Compute,
-  /* Not present in Metal */
-  Hull,
-  /* Metal: post-vertex function */
-  Domain,
-  /* Not present in Metal */
-  Geometry,
-  Mesh,
-  /* Metal: object function */
-  Amplification,
-};
 
 enum class SM50BindingType : uint32_t {
   ConstantBuffer,
@@ -31,9 +15,44 @@ enum class SM50BindingType : uint32_t {
   UAV,
 };
 #else
-typedef uint32_t ShaderType;
 typedef uint32_t SM50BindingType;
 #endif
+
+/* Startup-only switch shared by the PE producer and native AIR/Metal consumer.
+ * Persisted shader cache versions are separate for both layouts. */
+#include <stdlib.h>
+#include <string.h>
+#ifndef __cplusplus
+#include <stdatomic.h>
+#endif
+static inline bool sm50_binding_remap_enabled(void) {
+#ifdef __cplusplus
+  static const bool enabled = [] {
+    const char *value = getenv("MACRUNNER_DXMT_BINDING_REMAP");
+    return value && !strcmp(value, "1");
+  }();
+  return enabled;
+#else
+  static _Atomic int enabled = -1;
+  int value = atomic_load_explicit(&enabled, memory_order_relaxed);
+  if (value == -1) {
+    const char *env = getenv("MACRUNNER_DXMT_BINDING_REMAP");
+    value = env && !strcmp(env, "1");
+    atomic_store_explicit(&enabled, value, memory_order_relaxed);
+  }
+  return value != 0;
+#endif
+}
+#define SM50_BINDING_INDEX_CONSTANT_BUFFER (sm50_binding_remap_enabled() ? 0u : 29u)
+#define SM50_BINDING_INDEX_ARGUMENT_TABLE (sm50_binding_remap_enabled() ? 1u : 30u)
+#define SM50_BINDING_INDEX_VERTEX_BUFFER (sm50_binding_remap_enabled() ? 2u : 16u)
+#define SM50_BINDING_INDEX_INDEX_BUFFER (sm50_binding_remap_enabled() ? 3u : 20u)
+#define SM50_BINDING_INDEX_DRAW_ARGUMENTS (sm50_binding_remap_enabled() ? 4u : 21u)
+#define SM50_BINDING_INDEX_INDIRECT_ARGUMENTS (sm50_binding_remap_enabled() ? 4u : 21u)
+#define SM50_BINDING_INDEX_STREAM_OUTPUT0 (sm50_binding_remap_enabled() ? 5u : 20u)
+#define SM50_BINDING_INDEX_CONSTANT_BUFFER2 (sm50_binding_remap_enabled() ? 6u : 27u)
+#define SM50_BINDING_INDEX_ARGUMENT_TABLE2 (sm50_binding_remap_enabled() ? 7u : 28u)
+
 
 enum MTL_SM50_SHADER_ARGUMENT_FLAG : uint32_t {
   MTL_SM50_SHADER_ARGUMENT_BUFFER = 1 << 0,
