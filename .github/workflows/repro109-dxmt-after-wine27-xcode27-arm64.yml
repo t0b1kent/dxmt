@@ -1,0 +1,111 @@
+name: REPRO-109 D3D11 and winemetal from source-built Wine and LLVM
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Verify inputs first; full uses the same four archive and receipt pins
+        type: choice
+        options: [inputs, full]
+        default: inputs
+        required: true
+      wine_result_sha256:
+        description: SHA256 of wine/reports/RESULT.json in Wine run 37616083395
+        type: string
+        required: true
+      deps_manifest_sha256:
+        description: SHA256 of reports/composition/dependency-manifest.json in that Wine run
+        type: string
+        required: true
+      wine_dist_sha256:
+        description: SHA256 of wine-dist.tar.gz in that Wine run
+        type: string
+        required: true
+      deps_prefix_sha256:
+        description: SHA256 of dependency-prefix.tar.gz in that Wine run
+        type: string
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: repro109-dxmt-after-wine27
+  cancel-in-progress: false
+
+jobs:
+  dxmt:
+    if: github.repository == 't0b1kent/dxmt' && github.ref == 'refs/heads/macrunner-d3d12'
+    runs-on: xcode-27
+    timeout-minutes: 150
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.app/Contents/Developer
+    steps:
+      - name: Checkout this immutable DXMT recipe and pinned source trees
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: dxmt
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout curator-approved Wine main recipe
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: t0b1kent/macrunner-wine
+          ref: cb9d08f9a429385338aaa61ba8a3127009d635d4
+          path: macrunner-wine
+          persist-credentials: false
+      - name: Select pinned driver Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13.7'
+          architecture: arm64
+      - name: Check offline orchestration and Wine source ownership controls
+        env:
+          REPRO109_TEST_TMP: ${{ runner.temp }}/repro109-dxmt-control-scratch
+          MACRUNNER_WINE_RECIPE_ROOT: ${{ github.workspace }}/macrunner-wine/build
+          MACRUNNER_DXMT_SOURCE_REPOSITORY: ${{ github.workspace }}/dxmt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$REPRO109_TEST_TMP"
+          python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_repro109_dxmt_after_wine27.py"
+          python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_wine_layout.py"
+          python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_llvm_prefix.py"
+      - name: Use the same preparation for inputs and full
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WINE_RESULT_SHA256: ${{ inputs.wine_result_sha256 }}
+          DEPS_MANIFEST_SHA256: ${{ inputs.deps_manifest_sha256 }}
+          WINE_DIST_SHA256: ${{ inputs.wine_dist_sha256 }}
+          DEPS_PREFIX_SHA256: ${{ inputs.deps_prefix_sha256 }}
+          PHASE: ${{ inputs.phase }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/repro109_dxmt_after_wine27.py" \
+            --phase "$PHASE" --dxmt-checkout "$GITHUB_WORKSPACE/dxmt" \
+            --wine-checkout "$GITHUB_WORKSPACE/macrunner-wine"
+      - name: Preserve complete bounded reports and unsigned outputs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/repro109-dxmt-after-wine27"
+          out="$RUNNER_TEMP/repro109-dxmt-after-wine27-results"
+          mkdir -p "$out"
+          if [ -d "$root/reports" ]; then cp -R "$root/reports" "$out/orchestration"; fi
+          for part in reports outputs; do
+            if [ -d "$root/dxmt-work/$part" ]; then cp -R "$root/dxmt-work/$part" "$out/$part"; fi
+          done
+          git -C "$GITHUB_WORKSPACE/dxmt" rev-parse HEAD > "$out/dxmt-recipe-revision.txt"
+          git -C "$GITHUB_WORKSPACE/macrunner-wine" rev-parse HEAD > "$out/wine-recipe-revision.txt"
+      - name: Retain source outputs and raw evidence in Actions
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: repro109-dxmt-after-wine27-${{ github.sha }}
+          path: ${{ runner.temp }}/repro109-dxmt-after-wine27-results/
+          if-no-files-found: error
+          retention-days: 7

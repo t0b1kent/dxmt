@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "repository": "t0b1kent/dxmt",
+  "producer_revision": "f804f27c7a3ee61e2d7882ae12600cfeb9e05bc5",
+  "producer_run": "37567821557",
+  "wine_recipe_revision": "f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542",
+  "result_sha256": "ede9dc86c65034eb94fc37fc007a92f8a561f32cc2431fed94bcacb120bf4e63",
+  "archive_sha256": "4ce2e2c69d9f768d9b9c887b9a10cbd87299fce333d1808f6ba6de489f32e0b6",
+  "profile": "github-macos15-arm64",
+  "scope": "Published LLVM source provenance; not proof of equivalence to a later Wine source archive",
+  "sources": {
+    "cmake": {
+      "version": "4.3.2",
+      "url": "https://github.com/Kitware/CMake/releases/download/v4.3.2/cmake-4.3.2.tar.gz",
+      "sha256": "b0231eb39b3c3cabdc568c619df78208a7bd95ea10c9b2236d61218bac1b367d",
+      "args": []
+    },
+    "ninja": {
+      "version": "1.13.2",
+      "url": "https://github.com/ninja-build/ninja/archive/refs/tags/v1.13.2.tar.gz",
+      "sha256": "974d6b2f4eeefa25625d34da3cb36bdcebe7fbce40f4c16ac0835fd1c0cbae17",
+      "args": []
+    },
+    "zstd": {
+      "version": "1.5.7",
+      "url": "https://github.com/facebook/zstd/archive/refs/tags/v1.5.7.tar.gz",
+      "sha256": "37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3",
+      "args": [
+        "-DZSTD_BUILD_SHARED=OFF",
+        "-DZSTD_BUILD_STATIC=ON",
+        "-DZSTD_BUILD_PROGRAMS=OFF",
+        "-DZSTD_BUILD_TESTS=OFF",
+        "-DZSTD_ZLIB_SUPPORT=OFF",
+        "-DZSTD_LZMA_SUPPORT=OFF",
+        "-DZSTD_LZ4_SUPPORT=OFF"
+      ]
+    },
+    "llvm15": {
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/llvm-project-15.0.7.src.tar.xz",
+      "sha256": "8b5fcb24b4128cf04df1b0b9410ce8b1a729cb3c544e6da885d234280dedeac6"
+    }
+  }
+}

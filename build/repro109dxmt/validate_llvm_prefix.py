@@ -14,6 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_llvm15 as llvm
 
 STATUS = 'LLVM15_ARM64_SOURCE_BUILT_NOT_DXMT_ACCEPTED'
+PUBLISHED_RESULT_SHA256 = 'ede9dc86c65034eb94fc37fc007a92f8a561f32cc2431fed94bcacb120bf4e63'
+PUBLISHED_INPUTS = Path(__file__).with_name('llvm15-published-inputs.lock.json')
 ARM64 = 0x0100000C
 SDK_LIBS = {'-lm', '-lz', '-lcurses', '-lncurses', '-lxml2', '-lffi', '-lpthread', '-ldl', '-lc'}
 
@@ -111,7 +113,35 @@ def expected_inputs():
     return dep, full, lock, rows, llvm.llvm_source_pin()
 
 
-def validate_source_record(record):
+def producer_source_pins(pins, llvm_pin, receipt_sha256):
+    """Keep a published LLVM producer's inputs independent of the Wine consumer."""
+    if receipt_sha256 != PUBLISHED_RESULT_SHA256:
+        return pins, llvm_pin
+    frozen = json.loads(PUBLISHED_INPUTS.read_bytes(), object_pairs_hook=unique_object)
+    require(type(frozen) is dict and frozen.get('schema') == 1
+            and frozen.get('result_sha256') == receipt_sha256
+            and frozen.get('producer_revision') == 'f804f27c7a3ee61e2d7882ae12600cfeb9e05bc5'
+            and frozen.get('producer_run') == '37567821557', 'Published LLVM source provenance differs')
+    sources = frozen.get('sources')
+    require(type(sources) is dict and set(sources) == set(pins) | {'llvm15'},
+            'Published LLVM source pin coverage differs')
+    for name, pin in sources.items():
+        require(type(pin) is dict and type(pin.get('url')) is str
+                and type(pin.get('sha256')) is str
+                and re.fullmatch(r'[a-f0-9]{64}', pin['sha256']) is not None,
+                'Published LLVM source pin shape differs')
+        if name != 'llvm15':
+            require(pin.get('version') == pins[name]['version']
+                    and type(pin.get('args')) is list
+                    and all(type(arg) is str for arg in pin['args']),
+                    'Published LLVM dependency version or flags missing')
+    require(sources['llvm15']['url'] == llvm_pin['url']
+            and sources['llvm15']['sha256'] == llvm_pin['sha256'],
+            'Published LLVM compiler source differs')
+    return {name: copy.deepcopy(sources[name]) for name in pins}, llvm_pin
+
+
+def validate_source_record(record, receipt_sha256=None):
     """Check both existing producers without executing their compiled outputs."""
     require(type(record) is dict and type(record.get('schema')) is int and record['schema'] == 1,
             'Unexpected LLVM RESULT schema')
@@ -120,6 +150,7 @@ def validate_source_record(record):
     require(type(record.get('install_skipped')) is int and record['install_skipped'] == 0,
             'LLVM source build contains missing/invalid install skipped count')
     dep, full, lock, pins, llvm_pin = expected_inputs()
+    pins, llvm_pin = producer_source_pins(pins, llvm_pin, receipt_sha256)
     tool = record.get('toolchain')
     require(type(tool) is dict, 'LLVM toolchain must be an object')
     # build_llvm15 writes a root profile; staged plan.accept writes it only in
@@ -195,7 +226,7 @@ def validate(prefix, result_path, expected_sha256):
     raw = result_path.read_bytes()
     require(hashlib.sha256(raw).hexdigest() == expected_sha256, 'Pinned LLVM RESULT bytes differ')
     record = json.loads(raw, object_pairs_hook=unique_object)
-    dep, profile, source_rows = validate_source_record(record)
+    dep, profile, source_rows = validate_source_record(record, expected_sha256)
     try:
         files = dep.inventory(prefix)
     except (AssertionError, OSError, RuntimeError):
@@ -246,7 +277,9 @@ def validate(prefix, result_path, expected_sha256):
     return dict(schema=1, status='LLVM_PREFIX_VERIFIED_NOT_DXMT_BUILT', result_sha256=expected_sha256,
                 profile=profile, toolchain=copy.deepcopy(record['toolchain']),
                 files=len(files), bytes=sum(row['bytes'] for row in files), architecture='arm64',
-                source_pins=len(source_rows), selected_archives=len(names), archive_objects=objects,
+                 source_pins=len(source_rows), selected_archives=len(names), archive_objects=objects,
+                 source_policy=('PINNED_LLVM_PRODUCER' if expected_sha256 == PUBLISHED_RESULT_SHA256
+                                else 'CURRENT_RECIPE'),
                 relocation='RELATIVE_ARCHIVE_DIGESTS_VERIFIED', source_execution=0, downloads=0,
                 comparison='NOT_ENABLED', stands='NOT_ENABLED', install='skipped')
 

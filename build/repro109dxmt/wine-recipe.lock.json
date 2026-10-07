@@ -1,11 +1,11 @@
 {
   "schema": 1,
-  "kit": "REPRO-109-WINE-XCODE27",
+  "kit": "REPRO-109-WINE-MAIN-CB9",
   "repository": "t0b1kent/macrunner-wine",
-  "expected_public_source_revision": "00cd5eaad9a1a4b5c3679d82edf62ce3835e9f63",
-  "changed_count": 91,
-  "changed_bytes": 2553486,
-  "revision_note": "Pinned complete sibling recipe after Xcode27 migration; source and output profiles remain explicit.",
+  "expected_public_source_revision": "cb9d08f9a429385338aaa61ba8a3127009d635d4",
+  "changed_count": 96,
+  "changed_bytes": 2612739,
+  "revision_note": "Pinned complete sibling recipe from curator-approved Wine main cb9d08f; includes all previous 91 paths and five added source-input files.",
   "files": [
     {
       "path": ".github/workflows/repro109-wine-c9-matrix-xcode27-arm64.yml",
@@ -14,8 +14,8 @@
     },
     {
       "path": ".github/workflows/repro109-wine-c9-xcode27-arm64.yml",
-      "bytes": 3205,
-      "sha256": "a9198151e69f587e5da0081a9eb3302b15dc1a56b74a9467c5901a0bd4c3733a"
+      "bytes": 5627,
+      "sha256": "be118ad698e585faf2c86eda529ad0eeb55b9be0326c7f6bfb4aef941c10849b"
     },
     {
       "path": "build/repro109/archive_safety.py",
@@ -29,23 +29,23 @@
     },
     {
       "path": "build/repro109/private_curl.py",
-      "bytes": 11352,
-      "sha256": "266055b9d94dfb30fccc3d51a24db27d8d4386a5924030e3dd7d37f7da362177"
+      "bytes": 11377,
+      "sha256": "c93fa7f20b3d2a8b58e04fae256a0192df5fa669013870bcd166f49f3aa0f86f"
     },
     {
       "path": "build/repro109/public_archive.py",
-      "bytes": 8599,
-      "sha256": "7a9eb2bf00aa699a802422548b9bb8e5146ba42cff19237f4018bcbce34b9940"
+      "bytes": 8883,
+      "sha256": "a54776c6143b17ea336e16a9ce9f43262b5b5eaec669e26524e5eedf6b92f3bb"
     },
     {
       "path": "build/repro109deps/build_deps.py",
-      "bytes": 71446,
-      "sha256": "3f038bce483170abc528d6a4ff88bda54e01b97ff8a8993249214214cf73e429"
+      "bytes": 72309,
+      "sha256": "632da7104a94b2deb936f79a370ce88c47a3ae1ec864fe070688ada4fffba797"
     },
     {
       "path": "build/repro109deps/deps.lock.json",
-      "bytes": 44083,
-      "sha256": "6234ff2dfc0c00de9487fb6be0609e90ca01189d15c17dc2e5036c4038451177"
+      "bytes": 47026,
+      "sha256": "72d0408b6b46e3cd5b82eeb111388af58d9b37950f55086c332cf96e425fceed"
     },
     {
       "path": "build/repro109deps/deps13_support.py",
@@ -64,8 +64,8 @@
     },
     {
       "path": "build/repro109deps/download-sizes.lock.json",
-      "bytes": 2572,
-      "sha256": "4f8f171daa33af993e4a95f7fd337f43cba1b30ee6e120c5e64c2c70d88e9c8c"
+      "bytes": 3717,
+      "sha256": "e8ad97392a92c556bf5890a7b3f5d1765ae00e07d6a405de94b7f0b1aaaeefbd"
     },
     {
       "path": "build/repro109deps/failure_evidence.py",
@@ -98,19 +98,29 @@
       "sha256": "d8bf3c5c32b875a1f41f73c6e55aa03cffedfb818a52bfd1183d2557d8b97b28"
     },
     {
+      "path": "build/repro109deps/preflight_sources.py",
+      "bytes": 9569,
+      "sha256": "f75577192de3ef9f6ca64887ebf8edda83a97cb53be7ad874f4670edf112430b"
+    },
+    {
+      "path": "build/repro109deps/published-archives.lock.json",
+      "bytes": 1323,
+      "sha256": "02b54b9aa586008312ac9166250e7b506c41d4fea6144d515b11e873d2397f6d"
+    },
+    {
       "path": "build/repro109deps/run_offline_tests.py",
       "bytes": 397,
       "sha256": "45ab4538866e28c98521d5d0cd73459dadbbfed89810b53ad15feff39108543b"
     },
     {
       "path": "build/repro109deps/source-routes.lock.json",
-      "bytes": 14077,
-      "sha256": "0bdba189e57d8b3d3429b8eb5196bdd35af1276f2c2f33f2fcca9bd6890b88c9"
+      "bytes": 21616,
+      "sha256": "c0936d2c95b7c97a5c21acbab1acdc2f1f70a87ad02dcc6e047c05614f6090d4"
     },
     {
       "path": "build/repro109deps/source_download.py",
-      "bytes": 7480,
-      "sha256": "9b4e8b41e255af0691f1315f45e4ba7a54537c5781d0ed93b7e6f6738306c161"
+      "bytes": 11694,
+      "sha256": "486e5f5625308aa67d1a783262226c5d59d6e26f7e5fab38c2ecba661ac28bf7"
     },
     {
       "path": "build/repro109deps/source_fixes.py",
@@ -169,8 +179,18 @@
     },
     {
       "path": "build/repro109deps/test_gnu_mirrors.py",
-      "bytes": 13695,
-      "sha256": "570edf48e0fef8991be117808ab346f3f42c9892af312f035315fe3a708f7c5e"
+      "bytes": 13725,
+      "sha256": "5f051ae50319362111c3550158afdaab6b9e18769c314bed18256a3cce238708"
+    },
+    {
+      "path": "build/repro109deps/test_preflight_sources.py",
+      "bytes": 10951,
+      "sha256": "77d54999c846d507aa8492a32dfbd6bde877f31770785894755fff027a43c271"
+    },
+    {
+      "path": "build/repro109deps/test_public_archive.py",
+      "bytes": 11161,
+      "sha256": "9dd2e77bf7ae46374db54d16c2823a66ffb3a3eef713b9992088651d40cdf2e9"
     },
     {
       "path": "build/repro109deps/test_real_source_preparation.py",
@@ -179,13 +199,13 @@
     },
     {
       "path": "build/repro109deps/test_source_download.py",
-      "bytes": 8866,
-      "sha256": "47b92f4768b61fcf965e66c3e1176eb5e97a382b6e05fd74ed5a89b33a1519be"
+      "bytes": 12485,
+      "sha256": "b914d1d54757448e2a2ea506eaa0211e726eb70d3e1cf05a95954326d46720a6"
     },
     {
       "path": "build/repro109deps/test_sourceforge_mirrors.py",
-      "bytes": 10081,
-      "sha256": "aa34b73e24e157ceccf5184640e68e602dbb51a8b3961b8ebace39dbf4d8ce52"
+      "bytes": 10083,
+      "sha256": "be336869ad609b3417d80cc15b502fb1ef6c318fcdf04d95d0584b1892ec23f1"
     },
     {
       "path": "build/repro109deps/test_xcode_wrapper.py",
@@ -204,8 +224,8 @@
     },
     {
       "path": "build/repro109moltenvk/moltenvk.lock.json",
-      "bytes": 1871,
-      "sha256": "7ecf835f6addc4478eae6e21e6043655ae0b600117c1cf54f61d6e7a90569cfb"
+      "bytes": 2015,
+      "sha256": "720e0ce9f5dbb30bec0304ad863c34df98e5feb63cd6aa17adc76d829934fc7b"
     },
     {
       "path": "build/repro109moltenvk/test_moltenvk.py",
@@ -223,9 +243,14 @@
       "sha256": "b33f95b7dbb228373cd815ca55f022713be413be299c177a82af6ec620e8ffdd"
     },
     {
+      "path": "build/repro109wine/BUILD-INPUTS.md",
+      "bytes": 2338,
+      "sha256": "4f3ac52f1f40b282812c92da42c78148f89739f3175c1c840ed23c19347da5b0"
+    },
+    {
       "path": "build/repro109wine/build_full.py",
-      "bytes": 16412,
-      "sha256": "fa2153f300a7eb3fbf393e348ba288af842b4cd93f0e19c5283f50adfc775590"
+      "bytes": 16867,
+      "sha256": "201ccb653eac6de3320088af57dc1b66d3d8f920c48718449f8f575aed124649"
     },
     {
       "path": "build/repro109wine/build_wine.py",
@@ -364,8 +389,8 @@
     },
     {
       "path": "build/repro109wine/full.lock.json",
-      "bytes": 3611,
-      "sha256": "9b7eb091c9bb926383daf3dad3cf47850e7ec927cb29a80699dc273828846bf3"
+      "bytes": 3837,
+      "sha256": "ce665dcde19664652c86a23a26c9eccaeda303743bf7f385f9dff012cc9f66c1"
     },
     {
       "path": "build/repro109wine/github-macos15.lock.json",
@@ -415,7 +440,7 @@
     {
       "path": "build/repro109wine/test_full.py",
       "bytes": 24011,
-      "sha256": "4c482f1d1adb4bf26eaf24eac7a81afd58cd22d161d1337c51912a2141bb9ba4"
+      "sha256": "5e92c931329b4bd22d9efa5fc04de3e6ba68960967f29761595aa8f525822f1a"
     },
     {
       "path": "build/repro109wine/test_github_macos15.py",
