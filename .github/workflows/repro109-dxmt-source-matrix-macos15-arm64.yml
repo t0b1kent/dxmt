@@ -36,7 +36,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: t0b1kent/macrunner-wine
-          ref: f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542
+          ref: 00cd5eaad9a1a4b5c3679d82edf62ce3835e9f63
           path: macrunner-wine
           persist-credentials: false
       - name: Select driver Python

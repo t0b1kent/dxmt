@@ -24,13 +24,13 @@ class WineLayoutTests(unittest.TestCase):
         self.here = self.directory / 'recipe'
         self.here.mkdir()
         self.rows = []
-        for number in range(87):
+        for number in range(91):
             name = 'build/owned-' + str(number) + '.py'
             target = self.root.parent / name
             raw = b'# own inert bytes\n'
             target.write_bytes(raw)
             self.rows.append(dict(path=name, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()))
-        self.lock = dict(schema=1, changed_count=87, files=self.rows)
+        self.lock = dict(schema=1, changed_count=91, files=self.rows)
         self.save()
         self.env_patch = patch.dict(os.environ, MACRUNNER_WINE_RECIPE_ROOT=str(self.root))
         self.env_patch.start()

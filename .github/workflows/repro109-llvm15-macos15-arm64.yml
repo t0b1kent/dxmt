@@ -12,7 +12,7 @@ on:
       wine_recipe_revision:
         description: Full public macrunner-wine revision containing the delivered c9 recipe
         required: true
-        default: f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542
+        default: 00cd5eaad9a1a4b5c3679d82edf62ce3835e9f63
         type: string
 
 permissions:
@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
       - name: Validate immutable sibling revision
         env:
-          WINE_RECIPE_REVISION: ${{ inputs.wine_recipe_revision || 'f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542' }}
+          WINE_RECIPE_REVISION: ${{ inputs.wine_recipe_revision || '00cd5eaad9a1a4b5c3679d82edf62ce3835e9f63' }}
         run: |
           python3 -I -B - <<'PY'
           import os, re
@@ -46,7 +46,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: t0b1kent/macrunner-wine
-          ref: ${{ inputs.wine_recipe_revision || 'f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542' }}
+          ref: ${{ inputs.wine_recipe_revision || '00cd5eaad9a1a4b5c3679d82edf62ce3835e9f63' }}
           path: macrunner-wine
           persist-credentials: false
       - name: Select pinned driver Python
@@ -72,7 +72,7 @@ jobs:
           printf 'MACRUNNER_WINE_RECIPE_ROOT=%s/macrunner-wine/build\n' "$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - name: Verify checkout and all delivered Wine recipe pins
         env:
-          WINE_RECIPE_REVISION: ${{ inputs.wine_recipe_revision || 'f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542' }}
+          WINE_RECIPE_REVISION: ${{ inputs.wine_recipe_revision || '00cd5eaad9a1a4b5c3679d82edf62ce3835e9f63' }}
         shell: bash
         run: |
           set -euo pipefail

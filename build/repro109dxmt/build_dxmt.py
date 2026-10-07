@@ -331,7 +331,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check-inputs', action='store_true')
     parser.add_argument('--build', action='store_true')
-    parser.add_argument('--profile', choices=('xcode-cloud', 'github', 'github-macos15-arm64'),
+    parser.add_argument('--profile', choices=('xcode-cloud', 'github', 'github-macos15-arm64', 'github-xcode27-arm64'),
                         default='github-macos15-arm64')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--jobs', type=int, default=4)

@@ -209,7 +209,7 @@ def main():
     parser.add_argument('--checkout', type=Path, required=True)
     parser.add_argument('--kind', choices=('native', 'pe'), required=True)
     parser.add_argument('--fetch', action='store_true')
-    parser.add_argument('--profile', choices=('xcode-cloud', 'github', 'github-macos15-arm64'),
+    parser.add_argument('--profile', choices=('xcode-cloud', 'github', 'github-macos15-arm64', 'github-xcode27-arm64'),
                         default='github-macos15-arm64')
     args = parser.parse_args()
     try:

@@ -24,7 +24,7 @@ repository at the immutable delivered recipe revision:
 
 ```sh
 git clone https://github.com/t0b1kent/macrunner-wine.git macrunner-wine
-git -C macrunner-wine checkout --detach f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542
+git -C macrunner-wine checkout --detach 00cd5eaad9a1a4b5c3679d82edf62ce3835e9f63
 export MACRUNNER_WINE_RECIPE_ROOT="$PWD/macrunner-wine/build"
 export MACRUNNER_DXMT_SOURCE_REPOSITORY="$PWD/dxmt"
 python3 -I -B dxmt/build/repro109dxmt/verify_sources.py
@@ -33,8 +33,17 @@ python3 -I -B dxmt/build/repro109dxmt/build_dxmt.py --check-inputs
 
 Python >=3.9 and Git are required for these read-only checks. No compiler or
 third-party source code runs. The sibling Wine binding verifies every one of
-the 87 delivered recipe files; neither a machine-local fallback nor a prebuilt
+the 91 delivered recipe files; neither a machine-local fallback nor a prebuilt
 engine is admitted.
+
+For source-built Wine27 inputs, select `--profile github-xcode27-arm64`
+on an ARM64 Xcode27.0/27A266a, SDK27.0 cloud machine. This exact profile
+comes from the pinned sibling Wine recipe, including deployment target14.0.
+The parent build CLI and its DirectX-Headers child accept the same profile.
+The default legacy profile remains explicit for earlier diagnostic inputs.
+Reuse the source-built LLVM15 prefix and sealed RESULT from run37567821557;
+full Wine/install, imports and composed dependencies are also mandatory.
+The Wine stage matrix alone does not provide these compiler inputs.
 
 Before a full compiler run, dispatch
 `repro109-dxmt-source-matrix-macos15-arm64.yml`. Its five separate jobs are

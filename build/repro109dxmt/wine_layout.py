@@ -15,10 +15,10 @@ def recipe_root():
     if root.is_symlink() or not root.is_dir() or root.resolve() != root:
         raise ValueError('Wine recipe root must be an existing directory without symlink components')
     lock = json.loads((HERE / 'wine-recipe.lock.json').read_bytes())
-    if lock.get('schema') != 1 or lock.get('changed_count') != 87:
+    if lock.get('schema') != 1 or lock.get('changed_count') != 91:
         raise ValueError('Unexpected delivered Wine recipe lock')
     rows = lock.get('files')
-    if type(rows) is not list or len(rows) != 87:
+    if type(rows) is not list or len(rows) != 91:
         raise ValueError('Wine recipe pin coverage differs')
     names = set()
     for row in rows:
