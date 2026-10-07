@@ -1,0 +1,553 @@
+{
+  "schema": 1,
+  "scope": "D3D11_NATIVE_SOURCE_BASIS_NOT_FULL_DXMT_BUILD",
+  "native_snapshot": {
+    "files": 336,
+    "bytes": 4013557,
+    "digest_format": "sorted relative POSIX path + NUL + SHA256 + NUL + decimal bytes + LF, UTF-8",
+    "sha256": "307f7b21cf82ef506bac546f58d4a004fb9148de3a40a35dcea34cfba830f7b9",
+    "source_recipe": "Pinned public Git blobs and exact text postimages"
+  },
+  "inputs": {
+    "basis-overlay/.github/workflows/ci.yml": {
+      "bytes": 21241,
+      "sha256": "6cec823b8c8260a74aa9f211257f2ca6a188a0377e8af7eb351841f79fe7676e"
+    },
+    "basis-overlay/build-arm64.txt": {
+      "bytes": 310,
+      "sha256": "c3bdf8d8229b62cbd86e51276def3caedc5a1af91ac3f44303f00271bf60f372"
+    },
+    "basis-overlay/dxmt.conf": {
+      "bytes": 2934,
+      "sha256": "b339c309c2b8d6b8cd85b2c01679c69bbc5cebc1ef485a593fd9bd8957cadb61"
+    },
+    "basis-overlay/include/ftl.hpp": {
+      "bytes": 1778,
+      "sha256": "33eb3a034b192ab2b3e2481d04e8c82aa04f9cce3a5691c57e7c83e28627711b"
+    },
+    "basis-overlay/include/native/windows/windows_base.h": {
+      "bytes": 11262,
+      "sha256": "15db3f29ec3e9607e01ceb4fa189ad0f36becf510fd83f961b877d856d244ff3"
+    },
+    "basis-overlay/libs/DXBCParser/BlobContainer.h": {
+      "bytes": 5457,
+      "sha256": "d3cc6060958fd1876d6ffab8eb1e935e9fb56e768f6483dedcf36a2b270ce659"
+    },
+    "basis-overlay/libs/DXBCParser/DXBCUtils.cpp": {
+      "bytes": 51212,
+      "sha256": "5ab4f5acd890792f507a8c0638700eca546b88fa6c90a804e8d6176d6034e8ed"
+    },
+    "basis-overlay/libs/DXBCParser/DXBCUtils.h": {
+      "bytes": 9221,
+      "sha256": "c4ba5d68eeb8de3aeb144ac249ef070526c0cf4326c96a5c8046a0c71ad59e3b"
+    },
+    "basis-overlay/libs/DXBCParser/ShaderBinary.h": {
+      "bytes": 50812,
+      "sha256": "9ec7d985ca40b1c365d2ec1cc64067fda6a6df7afdd2cde0eb435a483cfaa363"
+    },
+    "basis-overlay/meson.options": {
+      "bytes": 588,
+      "sha256": "f9a087d926e257a9255a872b4011730a1203f9c398999b4fab4c2753413b0223"
+    },
+    "basis-overlay/src/airconv/air_signature.cpp": {
+      "bytes": 35629,
+      "sha256": "0aa44f8fe30edd25f7dd05565373026e3760050cf222dc3ada8086abded9f19d"
+    },
+    "basis-overlay/src/airconv/air_signature.hpp": {
+      "bytes": 20763,
+      "sha256": "32a63f8721cc254c20bf860e11dc363ee69abadcec99d19f278bbcb0da8ee593"
+    },
+    "basis-overlay/src/airconv/air_type.cpp": {
+      "bytes": 4577,
+      "sha256": "0f479d0bab16e414d4919e3ac53b95fdd1de0eef6928ed1471f5656715856fae"
+    },
+    "basis-overlay/src/airconv/air_type.hpp": {
+      "bytes": 1912,
+      "sha256": "446cbdd3ed326cb6909132bffa2880ecb7ef84aeb2716e0f8f3387a577e23798"
+    },
+    "basis-overlay/src/airconv/airconv_cli.cpp": {
+      "bytes": 12618,
+      "sha256": "c28610fd3e7a35457043264ac822e8246e4439272ad71d6146e7723b4ddc9036"
+    },
+    "basis-overlay/src/airconv/airconv_public.h": {
+      "bytes": 8991,
+      "sha256": "b1c6650cad867df0d09dc807d73ab013c4a22f4799a2cd225e9a3f8a64bd67b6"
+    },
+    "basis-overlay/src/airconv/darwin/meson.build": {
+      "bytes": 1688,
+      "sha256": "297cb172b02a9fdf38f47a804224b63f7b1f6459ea081f1fed4ac77509ba22c8"
+    },
+    "basis-overlay/src/airconv/dxbc_converter.cpp": {
+      "bytes": 61158,
+      "sha256": "c80de7e03debc8832a2a5e302d0eddb54fb736ed9b4002877b4996f175086e9c"
+    },
+    "basis-overlay/src/airconv/dxbc_converter.hpp": {
+      "bytes": 16500,
+      "sha256": "33af205b128cc31bf1b4dcb3c245968445733dcf18ee7135bb037a78e0bdf814"
+    },
+    "basis-overlay/src/airconv/dxbc_converter_basicblock.cpp": {
+      "bytes": 23870,
+      "sha256": "861f94de2d862e9f94a0c47134948235c809c617d1bc780705ae732d1ed905b7"
+    },
+    "basis-overlay/src/airconv/dxbc_converter_gs.cpp": {
+      "bytes": 36086,
+      "sha256": "5ef1ea5be0358f30d88870f8076f718c16e5233972fa6a29a406f569c318b83b"
+    },
+    "basis-overlay/src/airconv/dxbc_converter_ts.cpp": {
+      "bytes": 43665,
+      "sha256": "75f7784a144b01a7701988d2eb53c3f3daf8b2cf84f011e13241c062fdceacdd"
+    },
+    "basis-overlay/src/airconv/dxbc_instructions.cpp": {
+      "bytes": 85844,
+      "sha256": "2b6532018cee013bfe9af93ba92b94c09062073a21c7a9d798bc447abbbe49ab"
+    },
+    "basis-overlay/src/airconv/dxbc_instructions.hpp": {
+      "bytes": 17521,
+      "sha256": "5a48d3e011791eef2e241416be74b3729b5b4fefd20ddc4a2eb2c13ac0521898"
+    },
+    "basis-overlay/src/airconv/dxbc_signature.cpp": {
+      "bytes": 42290,
+      "sha256": "9c7654869402b220e43ee856a483ab5711bfb97d0443573d51d0ac1e6c172476"
+    },
+    "basis-overlay/src/airconv/meson.build": {
+      "bytes": 3214,
+      "sha256": "444a223182d2604b95577386efeaff4aa776ee150c7629468a425305cb33436e"
+    },
+    "basis-overlay/src/airconv/nt/air_builder.cpp": {
+      "bytes": 63753,
+      "sha256": "afb79c4c2411184d0b8b10fd38f4ef7f9d022f8f23344a45ff908852d6fe7bac"
+    },
+    "basis-overlay/src/airconv/nt/air_builder.hpp": {
+      "bytes": 17119,
+      "sha256": "9cf7c22212db786bb2fb88f8da6bbceb918ccc5074a172aae66680e8f4760a3f"
+    },
+    "basis-overlay/src/airconv/nt/dxbc_converter_base.cpp": {
+      "bytes": 99552,
+      "sha256": "b192affbfdea0ec84fc30202ad6903e04774236861a8f7727114bc39e8f45800"
+    },
+    "basis-overlay/src/airconv/nt/dxbc_converter_base.hpp": {
+      "bytes": 16591,
+      "sha256": "8a04d713c0a2fabdd7d2e805364152092dfc6337653afba87cad075aa5aafd7b"
+    },
+    "basis-overlay/src/airconv/shaders/air_tessellation.metal": {
+      "bytes": 28308,
+      "sha256": "b83e2465b8936340a3ea7336d70949a1706e15878ffa7eb4588a3e789cc6e52b"
+    },
+    "basis-overlay/src/d3d10/d3d10_device.cpp": {
+      "bytes": 45142,
+      "sha256": "a0ea68c4cc2096edca7eba9e4e8c3f2b27efb5d64e53735bfa43625d00c57cb5"
+    },
+    "basis-overlay/src/d3d11/d3d11.cpp": {
+      "bytes": 11481,
+      "sha256": "d2d53e277695b0942ea3b489755cad8060039635f5e98623c90047909e72861e"
+    },
+    "basis-overlay/src/d3d11/d3d11_buffer.cpp": {
+      "bytes": 10884,
+      "sha256": "3dc15a51bf8a511864b92cbcf62ff034a9086c4a9e44d88c63d0d038ace0607e"
+    },
+    "basis-overlay/src/d3d11/d3d11_class_linkage.cpp": {
+      "bytes": 4645,
+      "sha256": "4fbc975bf490d10963f2b94f588427621c687c3a29332a15d8ef090641160699"
+    },
+    "basis-overlay/src/d3d11/d3d11_class_linkage.hpp": {
+      "bytes": 2112,
+      "sha256": "e1c427721c2f2926701accfedbd759862e622c9488b201b07699bad0ea01d9f3"
+    },
+    "basis-overlay/src/d3d11/d3d11_context_def.cpp": {
+      "bytes": 17764,
+      "sha256": "5ac7e4f9af36c12f8e720602546505e918e97e76949350529db5592b8981c5d1"
+    },
+    "basis-overlay/src/d3d11/d3d11_context_imm.cpp": {
+      "bytes": 24723,
+      "sha256": "3b9b65ad5dd34ddb149ee3872377e169373db18a5320e528f9f52bbfd9f9cc17"
+    },
+    "basis-overlay/src/d3d11/d3d11_context_impl.cpp": {
+      "bytes": 231075,
+      "sha256": "d4d4a98fa84d7ea6602bcf67fab139e9999d33ec0aa61cbd87ab34ed302b5a14"
+    },
+    "basis-overlay/src/d3d11/d3d11_context_state.hpp": {
+      "bytes": 9025,
+      "sha256": "6c7059bafcc46c056c9c7db6c23c2d0dd99259f0ffdab54f03d122b553cd0195"
+    },
+    "basis-overlay/src/d3d11/d3d11_device.cpp": {
+      "bytes": 56182,
+      "sha256": "804474f4c10ced44d2d40704c4b3109e72112cef6da1b3bcae66a008dd9182f8"
+    },
+    "basis-overlay/src/d3d11/d3d11_device.hpp": {
+      "bytes": 2519,
+      "sha256": "68aa7e05a9a3eb50785f9852b4cf7b9b9c500af0fbd53db4699c567d3b6fc420"
+    },
+    "basis-overlay/src/d3d11/d3d11_fence.cpp": {
+      "bytes": 7289,
+      "sha256": "6d00111a260d1f563fd077b1f292a11822484983b308bf3b4b88e92ec320a112"
+    },
+    "basis-overlay/src/d3d11/d3d11_input_layout.cpp": {
+      "bytes": 9786,
+      "sha256": "3f1fc2d96ed7e5c4996a715652f0e290160ac065586950d819ee602e0b580cc1"
+    },
+    "basis-overlay/src/d3d11/d3d11_pipeline.cpp": {
+      "bytes": 7636,
+      "sha256": "471ddb0a86be2503ba65b826a4ff79fb7f05e047e0ef39c8e7a5363ca24bd363"
+    },
+    "basis-overlay/src/d3d11/d3d11_pipeline_ts.cpp": {
+      "bytes": 7296,
+      "sha256": "b9572896fc6f8da8cb4efd544b74fa36cf63c400ef30d9a31a8470ec54575bda"
+    },
+    "basis-overlay/src/d3d11/d3d11_query.hpp": {
+      "bytes": 5707,
+      "sha256": "c6602226e5d6d840bbc125a75867894ac68ff6b094ed4347fef5a45b667b30aa"
+    },
+    "basis-overlay/src/d3d11/d3d11_resource.hpp": {
+      "bytes": 22903,
+      "sha256": "71f5d1d50c65bdaff74fc71a9d63b3c9584e21792db2f68cc7545471cec68178"
+    },
+    "basis-overlay/src/d3d11/d3d11_shader.cpp": {
+      "bytes": 17401,
+      "sha256": "8a60de6386aa7ef00d2b78c0919c68ab8a2c4706a7423f00c608d5aed9f82fc5"
+    },
+    "basis-overlay/src/d3d11/d3d11_swapchain.cpp": {
+      "bytes": 38316,
+      "sha256": "6b74450bd58671559129630986dc98b3397426f570336c23f495a580e78987b4"
+    },
+    "basis-overlay/src/d3d11/d3d11_texture_device.cpp": {
+      "bytes": 26305,
+      "sha256": "c3c43791eb83a318cd00f2ec553dd9d9cf85faefdaab7a99744aa3cadc642ac0"
+    },
+    "basis-overlay/src/d3d11/d3d11_view.hpp": {
+      "bytes": 4207,
+      "sha256": "58aa9af7c453c14291e79ddbac89d904d46414cac63c58c027174df94dc34644"
+    },
+    "basis-overlay/src/dxgi/dxgi.cpp": {
+      "bytes": 3130,
+      "sha256": "309dcf474eeb5f1a6c53a686dc5ae313bb0c2b941ff170b7e85ca7aa90041f1c"
+    },
+    "basis-overlay/src/dxgi/dxgi.def": {
+      "bytes": 136,
+      "sha256": "8bad568e7c82fdab7293dd84fc67ac2ca7b6f18da6e5b073bae2d28e9ac0de95"
+    },
+    "basis-overlay/src/dxgi/dxgi_adapter.cpp": {
+      "bytes": 9927,
+      "sha256": "38cc71f4219fb7c2ffef585c9647c0864af6044b9a6726a34763f31b26bb3622"
+    },
+    "basis-overlay/src/dxgi/dxgi_factory.cpp": {
+      "bytes": 14535,
+      "sha256": "239b2f8bfe06a44d730d46f5e1963c61dae650c3ad7698fb5137bd63302ea5e1"
+    },
+    "basis-overlay/src/dxgi/dxgi_interfaces.h": {
+      "bytes": 1049,
+      "sha256": "b1749c53c2164bcd0ffc3799580dd480f7f47f993699b5576d5b9799a311e00a"
+    },
+    "basis-overlay/src/dxgi/dxgi_output.cpp": {
+      "bytes": 20804,
+      "sha256": "707579d75d837ddf7c7069cadeddadea55e038689ea806bff30550187c6df28c"
+    },
+    "basis-overlay/src/dxgi/dxgi_resource.hpp": {
+      "bytes": 3180,
+      "sha256": "ae0ff395833d15499edd512bf7cd34ddd61d95eb1369704c066911e122dabaf9"
+    },
+    "basis-overlay/src/dxmt/dxmt_allocation.cpp": {
+      "bytes": 1792,
+      "sha256": "098d3d12713b4bf04fb8ab757ebe3de8a775dfb43e53807c473d3cfd3a48ff22"
+    },
+    "basis-overlay/src/dxmt/dxmt_allocation.hpp": {
+      "bytes": 887,
+      "sha256": "7b87791bc5b1bbbcea06d6b06963858c4e8aa3a4702459bc14db51d928ae3ed1"
+    },
+    "basis-overlay/src/dxmt/dxmt_buffer.cpp": {
+      "bytes": 5215,
+      "sha256": "e6c8634f38abf471a94def0a4586e880d4e5bed293ecf5db1261dc3cf7102214"
+    },
+    "basis-overlay/src/dxmt/dxmt_buffer.hpp": {
+      "bytes": 4671,
+      "sha256": "80e42012485bc1ea65aafbd15b9dd8c28ab07f461cf3dd39943160ac1d9f1b79"
+    },
+    "basis-overlay/src/dxmt/dxmt_command.cpp": {
+      "bytes": 26829,
+      "sha256": "ac57a91b378d2aff5e256fef68429afc95f4ad0a85c307a1399e250882ba8585"
+    },
+    "basis-overlay/src/dxmt/dxmt_command.hpp": {
+      "bytes": 11821,
+      "sha256": "a72450116910ba4cf00238ef8f2d97092a549f7a6a3d73d9727847abd539531e"
+    },
+    "basis-overlay/src/dxmt/dxmt_command.metal": {
+      "bytes": 20037,
+      "sha256": "0aa97e423e3dd298c37263a764a3b44109e9b2e2bd5ed1d8b50a15542c681b77"
+    },
+    "basis-overlay/src/dxmt/dxmt_command_queue.cpp": {
+      "bytes": 9297,
+      "sha256": "bae859703d0a08156d8d7ec9b5e24d6bc9ad9d9ba221372f02828d7025511b0b"
+    },
+    "basis-overlay/src/dxmt/dxmt_command_queue.hpp": {
+      "bytes": 8238,
+      "sha256": "56f07222b54fa4d68031c0bf49687b252544c90a86e3d145c92704e496431ae2"
+    },
+    "basis-overlay/src/dxmt/dxmt_context.cpp": {
+      "bytes": 66511,
+      "sha256": "8b279140d7203eec577360be0fc604551fdbbfe1a6d64d236a5d40b6af718a11"
+    },
+    "basis-overlay/src/dxmt/dxmt_context.hpp": {
+      "bytes": 31204,
+      "sha256": "c203a6450264f6a0b1b80f13278b041b7f696283642d2cc3da8e6eef1601126f"
+    },
+    "basis-overlay/src/dxmt/dxmt_device.cpp": {
+      "bytes": 2089,
+      "sha256": "364eea7c3333c18553887746990f3c4e7e3b79e01c2b58d51b6fcfb8becff59a"
+    },
+    "basis-overlay/src/dxmt/dxmt_format.cpp": {
+      "bytes": 50183,
+      "sha256": "b47713b56a0850aebd6e6a0968833c867d8d2d2beb804b71e56b7b377d7090a4"
+    },
+    "basis-overlay/src/dxmt/dxmt_format.hpp": {
+      "bytes": 1645,
+      "sha256": "49b908afe33f8c9859e5d543c103ebb36989065b75517fa449e7eb580cf27d80"
+    },
+    "basis-overlay/src/dxmt/dxmt_presenter.cpp": {
+      "bytes": 8990,
+      "sha256": "746f25c7237e049c050cc0e5d2ea23b87f18ae4b6251760628d7cf22156b6613"
+    },
+    "basis-overlay/src/dxmt/dxmt_shader_cache.hpp": {
+      "bytes": 1470,
+      "sha256": "953436f5eee87eadc9828d8bae68e12fdaec171bd797193a978ecf5ec7a2eed0"
+    },
+    "basis-overlay/src/dxmt/dxmt_texture.cpp": {
+      "bytes": 10808,
+      "sha256": "cd702013bab121e67d3f420bed6fc283e927c15937c0536b4ee613c1fc31ef21"
+    },
+    "basis-overlay/src/dxmt/dxmt_texture.hpp": {
+      "bytes": 7000,
+      "sha256": "81cde48c57a6a69c09c0a36e1c8ca6d10639b4355a5a4dff3e61928e88f096c9"
+    },
+    "basis-overlay/src/dxmt/meson.build": {
+      "bytes": 1085,
+      "sha256": "758e9848c4eac532628d1b275b328d833e465c6c176aa9a0659894643a145e81"
+    },
+    "basis-overlay/src/meson.build": {
+      "bytes": 278,
+      "sha256": "1a1aecb1c44d177de003d2c5d1cbf73883a66b1553765a47f90b084db5a4a9e8"
+    },
+    "basis-overlay/src/util/com/com_guid.cpp": {
+      "bytes": 2128,
+      "sha256": "3bbec9cf6635152ea5dfe1c029465593ba4f36bef591b0bf789026e3b4e24dca"
+    },
+    "basis-overlay/src/util/com/com_private_data.cpp": {
+      "bytes": 3734,
+      "sha256": "09f1060271cdb4e935400e193d6c3d1edce0dfe963eb1796cf1e0524f80e52d7"
+    },
+    "basis-overlay/src/util/com/com_private_data.hpp": {
+      "bytes": 2335,
+      "sha256": "c0f3cf8ba756dfd629c69293616cc9f9cf02ec56c8fa634762285772db0a9695"
+    },
+    "basis-overlay/src/util/instr.cpp": {
+      "bytes": 3540,
+      "sha256": "4b3d7ebc6dca26fc04a32637efd6d263b4501b766e1396652d6fd3263ac29f05"
+    },
+    "basis-overlay/src/util/instr.hpp": {
+      "bytes": 1576,
+      "sha256": "a6969353c58ab3cfcdcfcc47fde1af40d289e996e7003ca12d55aed5b702673b"
+    },
+    "basis-overlay/src/util/log/log.cpp": {
+      "bytes": 4479,
+      "sha256": "adcaf99ca26208cf99985ffba7b926a3c38f4ad9eba10589277c4cb6030a5b3a"
+    },
+    "basis-overlay/src/util/meson.build": {
+      "bytes": 903,
+      "sha256": "485563012251d1d4a24cfacd0c8b2505bee0c73833f3fbcb8de8a094f9f71520"
+    },
+    "basis-overlay/src/util/sha1/sha1_util.hpp": {
+      "bytes": 1768,
+      "sha256": "d80f40ac7c955edeccf260c34bee3638760d2b2d4096752d258e2e3ab39c436e"
+    },
+    "basis-overlay/src/util/util_bit.hpp": {
+      "bytes": 11752,
+      "sha256": "d5e3b46013900e654a93128f1a14c1af6a7e14a3cce65dd3f523e260631ec74f"
+    },
+    "basis-overlay/src/util/util_cpu_fence.hpp": {
+      "bytes": 2081,
+      "sha256": "d082e01143138b5de91bc3d8cd753e7068a87aa3f3e55ecb4acb13ad680379c0"
+    },
+    "basis-overlay/src/util/util_d3dkmt.h": {
+      "bytes": 15551,
+      "sha256": "ead8d22c19c503daa8af44ba8c10fcbf831f11c68cc160b3cafe6ce654fd31cf"
+    },
+    "basis-overlay/src/winemetal/Metal.hpp": {
+      "bytes": 31165,
+      "sha256": "61e60f358d5dd95803f3738bbe2665ef5c8a0b504506ec9e792c105bc8e7e5f6"
+    },
+    "basis-overlay/src/winemetal/main.c": {
+      "bytes": 575,
+      "sha256": "0c463d1ea481516e252c750c25e5831018b230e01df97622da7184effbfb0fcb"
+    },
+    "basis-overlay/src/winemetal/unix/meson.build": {
+      "bytes": 1512,
+      "sha256": "4e76d35b8b6346e12fa38c09fffb26e6c388fd65690e45e648ad4cdded3cbc03"
+    },
+    "basis-overlay/src/winemetal/unix/winemetal_unix.c": {
+      "bytes": 130566,
+      "sha256": "e7f23ef86a79cb0569e9d509a8b4698cee5cc78c9241b7828fd56e58b7d1e4f1"
+    },
+    "basis-overlay/src/winemetal/winemetal.h": {
+      "bytes": 57074,
+      "sha256": "dd39e315af66d93803b9910a8b66a4f265cafc2573ccee3218480b53d2544341"
+    },
+    "basis-overlay/src/winemetal/winemetal_thunks.c": {
+      "bytes": 33575,
+      "sha256": "7fba7a5a57e8a4f96c41c15c69c24655ab625a36dc6cdc39d215daa0ef85f6c1"
+    },
+    "basis-overlay/src/winemetal/winemetal_thunks.h": {
+      "bytes": 7785,
+      "sha256": "d0b5db5b041f057fef934b204c77b77b6094c027c2d9b88ef024357babfdd6e9"
+    },
+    "basis-overlay/tests/dx11/dx11_headless_smoke.cpp": {
+      "bytes": 409381,
+      "sha256": "161e89d32e34897dd4579c6bc0047228ab99031d387b04ce1ac7614e13d8adbc"
+    },
+    "basis-overlay/tests/dx11/dx11_hk_present_probe.cpp": {
+      "bytes": 8555,
+      "sha256": "6cab4cb6ff38644b8122953443b26fecdfcc897be0bfa4eb1f6b0cbd45b5acc3"
+    },
+    "basis-overlay/tests/dx11/meson.build": {
+      "bytes": 1034,
+      "sha256": "2619ac6d5f9df4996e326c86a220392e51c750bc97ee4947b3f0afab0cd29884"
+    },
+    "dxmt-worktree-changes.patch": {
+      "bytes": 294984,
+      "sha256": "318d2aefb325fed6d489ccc5dc265f186281dc4b141a2e55fec54648c551b631"
+    },
+    "native-overlay/winemetal.h": {
+      "bytes": 60346,
+      "sha256": "f555b9f449dc04f9f89dba800047125df506186934a310ef77d92c2285628c32"
+    },
+    "native-overlay/winemetal_thunks.h": {
+      "bytes": 7900,
+      "sha256": "e659e77361ca60ede09ef79983e1d53ef6c588c6c5a96d3b4d690ac61d9432e3"
+    },
+    "pe-overlay/patches/0001-macr-apple-silicon-llvm15-link.patch": {
+      "bytes": 638,
+      "sha256": "b9adad8951d4886478425115ebe610ff5bdb844a4059fee3a5c227fda16998da"
+    },
+    "pe-overlay/src/d3d11/d3d11_drawtrace_totals.hpp": {
+      "bytes": 419,
+      "sha256": "0cb2427078277b0fc7923fc047a67f64e679011c0bca3d74da77e9aec3d46068"
+    },
+    "pe-overlay/src/d3d11/d3d11_vscb_dump.hpp": {
+      "bytes": 4083,
+      "sha256": "3169a32ddecefe758d8bf4b2589de2c391e4e1c928ae7b3cefb53720abf4f3c9"
+    },
+    "pe-overlay/tests/dx11/dx11_blend_write_probe.cpp": {
+      "bytes": 7212,
+      "sha256": "9648d95ba7ed35ab40eab3ca7e4710b9880ae7736a149cfb12972684a14136c2"
+    },
+    "pe-overlay/tests/dx11/fragment_output_magenta.metal": {
+      "bytes": 259,
+      "sha256": "4aa1067035e2ba565cdd71b1d13d2421302b27968e878918bb8124b0d2693005"
+    },
+    "pe-overlay/tests/dx9/dx9_present_probe.cpp": {
+      "bytes": 11444,
+      "sha256": "09903ed2707fb01d1a843032b07f0534d0db50da576b36f7acebd117093d6280"
+    },
+    "pe-overlay/tests/dx9/meson.build": {
+      "bytes": 227,
+      "sha256": "260410bcdf9cdec74d0553f28b0fcbff46823b3209a324ba168c035eb8e54369"
+    },
+    "winemetal-display-cache.c": {
+      "bytes": 256139,
+      "sha256": "4bdc2f1d7f79c759e6f907be2c6839a1e84a17f1745ea037f084b6bd2daea637"
+    },
+    "winemetal-r2.c": {
+      "bytes": 251491,
+      "sha256": "0da6c78b5c9abf6edff567ad2dd7b50c3b756e0ee1a6c89d107bd3bb5d141db7"
+    }
+  },
+  "pe_snapshot": {
+    "files": 343,
+    "bytes": 4139907,
+    "sha256": "1e7d90051064cf203f800a8580601b5d72e82ef3e6ed4d99e21ccfba3594794c",
+    "submodules_included": false,
+    "recipe": "336 archive files + exact patch of 25 files + 7 untracked files"
+  },
+  "historical_version": {
+    "tag": "1226f44",
+    "version_h_sha256": "fbe21f2dff73902a3821e6f539af01add0616f3a1f8808cb520292a22fbf27b2",
+    "observed_builds": [
+      "dxmt-aarch64-hk-present",
+      "dxmt-aarch64",
+      "dxmt-x86_64"
+    ],
+    "configure_policy": "Replace git describe in a prepared build source copy with an explicit version command before Meson; preserve sealed source trees."
+  },
+  "base": {
+    "revision": "1226f44e2a26fa9c61191ee67af2b02c6e8ea1f8",
+    "origin": "Exact source basis reconstructed from pinned public Git and text postimages"
+  },
+  "native_overlays": [
+    {
+      "path": "src/winemetal/unix/winemetal_unix.c",
+      "source": "inputs/winemetal-r2.c",
+      "sha256": "0da6c78b5c9abf6edff567ad2dd7b50c3b756e0ee1a6c89d107bd3bb5d141db7"
+    },
+    {
+      "path": "src/winemetal/winemetal.h",
+      "revision": "5e085837b2969509862c4b47d541607ad8bd6332",
+      "sha256": "f555b9f449dc04f9f89dba800047125df506186934a310ef77d92c2285628c32",
+      "source": "inputs/native-overlay/winemetal.h"
+    },
+    {
+      "path": "src/winemetal/winemetal_thunks.h",
+      "revision": "5e085837b2969509862c4b47d541607ad8bd6332",
+      "sha256": "e659e77361ca60ede09ef79983e1d53ef6c588c6c5a96d3b4d690ac61d9432e3",
+      "source": "inputs/native-overlay/winemetal_thunks.h"
+    }
+  ],
+  "external_source_pins": [
+    {
+      "name": "llvm15",
+      "version": "15.0.7",
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-15.0.7/llvm-project-15.0.7.src.tar.xz",
+      "sha256": "8b5fcb24b4128cf04df1b0b9410ce8b1a729cb3c544e6da885d234280dedeac6",
+      "pin_origin": "installed formula source metadata, actual archive not downloaded or verified here"
+    },
+    {
+      "name": "mingw-directx-headers",
+      "repository": "https://github.com/misyltoad/mingw-directx-headers.git",
+      "revision": "9df86f2341616ef1888ae59919feaa6d4fad693d",
+      "pin_origin": "engine/dxmt Git tree at 5e085837; source files omitted from archive"
+    },
+    {
+      "name": "nvapi",
+      "repository": "https://github.com/NVIDIA/nvapi.git",
+      "revision": "d08488fcc82eef313b0464db37d2955709691e94",
+      "pin_origin": "engine/dxmt Git tree at 5e085837; default feature disabled, not a mandatory build input"
+    }
+  ],
+  "accepted_native_targets": [
+    {
+      "path": "wine/lib/wine/aarch64-unix/winemetal.so",
+      "sha256": "f97a4f0de88b4e56f2b69fe06eced644222bd7e6870e9c17bd5e8867d12e50eb",
+      "source_basis": "native-source; fresh link inputs still required"
+    },
+    {
+      "path": "graphics/aarch64-unix/winemetal.so",
+      "sha256": "e102a112cc67397f2d4c494e12bbcc112e34f0dda3d126d6829cc72b910011e6",
+      "source_basis": "UNRESOLVED; do not replace with the other variant"
+    }
+  ],
+  "historical_comparison": {
+    "classification": "STATIC_OPCODE_SHAPE_ONLY",
+    "functions": 85223,
+    "normalized_equal": 85223,
+    "reused_link_inputs": 7,
+    "semantic_or_ABI_equality": "NOT_ENABLED",
+    "full_source_rebuild": "NOT_ENABLED"
+  },
+  "limits": [
+    "Native snapshot is a separately pinned historical native basis. It is not the PE tree reconstructed from the three original release inputs.",
+    "The cache candidate is retained as a separate input and is not selected by the r2 native snapshot.",
+    "LLVM, AIR, DXBC, cache, Wine and remaining link dependencies must be rebuilt before any full source claim."
+  ],
+  "public_source": {
+    "repository": "https://github.com/t0b1kent/dxmt.git",
+    "revision": "ff18f9381c411401087fb5ea474a682d72f02605",
+    "tree": "530bb92064133126e968b997f425d309ccbd761c",
+    "basis_lock_sha256": "b0368896336aeeab3aad77018b02a8d37a01247ecda737acc209e105f9eb0cc0"
+  }
+}

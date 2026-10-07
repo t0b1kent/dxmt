@@ -1,0 +1,620 @@
+{
+  "schema": 1,
+  "kit": "REPRO-109-WINE-C9-GITHUB",
+  "repository": "t0b1kent/macrunner-wine",
+  "expected_public_source_revision": "f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542",
+  "changed_count": 87,
+  "changed_bytes": 2534452,
+  "files": [
+    {
+      "path": ".github/workflows/repro109-wine-c9-macos15-arm64.yml",
+      "target": ".github/workflows/repro109-wine-c9-macos15-arm64.yml",
+      "bytes": 3405,
+      "sha256": "d455cf234ac5bc0b4836398689517d094164d52c14418a014608cd3969bff37a",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109/archive_safety.py",
+      "target": "build/repro109/archive_safety.py",
+      "bytes": 3451,
+      "sha256": "3a13e7c6a335a2e6cbf282e2c755a7caed0000720fd719cf2b282f5473355305",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109/fex64.lock.json",
+      "target": "build/repro109/fex64.lock.json",
+      "bytes": 14174,
+      "sha256": "46f2adebeeb5fe301735d7131d092ad67c9203f1e68b96c65ae42380f732e1ee",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109/private_curl.py",
+      "target": "build/repro109/private_curl.py",
+      "bytes": 11352,
+      "sha256": "266055b9d94dfb30fccc3d51a24db27d8d4386a5924030e3dd7d37f7da362177",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109/public_archive.py",
+      "target": "build/repro109/public_archive.py",
+      "bytes": 8599,
+      "sha256": "7a9eb2bf00aa699a802422548b9bb8e5146ba42cff19237f4018bcbce34b9940",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/build_deps.py",
+      "target": "build/repro109deps/build_deps.py",
+      "bytes": 71446,
+      "sha256": "3f038bce483170abc528d6a4ff88bda54e01b97ff8a8993249214214cf73e429",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/deps.lock.json",
+      "target": "build/repro109deps/deps.lock.json",
+      "bytes": 44083,
+      "sha256": "6234ff2dfc0c00de9487fb6be0609e90ca01189d15c17dc2e5036c4038451177",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/deps13_support.py",
+      "target": "build/repro109deps/deps13_support.py",
+      "bytes": 1359,
+      "sha256": "4f59693d64bdd6a3b601ea406d88d95cdf2d572012f0a0df24ec7fe8b3273c74",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/deps14_support.py",
+      "target": "build/repro109deps/deps14_support.py",
+      "bytes": 1418,
+      "sha256": "6349ac9b9e8fd9dca0e4e5faa91dee68d79a424f1e6e9c2f43fe80cd6b18eff2",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/deps9_support.py",
+      "target": "build/repro109deps/deps9_support.py",
+      "bytes": 6680,
+      "sha256": "6c1a7e86718fbae563cbd15c933db3040ca6e1442d1400409344ea27dfaca0ce",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/download-sizes.lock.json",
+      "target": "build/repro109deps/download-sizes.lock.json",
+      "bytes": 2572,
+      "sha256": "4f8f171daa33af993e4a95f7fd337f43cba1b30ee6e120c5e64c2c70d88e9c8c",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/failure_evidence.py",
+      "target": "build/repro109deps/failure_evidence.py",
+      "bytes": 5137,
+      "sha256": "96a3593f3ca761b056ff04479779f31c743d72b62b32755d18770cf14dcfcbd4",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/fixtures/COPYING.GPLv3",
+      "target": "build/repro109deps/fixtures/COPYING.GPLv3",
+      "bytes": 35149,
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/fixtures/gnutls-common-3.8.13.sh",
+      "target": "build/repro109deps/fixtures/gnutls-common-3.8.13.sh",
+      "bytes": 6244,
+      "sha256": "e226f6018152a846f0bb5b5d67bde9b29ce135edef5bae93d91f590748dead7e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/native_timeout.py",
+      "target": "build/repro109deps/native_timeout.py",
+      "bytes": 1435,
+      "sha256": "73277515bc81843d117aa752c70b388870e0406126328f0cb7344fafa3e06a92",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/optional-ccache.lock.json",
+      "target": "build/repro109deps/optional-ccache.lock.json",
+      "bytes": 5730,
+      "sha256": "76faad689d26ab49f3e8abd617b9b36ce25faf1d94a9789bb28e483318345d2f",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/port_probe.py",
+      "target": "build/repro109deps/port_probe.py",
+      "bytes": 7337,
+      "sha256": "d8bf3c5c32b875a1f41f73c6e55aa03cffedfb818a52bfd1183d2557d8b97b28",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/run_offline_tests.py",
+      "target": "build/repro109deps/run_offline_tests.py",
+      "bytes": 397,
+      "sha256": "45ab4538866e28c98521d5d0cd73459dadbbfed89810b53ad15feff39108543b",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/source-routes.lock.json",
+      "target": "build/repro109deps/source-routes.lock.json",
+      "bytes": 14077,
+      "sha256": "0bdba189e57d8b3d3429b8eb5196bdd35af1276f2c2f33f2fcca9bd6890b88c9",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/source_download.py",
+      "target": "build/repro109deps/source_download.py",
+      "bytes": 7480,
+      "sha256": "9b4e8b41e255af0691f1315f45e4ba7a54537c5781d0ed93b7e6f6738306c161",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/source_fixes.py",
+      "target": "build/repro109deps/source_fixes.py",
+      "bytes": 7146,
+      "sha256": "cf406e73da199481f76f6478da507285cc11fd1259d2e1df081cd15908b8ed43",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_deps.py",
+      "target": "build/repro109deps/test_deps.py",
+      "bytes": 13599,
+      "sha256": "fc15b461fd5a58a03c999bcdec7794c0da8a6c690dac61083bf51c494ef416be",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_deps10.py",
+      "target": "build/repro109deps/test_deps10.py",
+      "bytes": 8787,
+      "sha256": "fdde5314be13bc9c0a2a8be096a863d62179f271b278853ab1c5b36d9dc4632b",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_deps11_transport.py",
+      "target": "build/repro109deps/test_deps11_transport.py",
+      "bytes": 9128,
+      "sha256": "11fb2e49859c97a39932db9bf28d0adfba04ff594b3ba6bfe77bf6107060b00a",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_deps12.py",
+      "target": "build/repro109deps/test_deps12.py",
+      "bytes": 8825,
+      "sha256": "4370886a37e39ae6a7d8468b68d45164480d24c4ce60442da931eb095c76a103",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_deps13.py",
+      "target": "build/repro109deps/test_deps13.py",
+      "bytes": 7508,
+      "sha256": "07a74462996ae90fce0443ff450a341b18f48f53f2e69ebab1d3f6e410b819d3",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_deps14.py",
+      "target": "build/repro109deps/test_deps14.py",
+      "bytes": 8208,
+      "sha256": "5191f8678aa844a6af1444e7c24a60c4a37c10e6e76f942c81d2c13da0ae7185",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_deps8.py",
+      "target": "build/repro109deps/test_deps8.py",
+      "bytes": 5731,
+      "sha256": "1d5802e17c32c4fc0fa631cc9af3d7645967728f9cbfd41486941078fc999d11",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_deps9.py",
+      "target": "build/repro109deps/test_deps9.py",
+      "bytes": 9837,
+      "sha256": "3378dd109bb01259754e95e24c1a61c7d158ff0407cee4bcb1afe86d09fbb267",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_dry_run.py",
+      "target": "build/repro109deps/test_dry_run.py",
+      "bytes": 12825,
+      "sha256": "7046f7c377d3835a67c9a2777983ee4a11d5f508a15bb1bd4c08c6d1c50c2b9b",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_failure_diagnostics.py",
+      "target": "build/repro109deps/test_failure_diagnostics.py",
+      "bytes": 3736,
+      "sha256": "c109748b8875160ee06e11bdf02c6c8009d9176b309e6cb39c136159036d0268",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_gnu_mirrors.py",
+      "target": "build/repro109deps/test_gnu_mirrors.py",
+      "bytes": 13695,
+      "sha256": "570edf48e0fef8991be117808ab346f3f42c9892af312f035315fe3a708f7c5e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_real_source_preparation.py",
+      "target": "build/repro109deps/test_real_source_preparation.py",
+      "bytes": 8753,
+      "sha256": "305829d53ffed5664beb356efc39c2e82d456fbf41a0a5979dc1f58f1cc320bd",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_source_download.py",
+      "target": "build/repro109deps/test_source_download.py",
+      "bytes": 8866,
+      "sha256": "47b92f4768b61fcf965e66c3e1176eb5e97a382b6e05fd74ed5a89b33a1519be",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_sourceforge_mirrors.py",
+      "target": "build/repro109deps/test_sourceforge_mirrors.py",
+      "bytes": 10081,
+      "sha256": "aa34b73e24e157ceccf5184640e68e602dbb51a8b3961b8ebace39dbf4d8ce52",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/test_xcode_wrapper.py",
+      "target": "build/repro109deps/test_xcode_wrapper.py",
+      "bytes": 6149,
+      "sha256": "a9e0ff9784d27751a11a74372c4e23e890126f5cdc8ea0a5350ca6bb610ce3ba",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109deps/xcode-cloud.lock.json",
+      "target": "build/repro109deps/xcode-cloud.lock.json",
+      "bytes": 480,
+      "sha256": "a417b08cdbfd879628a6792999fb957125a4ed89e3a1fac8fb0c2d04730bbb72",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109moltenvk/build_moltenvk.py",
+      "target": "build/repro109moltenvk/build_moltenvk.py",
+      "bytes": 24188,
+      "sha256": "d9c2770dbe034dfb0bb84d02395402e40471a831bc2df9d7b63130e2d176e317",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109moltenvk/moltenvk.lock.json",
+      "target": "build/repro109moltenvk/moltenvk.lock.json",
+      "bytes": 1871,
+      "sha256": "7ecf835f6addc4478eae6e21e6043655ae0b600117c1cf54f61d6e7a90569cfb",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109moltenvk/test_moltenvk.py",
+      "target": "build/repro109moltenvk/test_moltenvk.py",
+      "bytes": 13385,
+      "sha256": "ae1c8df9d6d1eaaa9be2fc285d0dc1a33e4be90cc942600ece778891f4acd2c3",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109moltenvk/test_moltenvk_transport.py",
+      "target": "build/repro109moltenvk/test_moltenvk_transport.py",
+      "bytes": 5158,
+      "sha256": "d8294cf60943c67fac668ba2151472c5e0e22086c178cab52cf1f546edeb59d8",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/BUILD-GITHUB-WINE.md",
+      "target": "build/repro109wine/BUILD-GITHUB-WINE.md",
+      "bytes": 4655,
+      "sha256": "7cf2072bc8b95ac6d808f012da0548a62654a23f3b88068c1178589a84f7e30e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/build_full.py",
+      "target": "build/repro109wine/build_full.py",
+      "bytes": 16215,
+      "sha256": "94aea3bc6a36ace80b920cba6ff0ab3091f40e7cdde329a31010e7a761280acc",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/build_wine.py",
+      "target": "build/repro109wine/build_wine.py",
+      "bytes": 33699,
+      "sha256": "3c3d25ffca8db6aa8842a6818fda8cd0f3e88165e9f6d7b37274524d768c6aed",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/check-arm64ec-dist.py",
+      "target": "build/repro109wine/check-arm64ec-dist.py",
+      "bytes": 8404,
+      "sha256": "b9a00a75e80341717ea39aad6d85d93b1e72c9e5ece63bd87bd14c540cafbad9",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/check-build-srcdir.sh",
+      "target": "build/repro109wine/check-build-srcdir.sh",
+      "bytes": 2654,
+      "sha256": "ac378727521764ad407f4276443b3411a5cf31c4a3f0fe4b13b54a57407299e4",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/header-sources-108-Makefile.in",
+      "target": "build/repro109wine/fixtures/header-sources-108-Makefile.in",
+      "bytes": 18784,
+      "sha256": "ff23e01a4d6b80ee8b75f369db2e2cfafe23829826e9d614c135480fb7f4724f",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/header-sources-108-arm64_memmove.h",
+      "target": "build/repro109wine/fixtures/header-sources-108-arm64_memmove.h",
+      "bytes": 3422,
+      "sha256": "700f78754a02e9c8b21645bd6f7d9131653e4301ca99d3b60e03d346134a1952",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/keyboard109-base-cocoa_app.m",
+      "target": "build/repro109wine/fixtures/keyboard109-base-cocoa_app.m",
+      "bytes": 133046,
+      "sha256": "8f06b3d9c749d86b6393c89fdf2ea04846257d874388342f86e4b7e685b6730c",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-arm64_memmove.h",
+      "target": "build/repro109wine/fixtures/release108-arm64_memmove.h",
+      "bytes": 3422,
+      "sha256": "700f78754a02e9c8b21645bd6f7d9131653e4301ca99d3b60e03d346134a1952",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/ntdll/unix/pe32-av-probe-output.h",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/ntdll/unix/pe32-av-probe-output.h",
+      "bytes": 1342,
+      "sha256": "57f22bcf0778a5187c2a95df50e9d8f339cd5f5484de0b01bdf328cd2f087d50",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/ntdll/unix/sync.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/ntdll/unix/sync.c",
+      "bytes": 157946,
+      "sha256": "bea7e02958d9e8543273962dd97e5182ee8c069a29bcaab47e05899bace40f65",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/ntdll/unix/system.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/ntdll/unix/system.c",
+      "bytes": 172180,
+      "sha256": "0c5f4e95bdcc63639e533247b82f03d3c087e948d5a7bba4d783afafa082a87d",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/ntdll/unix/thread.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/ntdll/unix/thread.c",
+      "bytes": 126296,
+      "sha256": "e222dc33e92bcd4c91fd6772377c91205f1a66999d3390625b7d804c2c3a9269",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/win32u/dce.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/win32u/dce.c",
+      "bytes": 87473,
+      "sha256": "daa71dc17d9a60433e67ff6963469c776b46d8e1dc744bec7193d14e7be788c3",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/win32u/win32u_private.h",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/win32u/win32u_private.h",
+      "bytes": 21808,
+      "sha256": "d74ae56ebf8d5087f1f9e0943d4c656cd71c0da70643b6d09b69925aa2c4c084",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/win32u/window.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/win32u/window.c",
+      "bytes": 229456,
+      "sha256": "364152cb94c785f17f0bd31b38debe3080440da99a4c76d1e43e01a4525eea4e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64/file.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64/file.c",
+      "bytes": 45904,
+      "sha256": "dd9a6da6ae66b4e484b26e938a086dc10685666b34397db10fb76c7e27ecc5bf",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64/process.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64/process.c",
+      "bytes": 50423,
+      "sha256": "ea01bc625bc0cf9b07442fdd17c9c367f8f3af5410da3e6ba63e9654ba1c0c2e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64/sync.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64/sync.c",
+      "bytes": 64673,
+      "sha256": "90d93f937b9d9460bbde9401c7caa7eaee72487ec9571981220d85e6187cbb02",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64/syscall.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64/syscall.c",
+      "bytes": 201224,
+      "sha256": "7d300a1fcf6efde3cbd37ab7a1d626a8733811bdf6fb6901715bf7269d69a964",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64/virtual.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64/virtual.c",
+      "bytes": 56030,
+      "sha256": "08ca7d2f27e9f7cfd64cabc67dc687756038eba385d97e6173b9095e139bd6f4",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64/wow64.spec",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64/wow64.spec",
+      "bytes": 1089,
+      "sha256": "b855d9b9806db9222b36a685624c02627eba8c3f857fb00fc47604161b1659cd",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64/wow64_private.h",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64/wow64_private.h",
+      "bytes": 16428,
+      "sha256": "388e2f31f20d6ac7cb1bd190f98e729c8591d3f746995f06074e507c60f0292e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64win/gdi.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64win/gdi.c",
+      "bytes": 99035,
+      "sha256": "376d85607d2349ce86bce3d3094e94c2322de51f2db24885b73c07cc253f560e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/dlls/wow64win/user.c",
+      "target": "build/repro109wine/fixtures/release108-base/dlls/wow64win/user.c",
+      "bytes": 173814,
+      "sha256": "adf228050b166631db4c6eaf24e300da7bd95954903f761ceaa795c510e512b1",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-base/programs/wineboot/wineboot.c",
+      "target": "build/repro109wine/fixtures/release108-base/programs/wineboot/wineboot.c",
+      "bytes": 67500,
+      "sha256": "2446fb0e0ecdb0a3a8327f6936535b11c702ede31e4816c200bb56d596fbed83",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-include-Makefile.in",
+      "target": "build/repro109wine/fixtures/release108-include-Makefile.in",
+      "bytes": 18808,
+      "sha256": "816469298a7d0ed66d20ff07b8bc48f6f944001cb6d9d0d7d12560cb7d95c652",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/release108-string.c",
+      "target": "build/repro109wine/fixtures/release108-string.c",
+      "bytes": 87561,
+      "sha256": "d9d80677fa628daa0340809ffe98c22724688d1223fd381f3d4d89501eadd0ac",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/fixtures/wine_info.plist.in",
+      "target": "build/repro109wine/fixtures/wine_info.plist.in",
+      "bytes": 1054,
+      "sha256": "222e2ea91b09c6130172b3f4200aaf2ed145d7001396a763ab1d43a784c1b4bd",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/full.lock.json",
+      "target": "build/repro109wine/full.lock.json",
+      "bytes": 3400,
+      "sha256": "7a587bcd08dc51026d32f04342eacce5782a03646e94f5149ec816dc4facc8d0",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/github-macos15.lock.json",
+      "target": "build/repro109wine/github-macos15.lock.json",
+      "bytes": 1501,
+      "sha256": "eb29cff86b28659b42ee404887510874f42ce239c6d65ed84473fdc101171bcf",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/keyboard109.lock.json",
+      "target": "build/repro109wine/keyboard109.lock.json",
+      "bytes": 868,
+      "sha256": "3da62337b5590e0b7f086741a76fc861713c25f63925d37556903a17966b4141",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/large_files.py",
+      "target": "build/repro109wine/large_files.py",
+      "bytes": 8953,
+      "sha256": "1184dc2e7c75632878610fe741a3431cad3396c3397bf537d0ea90032193ca41",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/late/0097-winemac-keyboard-ascii.patch",
+      "target": "build/repro109wine/late/0097-winemac-keyboard-ascii.patch",
+      "bytes": 2560,
+      "sha256": "0d5ea043c78fd408cb85d6688a98df28600ba929eb7d22cc92ab201dafe39a12",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/late_source.py",
+      "target": "build/repro109wine/late_source.py",
+      "bytes": 3127,
+      "sha256": "5036b1735b15f6a290bd10c4558b033d641cf48f4ad4f9ca362a457d969e7a95",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_build_paths.py",
+      "target": "build/repro109wine/test_build_paths.py",
+      "bytes": 4536,
+      "sha256": "5ebf8cc4939c34fc8084e0e08b8edcdf6e8f4d712c8848304037675f4546014e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_compiler_transport.py",
+      "target": "build/repro109wine/test_compiler_transport.py",
+      "bytes": 7314,
+      "sha256": "66f170b41053fa0d109b183137ff2abf15a42b90d6aa3cd018e3e05c5a82364b",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_full.py",
+      "target": "build/repro109wine/test_full.py",
+      "bytes": 24011,
+      "sha256": "c95d6d6754503bed9b300bf15aa980f0df0866d459b26c8298a6b52aa558f71f",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_github_macos15.py",
+      "target": "build/repro109wine/test_github_macos15.py",
+      "bytes": 4445,
+      "sha256": "2a9590fbe4e93c1ba1e5bf00613c8bcc6ee4c66593a747be9f67d9d5dcec6664",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_large_files.py",
+      "target": "build/repro109wine/test_large_files.py",
+      "bytes": 8750,
+      "sha256": "e8e9ed00bc47a3fd33228e466b467b89661839548764d9c8e55f9e19bfd69994",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_late_source.py",
+      "target": "build/repro109wine/test_late_source.py",
+      "bytes": 4300,
+      "sha256": "8778e12edd172f87225ce396e69dbb71155fdbb2572a7d58902c5e2faabb1e6e",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_loader_game_mode.py",
+      "target": "build/repro109wine/test_loader_game_mode.py",
+      "bytes": 4540,
+      "sha256": "542da09df3e5c6659c75fff28bfd90ed96722997b57612acaa99db35085c8d18",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_public_cloud.py",
+      "target": "build/repro109wine/test_public_cloud.py",
+      "bytes": 7101,
+      "sha256": "4be1bad4ba802455265d234163f7a8552ecf0c1a7a6071320409bbdd36b4ab9f",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_release_base.py",
+      "target": "build/repro109wine/test_release_base.py",
+      "bytes": 4659,
+      "sha256": "d6256607a497c72c2bff3212cba0b2cf1e4ca5d28127e4d19e250eb0e15a79d3",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/test_xcode_wrapper.py",
+      "target": "build/repro109wine/test_xcode_wrapper.py",
+      "bytes": 5878,
+      "sha256": "59f45cfff118bc4b244f5f569cdfa24cd11022ae9e5dcc0cb4fb9d09161be5c6",
+      "expected_old": "ABSENT"
+    },
+    {
+      "path": "build/repro109wine/wine.lock.json",
+      "target": "build/repro109wine/wine.lock.json",
+      "bytes": 94683,
+      "sha256": "05a66acaa8d9cd1d431740dfd7172373e8ffba42c26f14e10c98011125542b3f",
+      "expected_old": "ABSENT"
+    }
+  ],
+  "revision_note": "Reissued after curator privacy return 2026-10-07; private source locations have no defaults; prior manifest preserved separately."
+}

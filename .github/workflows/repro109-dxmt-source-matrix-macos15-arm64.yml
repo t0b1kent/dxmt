@@ -1,0 +1,97 @@
+name: REPRO-109 DXMT independent source prerequisites
+
+on:
+  push:
+    branches: [macrunner-d3d12]
+    paths:
+      - 'build/repro109dxmt/**'
+      - '.github/workflows/repro109-dxmt-source-matrix-macos15-arm64.yml'
+      - '.github/workflows/repro109-llvm15-macos15-arm64.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: repro109-dxmt-source-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  source:
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        axis: [native-source, pe-source, directx-headers, llvm-source, toolchain]
+    steps:
+      - name: Checkout DXMT recipe and immutable Git source basis
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: dxmt
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout pinned public Wine recipe
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: t0b1kent/macrunner-wine
+          ref: f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542
+          path: macrunner-wine
+          persist-credentials: false
+      - name: Select driver Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.13.7'
+          architecture: arm64
+      - name: Run the selected independent prerequisite
+        shell: bash
+        env:
+          REPRO109_AXIS: ${{ matrix.axis }}
+        run: |
+          set -euo pipefail
+          export MACRUNNER_WINE_RECIPE_ROOT="$GITHUB_WORKSPACE/macrunner-wine/build"
+          export MACRUNNER_DXMT_SOURCE_REPOSITORY="$GITHUB_WORKSPACE/dxmt"
+          export REPRO109_RECIPE="$GITHUB_WORKSPACE/dxmt/build/repro109dxmt"
+          work="$RUNNER_TEMP/repro109-dxmt-$REPRO109_AXIS"
+          mkdir -p "$work/reports"
+          cd "$work"
+          bash "$REPRO109_RECIPE/run_source_axis.sh" "$REPRO109_AXIS" > driver.log 2>&1
+      - name: Collect complete bounded evidence without source archive bodies
+        if: always()
+        shell: bash
+        env:
+          REPRO109_AXIS: ${{ matrix.axis }}
+        run: |
+          set -euo pipefail
+          python3 -I -B - <<'PY'
+          import json, os, pathlib, shutil
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          work = root / ('repro109-dxmt-' + os.environ['REPRO109_AXIS'])
+          out = root / ('repro109-dxmt-evidence-' + os.environ['REPRO109_AXIS'])
+          out.mkdir()
+          kept = []
+          if work.is_dir():
+              for path in sorted(work.rglob('*')):
+                  rel = path.relative_to(work)
+                  if not path.is_file() or path.is_symlink():
+                      continue
+                  if set(rel.parts) & {'source', 'headers', '.git', 'llvm15-source'}:
+                      continue
+                  if path.suffix not in {'.json', '.jsonl', '.log', '.stdout', '.stderr', '.txt'}:
+                      continue
+                  dest = out / rel
+                  dest.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(path, dest)
+                  kept.append(rel.as_posix())
+          (out / 'EVIDENCE.json').write_text(json.dumps(dict(axis=os.environ['REPRO109_AXIS'],
+              state='PRESENT' if kept else 'NOT_REACHED', files=kept), indent=2) + '\n')
+          PY
+      - name: Preserve one artifact for every independent axis
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: repro109-dxmt-${{ matrix.axis }}-${{ github.sha }}
+          path: ${{ runner.temp }}/repro109-dxmt-evidence-${{ matrix.axis }}/
+          if-no-files-found: error
+          retention-days: 7
