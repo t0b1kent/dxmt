@@ -180,6 +180,10 @@ class SourceDXMTTests(unittest.TestCase):
         for forbidden in ['gh release', 'contents: write', '37579087015']:
             self.assertNotIn(forbidden, text)
         self.assertEqual(text.count('Use the same preparation for inputs and full'), 1)
+        self.assertIn('branches: [macrunner-d3d12]', text)
+        self.assertIn('paths: [build/repro109dxmt/dispatch-after-wine27.json]', text)
+        self.assertIn('test_dispatch_request.py', text)
+        self.assertNotIn('--phase "$PHASE"', text)
         for name in job.PIN_NAMES:
             self.assertIn(name.upper() + '_SHA256: ${{ inputs.' + name + '_sha256 }}', text)
         self.assertIn('if: always()', text)

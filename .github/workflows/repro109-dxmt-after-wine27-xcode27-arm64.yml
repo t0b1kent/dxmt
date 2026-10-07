@@ -1,6 +1,9 @@
 name: REPRO-109 D3D11 and winemetal from source-built Wine and LLVM
 
 on:
+  push:
+    branches: [macrunner-d3d12]
+    paths: [build/repro109dxmt/dispatch-after-wine27.json]
   workflow_dispatch:
     inputs:
       phase:
@@ -71,6 +74,7 @@ jobs:
           set -euo pipefail
           mkdir "$REPRO109_TEST_TMP"
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_repro109_dxmt_after_wine27.py"
+          python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_dispatch_request.py"
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_wine_layout.py"
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_llvm_prefix.py"
       - name: Use the same preparation for inputs and full
@@ -85,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/repro109_dxmt_after_wine27.py" \
-            --phase "$PHASE" --dxmt-checkout "$GITHUB_WORKSPACE/dxmt" \
+            --dxmt-checkout "$GITHUB_WORKSPACE/dxmt" \
             --wine-checkout "$GITHUB_WORKSPACE/macrunner-wine"
       - name: Preserve complete bounded reports and unsigned outputs
         if: always()

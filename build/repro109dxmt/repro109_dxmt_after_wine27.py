@@ -57,6 +57,33 @@ def pins_from_environment():
     return result
 
 
+def event_request(event_name, phase, ticket, environment):
+    """Select the same five values from dispatch inputs or one pushed request."""
+    require(event_name in ('workflow_dispatch', 'push'), 'Unsupported request event')
+    names = ('phase',) + tuple(name + '_sha256' for name in PIN_NAMES)
+    if event_name == 'workflow_dispatch':
+        values = {'phase': phase or environment.get('PHASE', '')}
+        values.update({name + '_sha256': environment.get(name.upper() + '_SHA256', '') for name in PIN_NAMES})
+    else:
+        require(phase is None, 'Push phase must come from the request file')
+        require(ticket.is_file() and not ticket.is_symlink() and ticket.stat().st_size <= 8192,
+                'A bounded regular push request file is required')
+        def unique_pairs(pairs):
+            result = {}
+            for key, value in pairs:
+                require(key not in result, 'Duplicate request field')
+                result[key] = value
+            return result
+        values = json.loads(ticket.read_bytes(), object_pairs_hook=unique_pairs)
+        require(isinstance(values, dict) and set(values) == set(names) | {'schema'}, 'Exact push request fields required')
+        require(type(values['schema']) is int and values.pop('schema') == 1, 'Push request schema 1 required')
+    require(values['phase'] in ('inputs', 'full'), 'Request phase inputs or full required')
+    require(all(isinstance(values[name + '_sha256'], str) and
+                re.fullmatch(r'[a-f0-9]{64}', values[name + '_sha256']) for name in PIN_NAMES),
+            'Four measured Wine archive/receipt SHA256 inputs are required')
+    return values
+
+
 def sealed(path, expected, json_file=False):
     require(path.is_file() and not path.is_symlink() and sha(path) == expected,
             'Pinned input bytes differ: ' + path.name)
@@ -240,10 +267,18 @@ def execute(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--phase', choices=('inputs', 'full'), default='inputs')
+    parser.add_argument('--phase', choices=('inputs', 'full'))
     parser.add_argument('--dxmt-checkout', required=True, type=Path)
     parser.add_argument('--wine-checkout', required=True, type=Path)
-    execute(parser.parse_args())
+    args = parser.parse_args()
+    # Identity is checked before a push ticket is read or any tool is invoked.
+    cloud_guard()
+    request = event_request(os.environ.get('GITHUB_EVENT_NAME', ''), args.phase,
+                            args.dxmt_checkout / 'build/repro109dxmt/dispatch-after-wine27.json', os.environ)
+    args.phase = request['phase']
+    for name in PIN_NAMES:
+        os.environ[name.upper() + '_SHA256'] = request[name + '_sha256']
+    execute(args)
 
 
 if __name__ == '__main__':
