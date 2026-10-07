@@ -34,6 +34,16 @@ def archive(machine, short=False):
     return b'!<arch>\n' + member(data)
 
 
+def ec_symbols(indexes=(1, 2), names=None):
+    names = names if names is not None else [b'OWN_' + str(i).encode() for i in range(len(indexes))]
+    return struct.pack('<I', len(indexes)) + struct.pack('<' + str(len(indexes)) + 'H', *indexes) + b''.join(n + b'\0' for n in names)
+
+
+def hybrid_archive(short=True, ec_machine=0xa641, table=None):
+    return (b'!<arch>\n' + member(ec_symbols() if table is None else table, '/<ECSYMBOLS>/')
+            + archive(0xaa64)[8:] + archive(ec_machine, short)[8:])
+
+
 def macho():
     return struct.pack('<IIII', 0xfeedfacf, 0x100000c, 0, 6) + b'\0' * 48
 
@@ -104,6 +114,68 @@ class CompilerRouteTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 builder.archive_machine(path, 0xaa64)
 
+    def test_arm64_hybrid_coff_and_short_import_with_ec_symbol_table(self):
+        path = self.root / 'hybrid.a'
+        for short in (False, True):
+            path.write_bytes(hybrid_archive(short))
+            report = builder.archive_machine(path, 0xaa64, hybrid_arm64=True, details=True)
+            self.assertEqual(report['objects'], 2)
+            self.assertEqual(report['machine_counts'], {'0xaa64': 1, '0xa641': 1})
+            self.assertEqual(report['allowed_machines'], [0xaa64, 0xa641])
+            self.assertEqual(report['ec_metadata_status'], 'PRESENT')
+            self.assertEqual(report['ec_symbols']['symbols'], 2)
+            # Native null-import members can also be indexed by ECSYMBOLS.
+            self.assertEqual(report['ec_symbols']['target_machine_counts'], {'0xaa64': 1, '0xa641': 1})
+            with self.assertRaisesRegex(ValueError, 'profile'):
+                builder.archive_machine(path, 0xaa64)
+
+    def test_arm64_hybrid_rejects_foreign_machine_siblings(self):
+        path = self.root / 'hybrid.a'
+        for machine in (0x8664, 0x14c, 0xa64e, 0):
+            with self.subTest(machine=machine):
+                path.write_bytes(hybrid_archive(ec_machine=machine))
+                with self.assertRaisesRegex(ValueError, 'Machine=0x' + format(machine, '04x')):
+                    builder.archive_machine(path, 0xaa64, hybrid_arm64=True)
+        with self.assertRaisesRegex(ValueError, 'must target ARM64'):
+            builder.archive_machine(path, 0x8664, hybrid_arm64=True)
+
+    def test_arm64ec_requires_table_and_native_objects(self):
+        path = self.root / 'hybrid.a'
+        path.write_bytes(archive(0xaa64) + archive(0xa641, True)[8:])
+        with self.assertRaisesRegex(ValueError, 'lack the EC symbol table'):
+            builder.archive_machine(path, 0xaa64, hybrid_arm64=True)
+        path.write_bytes(b'!<arch>\n' + member(ec_symbols((1,)), '/<ECSYMBOLS>/') + archive(0xa641, True)[8:])
+        with self.assertRaisesRegex(ValueError, 'required native architecture'):
+            builder.archive_machine(path, 0xaa64, hybrid_arm64=True)
+
+    def test_ec_symbol_count_indexes_names_and_duplicate_refused(self):
+        path = self.root / 'hybrid.a'
+        malformed = [b'\x01', struct.pack('<I', 2) + b'\x01\x00',
+                     ec_symbols((0,)), ec_symbols((3,)), ec_symbols((65535,)),
+                     struct.pack('<I', 1) + struct.pack('<H', 2) + b'NOT_TERMINATED',
+                     ec_symbols((1, 2), [b'ONLY_ONE']), ec_symbols((1,), [b'']),
+                     ec_symbols((1,), [b'ONE', b'EXTRA'])]
+        for payload in malformed:
+            with self.subTest(payload=payload.hex()):
+                path.write_bytes(hybrid_archive(table=payload))
+                with self.assertRaisesRegex(ValueError, 'EC symbol'):
+                    builder.archive_machine(path, 0xaa64, hybrid_arm64=True)
+        path.write_bytes(hybrid_archive() + member(ec_symbols(), '/<ECSYMBOLS>/'))
+        with self.assertRaisesRegex(ValueError, 'Duplicate'):
+            builder.archive_machine(path, 0xaa64, hybrid_arm64=True)
+
+    def test_ec_symbol_zero_count_and_bsd_gnu_archive_names(self):
+        path = self.root / 'hybrid.a'
+        path.write_bytes(b'!<arch>\n' + member(ec_symbols(()), '/<ECSYMBOLS>/') + archive(0xaa64)[8:])
+        report = builder.archive_machine(path, 0xaa64, hybrid_arm64=True, details=True)
+        self.assertEqual(report['ec_symbols']['symbols'], 0)
+        self.assertFalse(report['hybrid_arm64'])
+        long_name = b'OWN_LONG_ARM64EC_MEMBER.o'
+        path.write_bytes(b'!<arch>\n' + member(b'OWN_GNU_NAMES\0', '//')
+                         + member(ec_symbols(), '/<ECSYMBOLS>/') + archive(0xaa64)[8:]
+                         + member(long_name + archive(0xa641, True)[68:88], '#1/' + str(len(long_name))))
+        self.assertEqual(builder.archive_machine(path, 0xaa64, hybrid_arm64=True), 2)
+
     def test_output_native_pe_and_corrupt_pe_offset(self):
         path = self.root / 'output'
         path.write_bytes(macho())
@@ -153,6 +225,30 @@ class CompilerRouteTests(unittest.TestCase):
         self.assertEqual(value['ec']['ec'], 2)
         (self.args.wine_prefix / 'extra').write_text('unrecorded\n')
         with self.assertRaisesRegex(ValueError, 'inventory'):
+            builder.validate_wine(self.args, dep, wine)
+
+    def test_wine_consumer_accepts_all_three_arm64_hybrid_imports(self):
+        dep, wine, record = self.wine_fixture()
+        for name in ('winecrt0', 'ntdll', 'dbghelp'):
+            (self.args.wine_prefix / 'lib/wine/aarch64-windows' / ('lib' + name + '.a')).write_bytes(hybrid_archive())
+        self.args.wine_files_sha256 = write_json(self.args.wine_files, dep.inventory(self.args.wine_prefix))
+        value = builder.validate_wine(self.args, dep, wine)
+        self.assertEqual(value['ec']['ec'], 2)
+        for row in value['imports']:
+            if row['path'].startswith('lib/wine/aarch64-windows/'):
+                self.assertTrue(row['hybrid_arm64'])
+                self.assertEqual(row['objects'], 2)
+                self.assertEqual(row['machine_counts'], {'0xaa64': 1, '0xa641': 1})
+            else:
+                self.assertEqual(row['machine_counts'], {'0x8664': 1})
+                self.assertEqual(row['ec_metadata_status'], 'NOT_PRESENT')
+
+    def test_wine_consumer_refuses_hybrid_in_x64_directory(self):
+        dep, wine, record = self.wine_fixture()
+        path = self.args.wine_prefix / 'lib/wine/x86_64-windows/libntdll.a'
+        path.write_bytes(hybrid_archive())
+        self.args.wine_files_sha256 = write_json(self.args.wine_files, dep.inventory(self.args.wine_prefix))
+        with self.assertRaisesRegex(ValueError, 'profile'):
             builder.validate_wine(self.args, dep, wine)
 
     def test_wine_incomplete_install_and_zero_ec_refused(self):

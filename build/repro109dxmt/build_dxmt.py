@@ -54,12 +54,21 @@ def sealed_json(path, expected):
     return json.loads(path.read_bytes(), object_pairs_hook=validate_llvm_prefix.unique_object)
 
 
-def archive_machine(path, expected):
-    """Check COFF object/short-import members, including BSD long names."""
+def archive_machine(path, expected, *, hybrid_arm64=False, details=False):
+    """Check COFF members and the ARM64/ARM64EC hybrid symbol table.
+
+    /<ECSYMBOLS>/ is DWORD count, WORD object indexes, and NUL names,
+    as read by Wine tools/winedump/lib.c. It has no COFF Machine field.
+    """
+    require(not hybrid_arm64 or expected == 0xaa64, 'Hybrid Wine archive must target ARM64')
+    allowed = [expected] + ([0xa641] if hybrid_arm64 else [])
     count = 0
+    machines = []
+    ec_table = None
     with Path(path).open('rb') as stream:
         require(stream.read(8) == b'!<arch>\n', 'Wine import must be a regular archive')
         while True:
+            offset = stream.tell()
             header = stream.read(60)
             if not header:
                 break
@@ -77,12 +86,42 @@ def archive_machine(path, expected):
                 name, data = data[:length].rstrip(b'\0').decode('ascii'), data[length:]
             if name in ('/', '//', '/SYM64/') or name.startswith('__.SYMDEF'):
                 continue
+            if name == '/<ECSYMBOLS>/':
+                require(hybrid_arm64, 'Wine EC symbol table requires the ARM64 hybrid profile')
+                require(ec_table is None, 'Duplicate Wine EC symbol table')
+                require(len(data) >= 4, 'Truncated Wine EC symbol count')
+                symbols = struct.unpack_from('<I', data)[0]
+                end = 4 + 2 * symbols
+                require(end <= len(data), 'Truncated Wine EC symbol indexes')
+                names = data[end:].split(b'\0')
+                require(len(names) == symbols + 1 and not names[-1] and all(names[:-1]),
+                        'Wine EC symbol name count/termination differs')
+                indexes = struct.unpack_from('<' + str(symbols) + 'H', data, 4)
+                ec_table = dict(symbols=symbols, indexes=indexes, member_offset=offset,
+                                bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                continue
             require(len(data) >= 20, 'COFF object/import header missing')
             machine = struct.unpack_from('<H', data, 6 if data[:4] == b'\0\0\xff\xff' else 0)[0]
-            require(machine == expected, 'Wine import architecture differs')
+            require(machine in allowed, 'Wine import architecture differs: ' + Path(path).name
+                    + ' member=' + name + ' offset=' + str(offset) + ' Machine=0x' + format(machine, '04x')
+                    + ' expected=' + '/'.join('0x' + format(x, '04x') for x in allowed))
+            machines.append(machine)
             count += 1
     require(count > 0, 'Wine import archive has no object members')
-    return count
+    require(expected in machines, 'Wine import lacks the required native architecture')
+    require(0xa641 not in machines or ec_table is not None, 'ARM64EC objects lack the EC symbol table')
+    if ec_table is not None:
+        require(all(1 <= index <= count for index in ec_table['indexes']), 'Wine EC symbol index out of range')
+        target_counts = {}
+        for index in ec_table.pop('indexes'):
+            key = '0x' + format(machines[index - 1], '04x')
+            target_counts[key] = target_counts.get(key, 0) + 1
+        ec_table['target_machine_counts'] = target_counts
+    report = dict(expected_machine=expected, allowed_machines=allowed, objects=count,
+                  machine_counts={'0x' + format(value, '04x'): machines.count(value) for value in sorted(set(machines))},
+                  ec_symbols=ec_table, ec_metadata_status='PRESENT' if ec_table is not None else 'NOT_PRESENT',
+                  hybrid_arm64=0xa641 in machines)
+    return report if details else count
 
 
 def validate_wine(args, dep, wine):
@@ -107,7 +146,7 @@ def validate_wine(args, dep, wine):
             require(path.is_file() and path.resolve().is_relative_to(args.wine_prefix.resolve()),
                     'Fresh Wine import missing or foreign: ' + arch + '/' + name)
             imports.append(dict(path=str(path.relative_to(args.wine_prefix)), sha256=sha(path),
-                                machine=machine, objects=archive_machine(path, machine)))
+                                **archive_machine(path, machine, hybrid_arm64=arch == 'aarch64', details=True)))
     for name in ('winemac.so', 'ntdll.so'):
         path = args.wine_prefix / 'lib/wine/aarch64-unix' / name
         require(path.is_file(), 'Fresh ARM64 Wine native module missing')

@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "phase": "inputs",
   "wine_result_sha256": "8d2258433d4ddf957d811565f3b1b342684dcaf930841b35f73fe99c8dee983a",
   "deps_manifest_sha256": "78a4a3699d8addb71ecc90498ebcb27f7dcea2d756bdc4af367c667dd2738740",
   "wine_dist_sha256": "398d09faf25cac2a1bb9f41d5a584f18a96ef77155f56c45158a2dc291bc19a7",
-  "deps_prefix_sha256": "94bd434db9d2998ff63d8ebc4b74d254bd7195fd72d20ec799a6c46629570bb2"
+  "deps_prefix_sha256": "94bd434db9d2998ff63d8ebc4b74d254bd7195fd72d20ec799a6c46629570bb2",
+  "phase": "inputs"
 }
