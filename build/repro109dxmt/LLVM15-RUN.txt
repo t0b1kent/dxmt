@@ -1,0 +1,8 @@
+REPRO-109 LLVM15 source build after source prerequisite admission.
+DXMT recipe base: 7e37e5b84727597ff84bc02465d6da6100e39f41
+Wine recipe: f73cf96ba8d2fd3e5b3d7e8687fe1c5926204542
+Source matrix: 37564119197, 5/5 success reported by the curator.
+Workflow: repro109-llvm15-macos15-arm64.yml
+Dispatch: push to macrunner-d3d12 changing this file only.
+Job timeout: 360 minutes; complete elapsed duration not yet measured.
+Outputs are unsigned compiler inputs, not whole application acceptance.
