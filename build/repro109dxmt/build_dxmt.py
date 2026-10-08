@@ -160,14 +160,25 @@ def validate_wine(args, dep, wine):
                 imports=imports, dependency_manifest_sha256=args.deps_manifest_sha256)
 
 
+def meson_string(value):
+    # Machine files use Meson single-quoted strings, not JSON string tokens.
+    # JSON's interior escapes are compatible after unescaping double quotes.
+    escaped = json.dumps(str(value), ensure_ascii=False)[1:-1]
+    return "'" + escaped.replace('\\"', '"').replace("'", "\\'") + "'"
+
+
+def native_machine_file(clang, clangxx):
+    return '[binaries]\nc = ' + meson_string(clang) + '\ncpp = ' + meson_string(clangxx) + '\n'
+
+
 def machine_file(compiler, arch):
     values = ["[binaries]"]
     for key, suffix in [('c', 'gcc'), ('cpp', 'g++'), ('windres', 'windres')]:
-        values.append(key + ' = ' + json.dumps(str(compiler / 'bin' / (arch + '-w64-mingw32-' + suffix))))
-    values += ['ar = ' + json.dumps(str(compiler / 'bin/llvm-ar')),
-               'strip = ' + json.dumps(str(compiler / 'bin/llvm-strip')),
-               "[host_machine]", "system = 'windows'", 'cpu_family = ' + repr(arch),
-               'cpu = ' + repr(arch), "endian = 'little'", '[properties]', 'needs_exe_wrapper = true']
+        values.append(key + ' = ' + meson_string(compiler / 'bin' / (arch + '-w64-mingw32-' + suffix)))
+    values += ['ar = ' + meson_string(compiler / 'bin/llvm-ar'),
+               'strip = ' + meson_string(compiler / 'bin/llvm-strip'),
+               "[host_machine]", "system = 'windows'", 'cpu_family = ' + meson_string(arch),
+               'cpu = ' + meson_string(arch), "endian = 'little'", '[properties]', 'needs_exe_wrapper = true']
     return '\n'.join(values) + '\n'
 
 
@@ -264,7 +275,7 @@ def build(args):
         wine.download_compiler(lock['compiler'], compiler_archive, out)
         compiler = wine.prepare_compiler(compiler_archive, root / 'compiler', lock['compiler']['sha256'], out)
         native = root / 'native.ini'
-        native.write_text('[binaries]\nc = ' + json.dumps(clang) + '\ncpp = ' + json.dumps(clangxx) + '\n')
+        native.write_text(native_machine_file(clang, clangxx))
         meson, ninja = args.deps_prefix / 'bin/meson', args.deps_prefix / 'bin/ninja'
         for name, version in [(meson, '1.11.0'), (ninja, '1.13.2')]:
             run(name.name + '-version', [str(name), '--version'])
