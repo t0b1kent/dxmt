@@ -1,0 +1,128 @@
+diff --git a/dxil_spirv.cpp b/dxil_spirv.cpp
+index 010ac0b5c..e03e0edc3 100644
+--- a/dxil_spirv.cpp
++++ b/dxil_spirv.cpp
+@@ -40,6 +40,56 @@
+ 
+ using namespace dxil_spv;
+ 
++// MacRunner: retain logical resource identity before the default CLI aliases
++// SRV/UAV/CBV/sampler registers into one SPIR-V binding namespace.
++// Only the standalone static-descriptor path is supported by this option.
++struct LogicalBinding
++{
++	unsigned cls, space, reg, size, resource, kind, view;
++};
++static std::string logical_path;
++static std::vector<LogicalBinding> logical_bindings;
++
++static bool map_logical(unsigned cls, const dxil_spv_d3d_binding &src,
++                        dxil_spv_vulkan_binding &dst, unsigned view = 0)
++{
++	if (src.register_index == UINT32_MAX || src.register_space == UINT32_MAX ||
++	    src.range_size == UINT32_MAX || dst.bindless.use_heap ||
++	    dst.descriptor_type == DXIL_SPV_VULKAN_DESCRIPTOR_TYPE_BUFFER_DEVICE_ADDRESS ||
++	    dst.descriptor_type == DXIL_SPV_VULKAN_DESCRIPTOR_TYPE_INPUT_ATTACHMENT)
++		return false;
++	LogicalBinding key{cls, src.register_space, src.register_index, src.range_size,
++	                   src.resource_index, unsigned(src.kind), view};
++	unsigned index = 0;
++	for (; index < logical_bindings.size(); index++)
++	{
++		const auto &b = logical_bindings[index];
++		if (b.cls == key.cls && b.space == key.space && b.reg == key.reg &&
++		    b.size == key.size && b.resource == key.resource && b.kind == key.kind && b.view == key.view)
++			break;
++	}
++	if (index == logical_bindings.size()) logical_bindings.push_back(key);
++	dst.set = 0;
++	dst.binding = index;
++	return true;
++}
++
++static bool write_logical_bindings()
++{
++	FILE *file = fopen(logical_path.c_str(), "w");
++	if (!file) return false;
++	fprintf(file, "{\"version\":1,\"namespace\":\"explicit-class-register-space\",\"bindings\":[");
++	for (size_t i = 0; i < logical_bindings.size(); i++)
++	{
++		const auto &b = logical_bindings[i];
++		fprintf(file, "%s{\"class\":%u,\"space\":%u,\"register\":%u,\"count\":%u,\"resource_index\":%u,\"kind\":%u,\"view\":%u,\"set\":0,\"binding\":%zu}",
++		        i ? "," : "", b.cls, b.space, b.reg, b.size, b.resource, b.kind, b.view, i);
++	}
++	fprintf(file, "]}\n");
++	bool ok = !ferror(file);
++	return fclose(file) == 0 && ok;
++}
++
+ static std::string convert_to_asm(const void *code, size_t size)
+ {
+ 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_3);
+@@ -599,6 +649,34 @@ static dxil_spv_bool remap_cbv(void *userdata, const dxil_spv_d3d_binding *bindi
+ 	return DXIL_SPV_TRUE;
+ }
+ 
++static dxil_spv_bool logical_srv(void *u, const dxil_spv_d3d_binding *s, dxil_spv_srv_vulkan_binding *v)
++{
++	if (!remap_srv(u, s, v)) return DXIL_SPV_FALSE;
++	if (!map_logical(0, *s, v->buffer_binding)) return DXIL_SPV_FALSE;
++	// Auxiliary byte-offset buffer occupies its own namespace, never a D3D slot.
++	v->offset_binding.set = 1; v->offset_binding.binding = 0;
++	return DXIL_SPV_TRUE;
++}
++
++static dxil_spv_bool logical_sampler(void *u, const dxil_spv_d3d_binding *s, dxil_spv_vulkan_binding *v)
++{
++	return remap_sampler(u, s, v) && map_logical(3, *s, *v);
++}
++
++static dxil_spv_bool logical_cbv(void *u, const dxil_spv_d3d_binding *s, dxil_spv_cbv_vulkan_binding *v)
++{
++	if (!remap_cbv(u, s, v) || v->push_constant) return DXIL_SPV_FALSE;
++	return map_logical(2, *s, v->vulkan.uniform_binding);
++}
++
++static dxil_spv_bool logical_uav(void *u, const dxil_spv_uav_d3d_binding *s, dxil_spv_uav_vulkan_binding *v)
++{
++	if (!remap_uav(u, s, v) || !map_logical(1, s->d3d_binding, v->buffer_binding)) return DXIL_SPV_FALSE;
++	if (s->has_counter && !map_logical(1, s->d3d_binding, v->counter_binding, 1)) return DXIL_SPV_FALSE;
++	v->offset_binding.set = 1; v->offset_binding.binding = 0;
++	return DXIL_SPV_TRUE;
++}
++
+ static dxil_spv_bool remap_vertex_input(void *userdata, const dxil_spv_d3d_vertex_input *d3d_input,
+                                         dxil_spv_vulkan_vertex_input *vk_input)
+ {
+@@ -927,6 +1005,7 @@ int main(int argc, char **argv)
+ 	cbs.add("--view-index-to-view-instance-spec-id", [&](CLIParser &parser) {
+ 		args.view_index_to_view_instance_spec_id = parser.next_uint();
+ 	});
++	cbs.add("--mr-logical-bindings", [&](CLIParser &parser) { logical_path = parser.next_string(); });
+ 	cbs.error_handler = [] { print_help(); };
+ 	cbs.default_handler = [&](const char *arg) { args.input_path = arg; };
+ 	CLIParser cli_parser(std::move(cbs), argc - 1, argv + 1);
+@@ -991,10 +1070,10 @@ int main(int argc, char **argv)
+ 	if (dxil_spv_create_converter_with_reflection(blob, reflection_blob, &converter) != DXIL_SPV_SUCCESS)
+ 		return EXIT_FAILURE;
+ 
+-	dxil_spv_converter_set_srv_remapper(converter, remap_srv, &remapper);
+-	dxil_spv_converter_set_sampler_remapper(converter, remap_sampler, &remapper);
+-	dxil_spv_converter_set_uav_remapper(converter, remap_uav, &remapper);
+-	dxil_spv_converter_set_cbv_remapper(converter, remap_cbv, &remapper);
++	dxil_spv_converter_set_srv_remapper(converter, logical_path.empty() ? remap_srv : logical_srv, &remapper);
++	dxil_spv_converter_set_sampler_remapper(converter, logical_path.empty() ? remap_sampler : logical_sampler, &remapper);
++	dxil_spv_converter_set_uav_remapper(converter, logical_path.empty() ? remap_uav : logical_uav, &remapper);
++	dxil_spv_converter_set_cbv_remapper(converter, logical_path.empty() ? remap_cbv : logical_cbv, &remapper);
+ 
+ 	dxil_spv_converter_set_vertex_input_remapper(converter, remap_vertex_input, &remapper);
+ 	dxil_spv_converter_set_stream_output_remapper(converter, remap_stream_output, &remapper);
+@@ -1593,6 +1672,7 @@ int main(int argc, char **argv)
+ 		fclose(file);
+ 	}
+ 
++	if (!logical_path.empty() && !write_logical_bindings()) return EXIT_FAILURE;
+ 	dxil_spv_converter_free(converter);
+ 	dxil_spv_parsed_blob_free(blob);
+ 	if (reflection_blob)
+

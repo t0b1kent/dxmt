@@ -1,0 +1,27 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index 2b9faf3..c965756 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -221,6 +221,10 @@ string CompilerMSL::root_abi_field(uint32_t id, RootAbiField field)
+ 	if (expression.size() > name.size() + 2 && expression[0] == '(' && expression.compare(1, name.size(), name) == 0 &&
+ 	    expression[name.size() + 1] == ')')
+ 		return prefix + expression.substr(name.size() + 2);
++	// MacRunner tess-gs: внутри callee ресурс — параметр с другим именем; у немассивного ресурса поле описателя
++	// от выражения не зависит (prefix уже целиком выражен через spvDescriptorSetN, переданный в callee).
++	if (get_variable_data_type(*var).array.empty())
++		return prefix;
+ 	SPIRV_CROSS_THROW(join("Root ABI: a resource expression does not start with the expression of its variable: '",
+ 	                       expression, "' against '", name, "'."));
+ }
+@@ -19984,6 +19988,11 @@ void CompilerMSL::analyze_argument_buffers()
+ 
+ 			if (root_abi_enabled)
+ 			{
++				// MacRunner tess-gs 14.10.2026: descriptor set 31 holds the record buffers of the lowered
++				// tessellation bodies (lower_isoline). Only the discarded kernel entry reads them; they are
++				// not root resources. Leave them out of the root ABI and let them bind like plain buffers.
++				if (get_decoration(var.self, DecorationDescriptorSet) == 31)
++					continue;
+ 				// MacRunner root-signature ABI: the buffer is plain 64-bit words, the resource is
+ 				// an expression over them. It gets no member and no [[id(N)]].
+ 				auto mapped = root_abi_resources.find(get_decoration(var.self, DecorationBinding));

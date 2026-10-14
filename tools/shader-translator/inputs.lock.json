@@ -1,0 +1,139 @@
+{
+ "schema": 1,
+ "purpose": "Pinned inputs of the offline DXIL -> Metal translator. Sources under lane/ are the SHADERS-OWN lane files as of the snapshot time, unchanged except patches/translator/0001-standalone-gate.patch.",
+ "snapshot": {
+  "taken": "2026-10-14T15:25+10:00",
+  "note": "The tess-gs files (tess_compose.py, gs_compose.py, translate_requests.py) were still being edited by the lane at that time; the digests below identify exactly what was captured."
+ },
+ "dxil_spirv": {
+  "repository": "https://github.com/HansKristian-Work/dxil-spirv.git",
+  "commit": "31ecc70656cbfb30f5fb6ea1a6b67a0e89424346",
+  "version": "2.66.0",
+  "submodules": {
+   "third_party/SPIRV-Cross": "4b7bcb7e5cf71015b3299088d22004bfe4e13a5e",
+   "third_party/SPIRV-Tools": "64f5770f59db933d46b9cad6edc42b4186409ef4",
+   "third_party/spirv-headers": "f88a2d766840fc825af1fc065977953ba1fa4a91",
+   "subprojects/dxbc-spirv": "29c93aeecd55533a357fdd7c95be5587d1c1f506"
+  },
+  "evidence": "all 2183 tracked files of the lane copy (shaders-open dxil-native/source, excluding third_party and subprojects) are byte-identical to this revision; the lane copy of third_party/SPIRV-Cross is identical to the submodule revision"
+ },
+ "frontend": {
+  "patches": [
+   "0001-frontend-logical-bindings.patch",
+   "0002-frontend-unbounded-ranges.patch"
+  ],
+  "source_sha256": "86cc367d1c42b52683d25635aa55d84cebf295afcde24534e96217a21f6f6d86",
+  "evidence": "upstream dxil_spirv.cpp + the two patches equals the lane's dxil_spirv_frontend.cpp byte for byte"
+ },
+ "spirv_cross": {
+  "repository": "https://github.com/KhronosGroup/SPIRV-Cross.git",
+  "commit": "4b7bcb7e5cf71015b3299088d22004bfe4e13a5e",
+  "patches": [
+   "0001-msl-base.patch",
+   "0002-root-abi.patch",
+   "0003-descriptor-fields.patch",
+   "0004-tess-gs-root-abi-field.patch"
+  ],
+  "variants": {
+   "base": "patches 1 (isoline path, msl-writer)",
+   "admission": "patches 1-3 (single stages, --msl-root-abi)",
+   "tess-gs": "patches 1-4 (tessellation and geometry pairs)"
+  },
+  "patched_files": {
+   "base": {
+    "spirv_msl.cpp": "28f8fb14bdae5b02c29e471727b97e0ea3ce3826270c3a54f2a622ab8577e031"
+   },
+   "admission": {
+    "spirv_msl.cpp": "caa4e727389350e3d832aa9d6f94cda0aa483e90f88b75b88b5d763c4f2d3553",
+    "spirv_msl.hpp": "00813bb23b551e4a3d43b1dfed3aef6e83ba64a95f73a166a5c11ce4149ee843",
+    "main.cpp": "803c006cda1a3ce6d320274671cbf75b61068b3522bf10a1a58ea17da96dba25"
+   },
+   "tess-gs": {
+    "spirv_msl.cpp": "e2fab5851f1d12ff3bf3e7c19e41995ae03c7ff9f9832aae30f83ca13261ded3",
+    "spirv_msl.hpp": "00813bb23b551e4a3d43b1dfed3aef6e83ba64a95f73a166a5c11ce4149ee843",
+    "main.cpp": "803c006cda1a3ce6d320274671cbf75b61068b3522bf10a1a58ea17da96dba25"
+   }
+  },
+  "evidence": "pristine revision + patches 1..N equals the lane tree of each variant byte for byte (3 of 3 files, 1 of 1 for base); every other file of the lane trees equals the pristine revision"
+ },
+ "tool_locations": {
+  "dxil-spirv-logical": "lane/takeover/admission/build-frontend/dxil-spirv-logical",
+  "spirv-cross (base)": "lane/build-native/spirv-cross",
+  "msl-writer": "lane/build-native/msl-writer",
+  "spirv-cross (admission)": "lane/takeover/admission/build-cross/spirv-cross",
+  "spirv-cross (tess-gs)": "lane/takeover/tess-gs/build-cross/spirv-cross",
+  "spirv-val": "/opt/homebrew/bin/spirv-val (Homebrew spirv-tools; validation only, not part of any output)"
+ },
+ "host_tools": {
+  "cmake": "4.x",
+  "ninja": "1.13",
+  "spirv-tools": "1.4.350.0 (Homebrew) or newer",
+  "xcode": "Metal compiler in the Xcode toolchain (xcrun metal, xcrun metallib) for the .metallib outputs"
+ },
+ "tests": {
+  "vkd3d_proton": {
+   "repository": "https://github.com/HansKristian-Work/vkd3d-proton.git",
+   "commit": "fdbaf51f8794e8d75ad8c43dc2d62fcc8a136af3",
+   "files": {
+    "tests/shaders/shaders/headers/vs_derivative_hoisting.h": {
+     "git_blob": "bc0eef0f77740082dfb9947c432cc46340db7897",
+     "array": "vs_derivative_hoisting_code_dxil"
+    },
+    "tests/shaders/render_target/headers/ps_render_a8.h": {
+     "git_blob": "af216a36f657c121c3ad8f89e3badfa0e2cd5987",
+     "array": "ps_render_a8_code_dxil"
+    }
+   },
+   "note": "downloaded at test time, not redistributed; the arrays are open test shaders of that project"
+  }
+ },
+ "files": {
+  "lane/bindings.py": "923b27fff60d5b75c077b15c3b3911cc1ee84b01de728d92e56b1203a22645c9",
+  "lane/lower_isoline.py": "7d669a069417b3b6976e3122dc8e2128b0700fb26afcbd712e82e699d89556e2",
+  "lane/msl_writer.cpp": "53ae9ec489122d886da3f4d97e7ca3b425bcd27ee3f735b053e5fe85a15ec57f",
+  "lane/pack_tess_io.py": "275de4cb872be9d430582c6111b635b51c3eb2862ab5c9b1d5a92516f2ee0bd1",
+  "lane/takeover/admission/frontend/dxil_spirv_frontend.cpp": "86cc367d1c42b52683d25635aa55d84cebf295afcde24534e96217a21f6f6d86",
+  "lane/takeover/admission/translator/abi.py": "ad3ff8854fe4cc76ecc99144cc630586628e2dfecf144f5a0005bdef9c01932a",
+  "lane/takeover/admission/translator/abi_prelude.metal": "5889c4d4fa5319f155038a0ddf628f74f026c04df74b986e34b7f5c02be46776",
+  "lane/takeover/admission/translator/abi_vertex_pull.metal": "5a963c550907cab7c756f91fb9f2b87bb233d482dfdf9ec1db7eabe8f5d62b34",
+  "lane/takeover/admission/translator/pipeline.py": "1ab162e69987623df773c06bf8e6dced45b68b2a5fdbfd1c5c5ae18d0f5cc52d",
+  "lane/takeover/admission/translator/spv_variant.py": "bf0dc2252da704878cdedf4cf29994462f314315813ff4c20a7a6375132c9ec0",
+  "lane/takeover/admission/translator/translate_requests.py": "2f342f037992ded141c52f6c08b2eba9ed928c7c29ddc98e885f6e2cbb5c9913",
+  "lane/takeover/tess-gs/translator/abi.py": "ad3ff8854fe4cc76ecc99144cc630586628e2dfecf144f5a0005bdef9c01932a",
+  "lane/takeover/tess-gs/translator/abi_prelude.metal": "5889c4d4fa5319f155038a0ddf628f74f026c04df74b986e34b7f5c02be46776",
+  "lane/takeover/tess-gs/translator/abi_vertex_pull.metal": "5a963c550907cab7c756f91fb9f2b87bb233d482dfdf9ec1db7eabe8f5d62b34",
+  "lane/takeover/tess-gs/translator/air_tessellation_own.metal": "b4d93bc125f112f9ba33be4cbac950c5d6f79392f7f3744f4464d1f4458da62f",
+  "lane/takeover/tess-gs/translator/gs_body.py": "52ca4eb158e5cd7a0b86fe028744bc75d378dae72f22ed5a628fa4b59a9e1299",
+  "lane/takeover/tess-gs/translator/gs_compose.py": "4d8d68017e76d3c76e09d2f98e771890a8b28ae00bac26ab465951b5ed5f01e5",
+  "lane/takeover/tess-gs/translator/host_stub.py": "1195acaa10e51af2fb1e4dc1175f46cd16ee7bc3e81919b18bd2c916775cfbb8",
+  "lane/takeover/tess-gs/translator/lower_geometry.py": "e7afc6ebd30510087b40a13f2917f84613c877cded3a1d1c24a5e13cab30ac95",
+  "lane/takeover/tess-gs/translator/pipeline.py": "1ab162e69987623df773c06bf8e6dced45b68b2a5fdbfd1c5c5ae18d0f5cc52d",
+  "lane/takeover/tess-gs/translator/spv_variant.py": "bf0dc2252da704878cdedf4cf29994462f314315813ff4c20a7a6375132c9ec0",
+  "lane/takeover/tess-gs/translator/tess_body.py": "b0e4b9477deb25e4ae17689fc95e80921fcf548cca011c5da06d054f67ff8b4c",
+  "lane/takeover/tess-gs/translator/tess_compose.py": "f7fe2d4b470f74b7d977fb0de22c7115f233c3f3b0176d168cd95525c4742239",
+  "lane/takeover/tess-gs/translator/tess_dxil.py": "f55388faf536628b91a10484ef5e87efc66990fb9f9dfee7fa2a034719bd9ce8",
+  "lane/takeover/tess-gs/translator/tess_reflect.py": "869a7f1f8a6772db5e6009b986d8b717943908f992b62e8e74004dad582fef8f",
+  "lane/takeover/tess-gs/translator/translate_requests.py": "1922d5c3b3c59a9b27870337cfa0335ae265ca786aa63563a74f34bdff2e6bd9",
+  "patches/dxil-spirv/0001-frontend-logical-bindings.patch": "3a46c947e7602c027a7d21cdf56f293a8e2bc0e4ddec09fd1228b55784e89414",
+  "patches/dxil-spirv/0002-frontend-unbounded-ranges.patch": "ae9f44618752ae3ca86a046c5725c11ba58571df8fb8df77904df52fdf814f19",
+  "patches/spirv-cross/0001-msl-base.patch": "031ccc167da4528d932ecca5f5873a8b1bf6bd7ca2f25db2b318a94da52563d0",
+  "patches/spirv-cross/0002-root-abi.patch": "2018aaad0f20137b583958c4e0e4881fa4b3f561041f5471ceae553df22dc61b",
+  "patches/spirv-cross/0003-descriptor-fields.patch": "78010f5647761ee0abcf7f0bab14c890550055a6d8054801cadc7d9d2e79e57b",
+  "patches/spirv-cross/0004-tess-gs-root-abi-field.patch": "852efb9e34fa8785ec4c009a8e7312296f4420b4f223a5a4a1cffb0e5cc92b4d"
+ },
+ "edited_files": {
+  "lane/takeover/admission/translator/pipeline.py": {
+   "lane_original_sha256": "082221841cfa4dbeed2e40c00b50bb4018a45baeaa648b01e31dd491045bb5d3",
+   "sha256": "1ab162e69987623df773c06bf8e6dced45b68b2a5fdbfd1c5c5ae18d0f5cc52d"
+  },
+  "lane/takeover/tess-gs/translator/pipeline.py": {
+   "lane_original_sha256": "082221841cfa4dbeed2e40c00b50bb4018a45baeaa648b01e31dd491045bb5d3",
+   "sha256": "1ab162e69987623df773c06bf8e6dced45b68b2a5fdbfd1c5c5ae18d0f5cc52d"
+  },
+  "lane/takeover/admission/translator/translate_requests.py": {
+   "lane_original_sha256": "f65c37bcae8a5b3c3510ac33cad0e4db7fd6a21ab6154de7d067177404e26dd2",
+   "sha256": "2f342f037992ded141c52f6c08b2eba9ed928c7c29ddc98e885f6e2cbb5c9913"
+  }
+ },
+ "edited_files_note": "Three files differ from the project's working copies (original digests above): the project build gate is skipped when scripts/wine-slot.sh is absent (pipeline.py x2, translate_requests.py), the lookup of two corpus tools in pins() is guarded (pipeline.py x2), and the path of the game shader capture corpus is replaced by the environment variable TRANSLATOR_CAPTURE_DIR (pipeline.py x2). No patch file is shipped for these edits because the removed line would publish that path."
+}

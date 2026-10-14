@@ -1,0 +1,479 @@
+--- a/spirv_msl.hpp
++++ b/spirv_msl.hpp
+@@ -705,8 +705,11 @@
+ 		uint32_t where = 0; // 0 descriptor table, 1 root descriptor, 2 root constants, 3 static sampler
+ 		uint32_t qword = 0; // word of the root argument buffer (where 0..2)
+ 		uint32_t index = 0; // descriptor in the table (where 0) or static sampler (where 3)
++		uint32_t counter = 0; // 1: the variable is the UAV counter of the descriptor, not the view itself
+ 	};
+-	void set_root_abi(uint32_t root_qwords, bool vertex_pull);
++	// sample_mask_constant: a fragment function gets a coverage output ANDed with (or set to)
++	// function constant 128, the sample mask of the pipeline.
++	void set_root_abi(uint32_t root_qwords, bool vertex_pull, bool sample_mask_constant = false);
+ 	void add_root_abi_resource(uint32_t binding, const RootAbiResource &resource);
+ 
+ 	// Query after compilation is done. This allows you to check if an input location was used by the shader.
+@@ -1360,6 +1363,19 @@
+ 	std::unordered_map<uint32_t, RootAbiResource> root_abi_resources;
+ 	SmallVector<std::pair<uint32_t, RootAbiResource>> root_abi_bound;
+ 	std::string root_abi_vertex_id, root_abi_instance_id, root_abi_base_instance;
++	bool root_abi_sample_mask = false;
++	// Other fields of the 32-byte descriptor a resource expression reads its handle from.
++	enum RootAbiField
++	{
++		RootAbiMeta, // +8: texture min LOD and array length, typed buffer first element and count, buffer byte length
++		RootAbiAux, // +16: UAV counter address; sampler LOD bias
++		RootAbiCube // +8 of a sampler: the variant for cube textures
++	};
++	std::unordered_map<uint32_t, std::string> root_abi_handle; // variable -> expression of its handle
++	std::string root_abi_table(const RootAbiResource &resource, const char *record);
++	std::string root_abi_field_prefix(const SPIRVariable &var, const RootAbiResource &resource, RootAbiField field);
++	std::string root_abi_field(uint32_t id, RootAbiField field);
++	const RootAbiResource *root_abi_resource_of(uint32_t id);
+ 	std::string root_abi_expression(const SPIRVariable &var, const RootAbiResource &resource);
+ 	void root_abi_vertex_pull_args(std::string &ep_args);
+ 	bool root_abi_pulls_vertices() const;
+@@ -1383,7 +1399,10 @@
+ 		       msl_options.check_discarded_frag_stores && frag_shader_needs_discard_checks;
+ 	}
+ 
+-	bool has_additional_fixed_sample_mask() const { return msl_options.additional_fixed_sample_mask != 0xffffffff; }
++	bool has_additional_fixed_sample_mask() const
++	{
++		return msl_options.additional_fixed_sample_mask != 0xffffffff || root_abi_sample_mask;
++	}
+ 	std::string additional_fixed_sample_mask_str() const;
+ 
+ 	// OpcodeHandler that handles several MSL preprocessing operations.
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -151,13 +151,80 @@
+ }
+ 
+ // ---- MacRunner: root-signature ABI of the D3D12 layer (resources/ABI.md) ----
+-void CompilerMSL::set_root_abi(uint32_t root_qwords, bool vertex_pull)
++void CompilerMSL::set_root_abi(uint32_t root_qwords, bool vertex_pull, bool sample_mask_constant)
+ {
+ 	root_abi_enabled = true;
+ 	root_abi_qwords = root_qwords;
+ 	root_abi_vertex_pull = vertex_pull;
++	root_abi_sample_mask = sample_mask_constant;
+ }
+ 
++// The descriptor table (or the static sampler table) a resource lives in, as a pointer to `record`.
++string CompilerMSL::root_abi_table(const RootAbiResource &r, const char *record)
++{
++	if (r.where == 3)
++		return join("reinterpret_cast<constant ", record, "*>(&spvDescriptorSet1)");
++	return join("reinterpret_cast<constant ", record, "*>(spvDescriptorSet0.r", r.qword, ")");
++}
++
++// Expression of another field of the descriptor the variable's handle is read from. It is built
++// like the handle expression: an array variable gets an object indexed the way the handle is.
++string CompilerMSL::root_abi_field_prefix(const SPIRVariable &var, const RootAbiResource &r, RootAbiField field)
++{
++	// Root descriptors and root constants have no descriptor: no view offset, no length, no counter.
++	if (r.where == 1 || r.where == 2)
++		return "0ul";
++	const bool arrayed = !get_variable_data_type(var).array.empty();
++	const char *record = field == RootAbiCube ? "spvSamplerDesc" : "spvRawDesc";
++	const char *member = field == RootAbiCube ? "cube" : field == RootAbiMeta ? "meta" : "aux";
++	const char *array = field == RootAbiCube ? "spvSamplerCubeArray" : field == RootAbiMeta ? "spvMetaArray" : "spvAuxArray";
++	const string table = root_abi_table(r, record);
++	if (arrayed)
++		return join(array, "{ ", table, " + ", r.index, " }");
++	return join(table, "[", r.index, "].", member);
++}
++
++const CompilerMSL::RootAbiResource *CompilerMSL::root_abi_resource_of(uint32_t id)
++{
++	if (!root_abi_enabled)
++		return nullptr;
++	auto *var = maybe_get_backing_variable(id);
++	if (!var)
++		return nullptr;
++	for (auto &bound : root_abi_bound)
++		if (bound.first == var->self)
++			return &bound.second;
++	return nullptr;
++}
++
++// A field of the descriptor behind an expression that reads a resource (the variable itself or an
++// element of an array variable). The expression of the handle is the variable's expression followed
++// by the element index, so the field is the field's expression followed by the same index.
++string CompilerMSL::root_abi_field(uint32_t id, RootAbiField field)
++{
++	auto *var = maybe_get_backing_variable(id);
++	auto *resource = root_abi_resource_of(id);
++	auto handle = var ? root_abi_handle.find(var->self) : end(root_abi_handle);
++	if (!resource || handle == end(root_abi_handle))
++		SPIRV_CROSS_THROW("Root ABI: the descriptor of a resource expression is not known.");
++	if (resource->where == 1 || resource->where == 2)
++		return "0ul";
++	// A pass that is going to be repeated emits placeholders for expressions.
++	if (is_forcing_recompilation())
++		return "0ul";
++	// An element of an array variable is "(<variable>)[index]", the variable itself is "<variable>".
++	const string expression = to_expression(id);
++	const string &name = handle->second;
++	const string prefix = root_abi_field_prefix(*var, *resource, field);
++	if (expression.compare(0, name.size(), name) == 0)
++		return prefix + expression.substr(name.size());
++	if (expression.size() > name.size() + 2 && expression[0] == '(' && expression.compare(1, name.size(), name) == 0 &&
++	    expression[name.size() + 1] == ')')
++		return prefix + expression.substr(name.size() + 2);
++	SPIRV_CROSS_THROW(join("Root ABI: a resource expression does not start with the expression of its variable: '",
++	                       expression, "' against '", name, "'."));
++}
++
+ void CompilerMSL::add_root_abi_resource(uint32_t binding, const RootAbiResource &resource)
+ {
+ 	root_abi_resources[binding] = resource;
+@@ -198,7 +265,15 @@
+ 	{
+ 		if (r.where != 0)
+ 			SPIRV_CROSS_THROW("Root ABI: a texture must come from a descriptor table.");
+-		string texture = type_to_glsl(type, var.self);
++		if (r.counter)
++		{
++			// The UAV counter of a buffer view: the address at +16 of the view's descriptor.
++			if (arrayed)
++				return join("spvCounterArray{ ", root_abi_table(r, "spvRawDesc"), " + ", r.index, " }");
++			return join("(*reinterpret_cast<device uint*>(", root_abi_table(r, "spvRawDesc"), "[", r.index, "].aux))");
++		}
++		// The descriptor holds one texture: for an array variable (sized or unbounded) name the element type.
++		string texture = arrayed ? type_to_glsl(get<SPIRType>(type.parent_type), var.self) : type_to_glsl(type, var.self);
+ 		string table = join("reinterpret_cast<constant spvDesc<", texture, ">*>(", word, ")");
+ 		if (arrayed)
+ 			return join("spvDescArray<", texture, ">{ ", table, " + ", r.index, " }");
+@@ -207,14 +282,20 @@
+ 
+ 	if (type.basetype != SPIRType::Struct)
+ 		SPIRV_CROSS_THROW("Root ABI: unsupported resource type.");
+-	if (arrayed)
+-		SPIRV_CROSS_THROW("Root ABI: arrays of buffers are not supported.");
+ 
+ 	bool old_is_using_builtin_array = is_using_builtin_array;
+ 	is_using_builtin_array = true;
+ 	string pointer = join(get_argument_address_space(var), " ", type_to_glsl(type, var.self), "*");
+ 	is_using_builtin_array = old_is_using_builtin_array;
+ 
++	if (arrayed)
++	{
++		if (r.where != 0)
++			SPIRV_CROSS_THROW("Root ABI: an array of buffers must come from a descriptor table.");
++		return join("spvBufferArray<", pointer, ">{ reinterpret_cast<constant spvDesc<", pointer, ">*>(", word, ") + ",
++		            r.index, " }");
++	}
++
+ 	switch (r.where)
+ 	{
+ 	case 0:
+@@ -290,6 +371,10 @@
+ 
+ bool CompilerMSL::is_var_runtime_size_array(const SPIRVariable &var) const
+ {
++	// MacRunner root ABI: an unbounded range of descriptors is not a Metal descriptor array. It is read
++	// through an indexable expression over the descriptor table, exactly like a sized array.
++	if (root_abi_enabled)
++		return false;
+ 	auto& type = get_variable_data_type(var);
+ 	return is_runtime_size_array(type) && get_resource_array_size(type, var.self) == 0;
+ }
+@@ -1964,6 +2049,7 @@
+ 			if (ir.meta[var.self].decoration.qualified_alias != expression)
+ 			{
+ 				set_qualified_name(var.self, expression);
++				root_abi_handle[var.self] = expression;
+ 				force_recompile();
+ 			}
+ 		}
+@@ -9845,6 +9931,27 @@
+ 		}
+ 
+ 		emit_texture_op(instruction, false);
++		break;
++	}
++
++	case OpImageSparseRead:
++	{
++		// MacRunner: a read with a residency code is an ordinary read (see emit_texture_op(sparse)).
++		uint32_t img_id = ops[2];
++		auto *p_var = maybe_get_backing_variable(img_id);
++		if (p_var && has_decoration(p_var->self, DecorationNonReadable))
++		{
++			unset_decoration(p_var->self, DecorationNonReadable);
++			force_recompile();
++		}
++		if (msl_options.readwrite_texture_fences && p_var && !has_decoration(p_var->self, DecorationNonWritable))
++		{
++			add_spv_func_and_recompile(SPVFuncImplImageFence);
++			statement("spvImageFence(", to_expression(img_id), ");");
++		}
++		Instruction fetch = instruction;
++		fetch.op = OpImageSparseFetch;
++		emit_texture_op(fetch, true);
+ 		break;
+ 	}
+ 
+@@ -9874,12 +9981,24 @@
+ 			uint32_t result_type = ops[0];
+ 			uint32_t id = ops[1];
+ 
++			// MacRunner root ABI: a UAV counter is a word behind its descriptor; the "texel pointer"
++			// is that word. A typed buffer view is a window of the buffer's texture.
++			auto *abi_resource = root_abi_resource_of(ops[2]);
++			if (abi_resource && abi_resource->counter)
++			{
++				auto &counter = set<SPIRExpression>(id, to_expression(ops[2]), result_type, true);
++				counter.loaded_from = var ? var->self : ID(0);
++				break;
++			}
++			string abi_coord = bitcast_expression(SPIRType::UInt, ops[3]);
++			if (abi_resource && expression_type(ops[2]).image.dim == DimBuffer)
++				abi_coord = join("spvBufferAt(", abi_coord, ", ", root_abi_field(ops[2], RootAbiMeta), ")");
++
+ 			// Virtual expression. Split this up in the actual image atomic.
+ 			// In GLSL and HLSL we are able to resolve the dereference inline, but MSL has
+ 			// image.op(coord, ...) syntax.
+ 			auto &e =
+-				set<SPIRExpression>(id, join(to_expression(ops[2]), "@",
+-				                             bitcast_expression(SPIRType::UInt, ops[3])),
++				set<SPIRExpression>(id, join(to_expression(ops[2]), "@", abi_coord),
+ 				                    result_type, true);
+ 
+ 			// When using the pointer, we need to know which variable it is actually loaded from.
+@@ -9986,7 +10105,11 @@
+ 		}
+ 
+ 		string expr = type_to_glsl(rslt_type) + "(";
+-		expr += img_exp + ".get_width(" + lod + ")";
++		// MacRunner root ABI: the size of a typed buffer view is its element count (+8 of the descriptor).
++		if (root_abi_enabled && img_dim == DimBuffer)
++			expr += join("uint(", root_abi_field(img_id, RootAbiMeta), " >> 32)");
++		else
++			expr += img_exp + ".get_width(" + lod + ")";
+ 
+ 		if (img_dim == Dim2D || img_dim == DimCube || img_dim == Dim3D)
+ 			expr += ", " + img_exp + ".get_height(" + lod + ")";
+@@ -10048,6 +10171,10 @@
+ 		// the reported LOD based on the sampler. NEAREST miplevel should
+ 		// round the LOD, but LINEAR miplevel should not round.
+ 		// Let's hope this does not become an issue ...
++		if (root_abi_enabled && combined && combined->sampler)
++			statement(to_expression(id), ".x = max(spvMinLod(", root_abi_field(combined->image, RootAbiMeta), "), ",
++			          image_expr, ".calculate_clamped_lod(", sampler_expr, ", ", coord_expr, "));");
++		else
+ 		statement(to_expression(id), ".x = ", image_expr, ".calculate_clamped_lod(", sampler_expr, ", ",
+ 		          coord_expr, ");");
+ 		statement(to_expression(id), ".y = ", image_expr, ".calculate_unclamped_lod(", sampler_expr, ", ",
+@@ -11139,6 +11266,11 @@
+ 
+ 	if (type.width == 64)
+ 		SPIRV_CROSS_THROW("MSL currently does not support 64-bit atomics.");
++
++	// MacRunner root ABI: a UAV counter is a plain word in device memory, not a texture.
++	if (auto *abi_resource = root_abi_resource_of(obj))
++		if (abi_resource->counter)
++			use_native_image_atomic = false;
+ 
+ 	auto remapped_type = type;
+ 	remapped_type.basetype = expected_type;
+@@ -12176,6 +12308,25 @@
+ 	uint32_t grad_x = args.grad_x;
+ 	uint32_t grad_y = args.grad_y;
+ 	uint32_t bias = args.bias;
++
++	// MacRunner root ABI: what the descriptors add to a sample, as the SM5.0 path of the layer
++	// does (resources/ABI.md): the LOD bias of the sampler (implicit LOD: bias; explicit LOD: added
++	// to the level) and the min LOD of the texture view (wherever the LOD is computed).
++	string abi_bias, abi_min_lod;
++	uint32_t abi_image = img;
++	if (auto *abi_combined = maybe_get<SPIRCombinedImageSampler>(img))
++	{
++		abi_image = abi_combined->image;
++		const bool abi_explicit = args.lod != 0, abi_gradient = args.grad_x || args.grad_y;
++		if (root_abi_enabled && abi_combined->sampler && !args.base.is_fetch && !args.base.is_gather &&
++		    (imgtype.image.dim != Dim1D || msl_options.texture_1D_as_2D))
++		{
++			if (!abi_gradient && !(abi_explicit && args.dref))
++				abi_bias = join("spvSamplerBias(", root_abi_field(abi_combined->sampler, RootAbiAux), ")");
++			if (!abi_explicit && !(abi_gradient && args.dref))
++				abi_min_lod = join("spvMinLod(", root_abi_field(abi_combined->image, RootAbiMeta), ")");
++		}
++	}
+ 
+ 	const MSLConstexprSampler *constexpr_sampler = nullptr;
+ 	bool is_dynamic_img_sampler = false;
+@@ -12280,6 +12431,10 @@
+ 		if (msl_options.texture_buffer_native)
+ 		{
+ 			tex_coords = "uint(" + round_fp_tex_coords(tex_coords, coord_is_fp) + ")";
++			// MacRunner root ABI: a typed buffer view is a window of the buffer's texture
++			// (first element and element count at +8 of the descriptor).
++			if (root_abi_enabled)
++				tex_coords = join("spvBufferAt(", tex_coords, ", ", root_abi_field(abi_image, RootAbiMeta), ")");
+ 		}
+ 		else
+ 		{
+@@ -12426,6 +12581,12 @@
+ 			{
+ 				farg_str += ", uint(" + to_extract_component_expression(args.coord, 2) + ") / 6u";
+ 			}
++			else if (root_abi_enabled && !args.base.is_fetch && coord_is_fp)
++			{
++				// MacRunner root ABI: the layer is clamped to the array length of the view.
++				farg_str += join(", spvArrayIndex(", to_extract_component_expression(args.coord, alt_coord_component), ", ",
++				                 root_abi_field(abi_image, RootAbiMeta), ")");
++			}
+ 			else
+ 			{
+ 				farg_str +=
+@@ -12514,8 +12675,15 @@
+ 	if (bias && (imgtype.image.dim != Dim1D || msl_options.texture_1D_as_2D))
+ 	{
+ 		forward = forward && should_forward(bias);
+-		farg_str += ", bias(" + to_unpacked_expression(bias) + ")";
++		if (abi_bias.empty())
++			farg_str += ", bias(" + to_unpacked_expression(bias) + ")";
++		else
++			farg_str += ", bias(" + abi_bias + " + " + to_enclosed_unpacked_expression(bias) + ")";
+ 	}
++	else if (!abi_bias.empty() && !args.lod)
++	{
++		farg_str += ", bias(" + abi_bias + ")";
++	}
+ 
+ 	// Metal does not support LOD for 1D textures.
+ 	if (lod && (imgtype.image.dim != Dim1D || msl_options.texture_1D_as_2D))
+@@ -12583,6 +12751,10 @@
+ 			farg_str += join(", ", grad_opt, "(", grad_coord, "exp2(", to_unpacked_expression(lod), " - 0.5) / ", extent,
+ 			                 ", exp2(", to_unpacked_expression(lod), " - 0.5) / ", extent, ")");
+ 		}
++		else if (!abi_bias.empty())
++		{
++			farg_str += ", level(" + to_enclosed_unpacked_expression(lod) + " + " + abi_bias + ")";
++		}
+ 		else
+ 		{
+ 			farg_str += ", level(" + to_unpacked_expression(lod) + ")";
+@@ -12640,8 +12812,15 @@
+ 			SPIRV_CROSS_THROW("min_lod_clamp() is only supported in MSL 2.2+ and up.");
+ 
+ 		forward = forward && should_forward(args.min_lod);
+-		farg_str += ", min_lod_clamp(" + to_unpacked_expression(args.min_lod) + ")";
++		if (abi_min_lod.empty())
++			farg_str += ", min_lod_clamp(" + to_unpacked_expression(args.min_lod) + ")";
++		else
++			farg_str += ", min_lod_clamp(max(" + abi_min_lod + ", " + to_unpacked_expression(args.min_lod) + "))";
+ 	}
++	else if (!abi_min_lod.empty())
++	{
++		farg_str += ", min_lod_clamp(" + abi_min_lod + ")";
++	}
+ 
+ 	// Add offsets
+ 	string offset_expr;
+@@ -13114,6 +13293,10 @@
+ string CompilerMSL::to_sampler_expression(uint32_t id)
+ {
+ 	auto *combined = maybe_get<SPIRCombinedImageSampler>(id);
++	// MacRunner root ABI: a cube texture is sampled with the cube variant of the sampler (+8 of
++	// the sampler descriptor), as on the SM5.0 path of the layer.
++	if (root_abi_enabled && combined && combined->sampler && expression_type(combined->image).image.dim == DimCube)
++		return root_abi_field(combined->sampler, RootAbiCube);
+ 	if (combined && combined->sampler)
+ 		return to_expression(combined->sampler);
+ 
+@@ -13160,6 +13343,11 @@
+ 
+ string CompilerMSL::to_buffer_size_expression(uint32_t id)
+ {
++	// MacRunner root ABI: the byte length of a buffer view is at +8 of its descriptor;
++	// a root descriptor has none (zero, as on the SM5.0 path of the layer).
++	if (root_abi_enabled)
++		return join("uint(", root_abi_field(id, RootAbiMeta), ")");
++
+ 	auto expr = to_expression(id);
+ 	auto index = expr.find_first_of('[');
+ 
+@@ -19803,6 +19991,7 @@
+ 					SPIRV_CROSS_THROW(join("Root ABI: resource without a root signature mapping: set ", desc_set,
+ 					                       " binding ", get_decoration(var.self, DecorationBinding), "."));
+ 				set_qualified_name(var.self, root_abi_expression(var, mapped->second));
++				root_abi_handle[var.self] = ir.meta[var.self].decoration.qualified_alias;
+ 				root_abi_bound.push_back({ var.self, mapped->second });
+ 				continue;
+ 			}
+@@ -20487,6 +20676,9 @@
+ 
+ string CompilerMSL::additional_fixed_sample_mask_str() const
+ {
++	// MacRunner root ABI: the sample mask of the pipeline is function constant 128.
++	if (root_abi_sample_mask)
++		return "spvSampleMask";
+ 	char print_buffer[32];
+ #ifdef _MSC_VER
+ 	// snprintf does not exist or is buggy on older MSVC versions, some of
+--- a/main.cpp
++++ b/main.cpp
+@@ -1211,8 +1211,11 @@
+ //   vertex_pull <0|1>                      vertex functions read vertices from the table in slot 2
+ //   prelude <path>                         MSL helpers for descriptors
+ //   vertex_prelude <path>                  MSL helpers for vertex pulling
+-//   res <binding> <where> <qword> <index>  one line per resource of descriptor set 0 (binding = logical index):
+-//                                          where 0 table, 1 root descriptor, 2 root constants, 3 static sampler
++//   sample_mask_constant <0|1>             fragment: coverage output ANDed with function constant 128
++//   res <binding> <where> <qword> <index> <counter>
++//                                          one line per resource of descriptor set 0 (binding = logical index):
++//                                          where 0 table, 1 root descriptor, 2 root constants, 3 static sampler;
++//                                          counter 1: the variable is the UAV counter of that descriptor
+ static void apply_root_abi(CompilerMSL &msl, const string &path)
+ {
+ 	std::ifstream file(path);
+@@ -1220,6 +1223,7 @@
+ 		throw std::runtime_error("cannot read the root ABI description");
+ 	uint32_t qwords = 0;
+ 	int vertex_pull = 0;
++	int sample_mask_constant = 0;
+ 	string prelude, vertex_prelude, key;
+ 	std::unordered_map<uint32_t, uint32_t> where;
+ 	while (file >> key)
+@@ -1232,11 +1236,13 @@
+ 			file >> prelude;
+ 		else if (key == "vertex_prelude")
+ 			file >> vertex_prelude;
++		else if (key == "sample_mask_constant")
++			file >> sample_mask_constant;
+ 		else if (key == "res")
+ 		{
+ 			uint32_t binding = 0;
+ 			CompilerMSL::RootAbiResource resource;
+-			file >> binding >> resource.where >> resource.qword >> resource.index;
++			file >> binding >> resource.where >> resource.qword >> resource.index >> resource.counter;
+ 			msl.add_root_abi_resource(binding, resource);
+ 			where[binding] = resource.where;
+ 		}
+@@ -1245,7 +1251,8 @@
+ 		if (!file)
+ 			throw std::runtime_error("broken line in the root ABI description: " + key);
+ 	}
+-	msl.set_root_abi(qwords, vertex_pull != 0);
++	const bool fragment = msl.get_execution_model() == ExecutionModelFragment;
++	msl.set_root_abi(qwords, vertex_pull != 0, sample_mask_constant != 0 && fragment);
+ 
+ 	// Static samplers live in their own table (slot 1); everything else hangs off the root buffer (slot 0).
+ 	auto resources = msl.get_shader_resources();
+@@ -1273,9 +1280,11 @@
+ 	};
+ 	if (!prelude.empty())
+ 		include(prelude);
++	if (sample_mask_constant && fragment)
++		msl.add_header_line("constant uint spvSampleMask [[function_constant(128)]];");
+ 	// A stage input is four components of its type, whatever width the shader declares:
+ 	// the producing stage always writes four (see the stage output padding in spirv_msl.cpp).
+-	if (msl.get_execution_model() == ExecutionModelFragment)
++	if (fragment)
+ 	{
+ 		for (auto &input : msl.get_shader_resources(msl.get_active_interface_variables()).stage_inputs)
+ 		{

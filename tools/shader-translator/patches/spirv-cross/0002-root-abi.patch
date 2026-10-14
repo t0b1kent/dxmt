@@ -1,0 +1,517 @@
+--- a/spirv_msl.hpp
++++ b/spirv_msl.hpp
+@@ -695,6 +695,20 @@
+ 	// constant. Opt-in to this behavior here on a per set basis.
+ 	void set_argument_buffer_device_address_space(uint32_t desc_set, bool device_storage);
+ 
++	// MacRunner: root-signature ABI of the D3D12 layer (resources/ABI.md).
++	// Every resource of descriptor set 0 is read through the root argument buffer
++	// ([[buffer(0)]], plain 64-bit words) and 32-byte descriptors of the descriptor
++	// tables; every resource of descriptor set 1 is a static sampler ([[buffer(1)]]).
++	// No resource gets a Metal slot of its own. Requires argument buffers and MSL 3.0.
++	struct RootAbiResource
++	{
++		uint32_t where = 0; // 0 descriptor table, 1 root descriptor, 2 root constants, 3 static sampler
++		uint32_t qword = 0; // word of the root argument buffer (where 0..2)
++		uint32_t index = 0; // descriptor in the table (where 0) or static sampler (where 3)
++	};
++	void set_root_abi(uint32_t root_qwords, bool vertex_pull);
++	void add_root_abi_resource(uint32_t binding, const RootAbiResource &resource);
++
+ 	// Query after compilation is done. This allows you to check if an input location was used by the shader.
+ 	bool is_msl_shader_input_used(uint32_t location);
+ 
+@@ -1338,6 +1352,17 @@
+ 	bool suppress_missing_prototypes = false;
+ 	bool suppress_incompatible_pointer_types_discard_qualifiers = false;
+ 	bool suppress_sometimes_unitialized = false;
++
++	// MacRunner root-signature ABI state.
++	bool root_abi_enabled = false;
++	bool root_abi_vertex_pull = false;
++	uint32_t root_abi_qwords = 0;
++	std::unordered_map<uint32_t, RootAbiResource> root_abi_resources;
++	SmallVector<std::pair<uint32_t, RootAbiResource>> root_abi_bound;
++	std::string root_abi_vertex_id, root_abi_instance_id, root_abi_base_instance;
++	std::string root_abi_expression(const SPIRVariable &var, const RootAbiResource &resource);
++	void root_abi_vertex_pull_args(std::string &ep_args);
++	bool root_abi_pulls_vertices() const;
+ 
+ 	void add_spv_func_and_recompile(SPVFuncImpl spv_func);
+ 
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -150,6 +150,105 @@
+ 	}
+ }
+ 
++// ---- MacRunner: root-signature ABI of the D3D12 layer (resources/ABI.md) ----
++void CompilerMSL::set_root_abi(uint32_t root_qwords, bool vertex_pull)
++{
++	root_abi_enabled = true;
++	root_abi_qwords = root_qwords;
++	root_abi_vertex_pull = vertex_pull;
++}
++
++void CompilerMSL::add_root_abi_resource(uint32_t binding, const RootAbiResource &resource)
++{
++	root_abi_resources[binding] = resource;
++}
++
++bool CompilerMSL::root_abi_pulls_vertices() const
++{
++	return root_abi_enabled && root_abi_vertex_pull && get_execution_model() == ExecutionModelVertex &&
++	       !msl_options.vertex_for_tessellation;
++}
++
++// The expression every use of a resource variable is emitted as. Nothing is loaded
++// here: the handle (or the buffer pointer) is read from the descriptor at the point of use.
++string CompilerMSL::root_abi_expression(const SPIRVariable &var, const RootAbiResource &r)
++{
++	auto &type = get_variable_data_type(var);
++	const bool arrayed = !type.array.empty();
++	const string word = join("spvDescriptorSet0.r", r.qword);
++
++	if (type.basetype == SPIRType::Sampler)
++	{
++		string table;
++		if (r.where == 3)
++			table = "reinterpret_cast<constant spvSamplerDesc*>(&spvDescriptorSet1)";
++		else if (r.where == 0)
++			table = join("reinterpret_cast<constant spvSamplerDesc*>(", word, ")");
++		else
++			SPIRV_CROSS_THROW("Root ABI: a sampler must come from a descriptor table or be static.");
++		if (arrayed)
++			return join("spvSamplerArray{ ", table, " + ", r.index, " }");
++		return join(table, "[", r.index, "].s");
++	}
++
++	if (r.where == 3)
++		SPIRV_CROSS_THROW("Root ABI: only samplers can be static.");
++
++	if (type.basetype == SPIRType::Image)
++	{
++		if (r.where != 0)
++			SPIRV_CROSS_THROW("Root ABI: a texture must come from a descriptor table.");
++		string texture = type_to_glsl(type, var.self);
++		string table = join("reinterpret_cast<constant spvDesc<", texture, ">*>(", word, ")");
++		if (arrayed)
++			return join("spvDescArray<", texture, ">{ ", table, " + ", r.index, " }");
++		return join(table, "[", r.index, "].h");
++	}
++
++	if (type.basetype != SPIRType::Struct)
++		SPIRV_CROSS_THROW("Root ABI: unsupported resource type.");
++	if (arrayed)
++		SPIRV_CROSS_THROW("Root ABI: arrays of buffers are not supported.");
++
++	bool old_is_using_builtin_array = is_using_builtin_array;
++	is_using_builtin_array = true;
++	string pointer = join(get_argument_address_space(var), " ", type_to_glsl(type, var.self), "*");
++	is_using_builtin_array = old_is_using_builtin_array;
++
++	switch (r.where)
++	{
++	case 0:
++		return join("(*reinterpret_cast<constant spvDesc<", pointer, ">*>(", word, ")[", r.index, "].h)");
++	case 1:
++		return join("(*reinterpret_cast<", pointer, ">(", word, "))");
++	default:
++		// Root constants live in the root argument buffer itself.
++		return join("(*reinterpret_cast<", pointer, ">(&", word, "))");
++	}
++}
++
++// Vertex pulling: the function reads vertex data itself from the table in slot 2
++// (base address, stride, length per bound slot), as the SM5.0 path of the layer does.
++void CompilerMSL::root_abi_vertex_pull_args(string &ep_args)
++{
++	if (!root_abi_pulls_vertices() || !stage_in_var_id)
++		return;
++	const auto builtin = [&](const char *attribute, const char *existing, const char *added) -> string {
++		if (ep_args.find(join("[[", attribute, "]]")) != string::npos)
++			return existing;
++		if (!ep_args.empty())
++			ep_args += ", ";
++		ep_args += join("uint ", added, " [[", attribute, "]]");
++		return added;
++	};
++	root_abi_vertex_id = builtin("vertex_id", "gl_VertexIndex", "spvVertexId");
++	root_abi_instance_id = builtin("instance_id", "gl_InstanceIndex", "spvInstanceId");
++	root_abi_base_instance = builtin("base_instance", "gl_BaseInstance", "spvBaseInstance");
++	if (!ep_args.empty())
++		ep_args += ", ";
++	ep_args += "constant spvVertexBufferEntry* spvVertexBuffers [[buffer(2)]]";
++}
++
+ bool CompilerMSL::is_msl_shader_input_used(uint32_t location)
+ {
+ 	// Don't report internal location allocations to app.
+@@ -1854,6 +1953,20 @@
+ 		emit_specialization_constants_and_structs();
+ 		emit_resources();
+ 		emit_function(get<SPIRFunction>(ir.default_entry_point), Bitset());
++
++		// MacRunner root ABI: a resource expression names the type of the resource. Struct names
++		// and storage image access are settled only while a pass is emitted, so the expressions are
++		// rebuilt after the pass and the pass is repeated if any of them changed.
++		for (auto &bound : root_abi_bound)
++		{
++			auto &var = get<SPIRVariable>(bound.first);
++			string expression = root_abi_expression(var, bound.second);
++			if (ir.meta[var.self].decoration.qualified_alias != expression)
++			{
++				set_qualified_name(var.self, expression);
++				force_recompile();
++			}
++		}
+ 
+ 		pass_count++;
+ 	} while (is_forcing_recompilation());
+@@ -2839,6 +2952,16 @@
+ 		}
+ 	}
+ 
++	// MacRunner root ABI: a stage output is always four components of its type, as in the
++	// SM5.0 path of the layer, so the next stage links whatever width it declares.
++	if (root_abi_enabled && has_decoration(var.self, DecorationLocation) && storage == StorageClassOutput &&
++	    get_entry_point().model == ExecutionModelVertex && !is_builtin_variable(var) && type.array.empty() &&
++	    type.columns == 1 && type.basetype != SPIRType::Struct && type_components < 4)
++	{
++		type_id = build_extended_vector_type(type_id, 4);
++		padded_output = true;
++	}
++
+ 	if (storage == StorageClassInput && pull_model_inputs.count(var.self))
+ 		ib_type.member_types.push_back(build_msl_interpolant_type(type_id, is_noperspective));
+ 	else
+@@ -10586,6 +10709,11 @@
+ 		break;
+ 	}
+ 
++	case OpImageSparseTexelsResident:
++		// MacRunner: see emit_texture_op(sparse).
++		emit_op(ops[0], ops[1], "true", true);
++		break;
++
+ 	default:
+ 		CompilerGLSL::emit_instruction(instruction);
+ 		break;
+@@ -10597,7 +10725,28 @@
+ void CompilerMSL::emit_texture_op(const Instruction &i, bool sparse)
+ {
+ 	if (sparse)
+-		SPIRV_CROSS_THROW("Sparse feedback not yet supported in MSL.");
++	{
++		// MacRunner: the texel is read as from an ordinary texture; the residency code is a
++		// constant that OpImageSparseTexelsResident reports as "resident" (what the SM5.0
++		// path of the layer answers for its textures). Real residency is not queried.
++		auto *sparse_ops = stream(i);
++		uint32_t sparse_type_id = sparse_ops[0];
++		uint32_t sparse_id = sparse_ops[1];
++		auto &sparse_type = get<SPIRType>(sparse_type_id);
++		uint32_t sparse_code_id = 0;
++		uint32_t sparse_texel_id = 0;
++		emit_sparse_feedback_temporaries(sparse_type_id, sparse_id, sparse_code_id, sparse_texel_id);
++		bool sparse_forward = false;
++		SmallVector<uint32_t> sparse_inherited;
++		string texel = to_texture_op(i, sparse, &sparse_forward, sparse_inherited);
++		statement(to_expression(sparse_texel_id), " = ", texel, ";");
++		statement(to_expression(sparse_code_id), " = 0;");
++		emit_op(sparse_type_id, sparse_id,
++		        join(type_to_glsl(sparse_type), "{ ", to_expression(sparse_code_id), ", ",
++		             to_expression(sparse_texel_id), " }"),
++		        true);
++		return;
++	}
+ 
+ 	if (msl_options.use_framebuffer_fetch_subpasses)
+ 	{
+@@ -13396,6 +13545,10 @@
+ 			locn = get_or_allocate_builtin_input_member_location(builtin, type.self, index);
+ 		else
+ 			locn = get_member_location(type.self, index);
++
++		// MacRunner root ABI: the stage-in struct is a local filled by vertex pulling.
++		if (root_abi_pulls_vertices())
++			return "";
+ 
+ 		if (locn != k_unknown_location)
+ 			return string(" [[attribute(") + convert_to_string(locn) + ")]]";
+@@ -14141,6 +14294,9 @@
+ 		auto &type = get_variable_data_type(var);
+ 
+ 		add_resource_name(var.self);
++		// MacRunner root ABI: no [[stage_in]]; the struct becomes a local (fix_up_shader_inputs_outputs).
++		if (root_abi_pulls_vertices())
++			return decl;
+ 		decl = join(type_to_glsl(type), " ", to_name(var.self), " [[stage_in]]");
+ 	}
+ 
+@@ -14550,6 +14706,7 @@
+ 
+ 	entry_point_args_discrete_descriptors(ep_args);
+ 	entry_point_args_builtin(ep_args);
++	root_abi_vertex_pull_args(ep_args);
+ 
+ 	if (!ep_args.empty() && append_comma)
+ 		ep_args += ", ";
+@@ -14910,6 +15067,7 @@
+ 	string ep_args = entry_point_arg_stage_in();
+ 	entry_point_args_discrete_descriptors(ep_args);
+ 	entry_point_args_builtin(ep_args);
++	root_abi_vertex_pull_args(ep_args);
+ 
+ 	if (!ep_args.empty() && append_comma)
+ 		ep_args += ", ";
+@@ -14921,6 +15079,47 @@
+ {
+ 	auto &entry_func = this->get<SPIRFunction>(ir.default_entry_point);
+ 
++	// MacRunner root ABI: fill the stage-in struct from the vertex buffer table. Which
++	// entry, offset, format and step an attribute uses is not known at translation time:
++	// four function constants per input location carry it, set when the pipeline is created.
++	if (root_abi_pulls_vertices() && stage_in_var_id)
++	{
++		// First of all hooks: other input fix-ups already read the struct.
++		entry_func.fixup_hooks_in.insert(entry_func.fixup_hooks_in.begin(), [this]() {
++			auto &var = get<SPIRVariable>(stage_in_var_id);
++			auto &type = get_variable_data_type(var);
++			statement(type_to_glsl(type), " ", to_name(var.self), " = {};");
++			for (uint32_t index = 0; index < uint32_t(type.member_types.size()); index++)
++			{
++				if (is_member_builtin(type, index, nullptr))
++					continue;
++				auto &member = get<SPIRType>(type.member_types[index]);
++				uint32_t location = get_member_location(type.self, index);
++				if (location == k_unknown_location || location >= 32 || !member.array.empty() || member.columns != 1 ||
++				    has_member_decoration(type.self, index, DecorationComponent))
++					SPIRV_CROSS_THROW("Root ABI: vertex input cannot be pulled (location, array, matrix or component).");
++				const char *swizzle[] = { ".x", ".xy", ".xyz", "" };
++				string raw = join("spvPull(spvVertexBuffers, spvVin", location, "_entry, spvVin", location,
++				                  "_offset, spvVin", location, "_format, spvVin", location, "_step, ", root_abi_vertex_id,
++				                  ", ", root_abi_instance_id, ", ", root_abi_base_instance, ")", swizzle[member.vecsize - 1]);
++				string value;
++				switch (member.basetype)
++				{
++				case SPIRType::UInt:
++					value = raw;
++					break;
++				case SPIRType::Int:
++				case SPIRType::Float:
++					value = join("as_type<", type_to_glsl(member), ">(", raw, ")");
++					break;
++				default:
++					SPIRV_CROSS_THROW("Root ABI: vertex input type cannot be pulled.");
++				}
++				statement(to_name(var.self), ".", to_member_name(type, index), " = ", value, ";");
++			}
++		});
++	}
++
+ 	// Emit a guard to ensure we don't execute beyond the last vertex.
+ 	// Vertex shaders shouldn't have the problems with barriers in non-uniform control flow that
+ 	// tessellation control shaders do, so early returns should be OK. We may need to revisit this
+@@ -19359,6 +19558,7 @@
+ 	// you will need to use the remapping from the API.
+ 	for (auto &id : argument_buffer_ids)
+ 		id = 0;
++	root_abi_bound.clear();
+ 
+ 	// Output resources, sorted by resource index & type.
+ 	struct Resource
+@@ -19594,6 +19794,19 @@
+ 			auto &var = *resource.var;
+ 			auto &type = get_variable_data_type(var);
+ 
++			if (root_abi_enabled)
++			{
++				// MacRunner root-signature ABI: the buffer is plain 64-bit words, the resource is
++				// an expression over them. It gets no member and no [[id(N)]].
++				auto mapped = root_abi_resources.find(get_decoration(var.self, DecorationBinding));
++				if (desc_set > 1 || mapped == end(root_abi_resources) || (desc_set == 1) != (mapped->second.where == 3))
++					SPIRV_CROSS_THROW(join("Root ABI: resource without a root signature mapping: set ", desc_set,
++					                       " binding ", get_decoration(var.self, DecorationBinding), "."));
++				set_qualified_name(var.self, root_abi_expression(var, mapped->second));
++				root_abi_bound.push_back({ var.self, mapped->second });
++				continue;
++			}
++
+ 			if (is_var_runtime_size_array(var) && (argument_buffer_device_storage_mask & (1u << desc_set)) == 0)
+ 				SPIRV_CROSS_THROW("Runtime sized variables must be in device storage argument buffers.");
+ 
+@@ -19780,6 +19993,22 @@
+ 			if (has_extended_decoration(var.self, SPIRVCrossDecorationOverlappingBinding))
+ 				set_extended_member_decoration(buffer_type.self, member_index, SPIRVCrossDecorationOverlappingBinding);
+ 			member_index++;
++		}
++
++		if (root_abi_enabled)
++		{
++			// Set 0: the root argument buffer of the layer, one 64-bit word per member.
++			// Set 1: the static sampler table; only its address is used.
++			uint32_t word_type_id = ir.increase_bound_by(1);
++			auto &word_type = set<SPIRType>(word_type_id, OpTypeInt);
++			word_type.basetype = SPIRType::UInt64;
++			word_type.width = 64;
++			uint32_t words = desc_set == 0 ? max<uint32_t>(root_abi_qwords, 1u) : 1u;
++			for (uint32_t word = 0; word < words; word++)
++			{
++				buffer_type.member_types.push_back(word_type_id);
++				set_member_name(buffer_type.self, word, join("r", word));
++			}
+ 		}
+ 
+ 		if (msl_options.replace_recursive_inputs && type_contains_recursion(buffer_type))
+--- a/main.cpp
++++ b/main.cpp
+@@ -30,6 +30,8 @@
+ #include "spirv_reflect.hpp"
+ #include <algorithm>
+ #include <cstdio>
++#include <fstream>
++#include <sstream>
+ #include <cstring>
+ #include <functional>
+ #include <limits>
+@@ -648,6 +650,7 @@
+ 	bool msl_argument_buffers = false;
+ 	uint32_t msl_argument_buffers_tier = 0;		// Tier 1
+ 	bool msl_texture_buffer_native = false;
++	string msl_root_abi; // MacRunner: root-signature ABI description, see apply_root_abi()
+ 	bool msl_framebuffer_fetch = false;
+ 	bool msl_invariant_float_math = false;
+ 	bool msl_emulate_cube_array = false;
+@@ -1200,6 +1203,105 @@
+ 	{
+ 		fprintf(stderr, "Invalid resource type for --hlsl-auto-binding: %s\n", arg.c_str());
+ 		return 0;
++	}
++}
++
++// MacRunner: root-signature ABI of the D3D12 layer (resources/ABI.md). The description is a text file:
++//   qwords <n>                             64-bit words of the root argument buffer
++//   vertex_pull <0|1>                      vertex functions read vertices from the table in slot 2
++//   prelude <path>                         MSL helpers for descriptors
++//   vertex_prelude <path>                  MSL helpers for vertex pulling
++//   res <binding> <where> <qword> <index>  one line per resource of descriptor set 0 (binding = logical index):
++//                                          where 0 table, 1 root descriptor, 2 root constants, 3 static sampler
++static void apply_root_abi(CompilerMSL &msl, const string &path)
++{
++	std::ifstream file(path);
++	if (!file)
++		throw std::runtime_error("cannot read the root ABI description");
++	uint32_t qwords = 0;
++	int vertex_pull = 0;
++	string prelude, vertex_prelude, key;
++	std::unordered_map<uint32_t, uint32_t> where;
++	while (file >> key)
++	{
++		if (key == "qwords")
++			file >> qwords;
++		else if (key == "vertex_pull")
++			file >> vertex_pull;
++		else if (key == "prelude")
++			file >> prelude;
++		else if (key == "vertex_prelude")
++			file >> vertex_prelude;
++		else if (key == "res")
++		{
++			uint32_t binding = 0;
++			CompilerMSL::RootAbiResource resource;
++			file >> binding >> resource.where >> resource.qword >> resource.index;
++			msl.add_root_abi_resource(binding, resource);
++			where[binding] = resource.where;
++		}
++		else
++			throw std::runtime_error("unknown line in the root ABI description: " + key);
++		if (!file)
++			throw std::runtime_error("broken line in the root ABI description: " + key);
++	}
++	msl.set_root_abi(qwords, vertex_pull != 0);
++
++	// Static samplers live in their own table (slot 1); everything else hangs off the root buffer (slot 0).
++	auto resources = msl.get_shader_resources();
++	const auto place = [&](const SmallVector<Resource> &list) {
++		for (auto &resource : list)
++		{
++			auto found = where.find(msl.get_decoration(resource.id, DecorationBinding));
++			msl.set_decoration(resource.id, DecorationDescriptorSet, found != where.end() && found->second == 3 ? 1 : 0);
++		}
++	};
++	place(resources.uniform_buffers);
++	place(resources.storage_buffers);
++	place(resources.separate_images);
++	place(resources.separate_samplers);
++	place(resources.storage_images);
++	place(resources.sampled_images);
++
++	const auto include = [&](const string &source) {
++		std::ifstream text(source);
++		if (!text)
++			throw std::runtime_error("cannot read " + source);
++		string line;
++		while (std::getline(text, line))
++			msl.add_header_line(line);
++	};
++	if (!prelude.empty())
++		include(prelude);
++	// A stage input is four components of its type, whatever width the shader declares:
++	// the producing stage always writes four (see the stage output padding in spirv_msl.cpp).
++	if (msl.get_execution_model() == ExecutionModelFragment)
++	{
++		for (auto &input : msl.get_shader_resources(msl.get_active_interface_variables()).stage_inputs)
++		{
++			auto &type = msl.get_type(input.base_type_id);
++			if (!type.array.empty() || type.columns != 1 || type.basetype == SPIRType::Struct)
++				continue;
++			MSLShaderInterfaceVariable variable;
++			variable.location = msl.get_decoration(input.id, DecorationLocation);
++			variable.component = msl.get_decoration(input.id, DecorationComponent);
++			variable.vecsize = 4;
++			msl.add_msl_shader_input(variable);
++		}
++	}
++	if (vertex_pull && msl.get_execution_model() == ExecutionModelVertex && !vertex_prelude.empty())
++	{
++		auto inputs = msl.get_shader_resources(msl.get_active_interface_variables()).stage_inputs;
++		if (!inputs.empty())
++			include(vertex_prelude);
++		for (auto &input : inputs)
++		{
++			uint32_t location = msl.get_decoration(input.id, DecorationLocation);
++			const char *fields[] = { "entry", "offset", "format", "step" };
++			for (uint32_t field = 0; field < 4; field++)
++				msl.add_header_line("constant uint spvVin" + std::to_string(location) + "_" + fields[field] +
++				                    " [[function_constant(" + std::to_string(location * 4 + field) + ")]];");
++		}
+ 	}
+ }
+ 
+@@ -1237,7 +1339,7 @@
+ 		msl_opts.use_framebuffer_fetch_subpasses = args.msl_framebuffer_fetch;
+ 		msl_opts.pad_fragment_output_components = args.msl_pad_fragment_output;
+ 		msl_opts.tess_domain_origin_lower_left = args.msl_domain_lower_left;
+-		msl_opts.argument_buffers = args.msl_argument_buffers;
++		msl_opts.argument_buffers = args.msl_argument_buffers || !args.msl_root_abi.empty();
+ 		msl_opts.argument_buffers_tier = static_cast<CompilerMSL::Options::ArgumentBuffersTier>(args.msl_argument_buffers_tier);
+ 		msl_opts.texture_buffer_native = args.msl_texture_buffer_native;
+ 		msl_opts.multiview = args.msl_multiview;
+@@ -1493,6 +1595,9 @@
+ 	}
+ 
+ 	ShaderResources res;
++	if (args.msl && !args.msl_root_abi.empty())
++		apply_root_abi(*static_cast<CompilerMSL *>(compiler.get()), args.msl_root_abi);
++
+ 	if (args.remove_unused)
+ 	{
+ 		auto active = compiler->get_active_interface_variables();
+@@ -1690,6 +1795,7 @@
+ 	cbs.add("--msl-device-argument-buffer",
+ 	        [&args](CLIParser &parser) { args.msl_device_argument_buffers.push_back(parser.next_uint()); });
+ 	cbs.add("--msl-texture-buffer-native", [&args](CLIParser &) { args.msl_texture_buffer_native = true; });
++	cbs.add("--msl-root-abi", [&args](CLIParser &parser) { args.msl_root_abi = parser.next_string(); });
+ 	cbs.add("--msl-framebuffer-fetch", [&args](CLIParser &) { args.msl_framebuffer_fetch = true; });
+ 	cbs.add("--msl-invariant-float-math", [&args](CLIParser &) { args.msl_invariant_float_math = true; });
+ 	cbs.add("--msl-emulate-cube-array", [&args](CLIParser &) { args.msl_emulate_cube_array = true; });

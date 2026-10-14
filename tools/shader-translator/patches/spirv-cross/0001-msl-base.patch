@@ -1,0 +1,60 @@
+diff --git a/spirv_msl.cpp b/spirv_msl.cpp
+index 083d6b3..64d5bea 100644
+--- a/spirv_msl.cpp
++++ b/spirv_msl.cpp
+@@ -3281,6 +3281,21 @@ void CompilerMSL::add_composite_member_variable_to_interface_block(StorageClass
+ 		if (!msl_options.enable_clip_distance_user_varying)
+ 			return;
+ 	}
++	else if (storage == StorageClassOutput && is_builtin && builtin == BuiltInCullDistance &&
++	         !meta.strip_array && meta.allow_local_declaration)
++	{
++		// A built-in block itself is not materialized for ordinary vertex/DS
++		// output. Its CullDistance member still needs the same local array as
++		// a standalone CullDistance variable, including calls to helper functions.
++		entry_func.fixup_hooks_in.push_back([this, mbr_type_id, elem_cnt]() {
++			// Builtin helper arguments use native array references, so the
++			// materialized member must not become spvUnsafeArray here.
++			const auto &array_type = get<SPIRType>(mbr_type_id);
++			statement(type_to_glsl(get<SPIRType>(array_type.parent_type)), " ",
++			          builtin_to_glsl(BuiltInCullDistance, StorageClassFunction),
++			          "[", elem_cnt, "];");
++		});
++	}
+ 
+ 	// Recursively handle nested structures.
+ 	if (mbr_type.basetype == SPIRType::Struct)
+@@ -3431,6 +3446,9 @@ void CompilerMSL::add_composite_member_variable_to_interface_block(StorageClass
+ 				entry_func.fixup_hooks_out.push_back([=]() {
+ 					if (flatten_from_ib_var)
+ 						statement(ib_var_ref, ".", mbr_name, " = ", ib_var_ref, ".", flatten_from_ib_mbr_name, "[", i, "];");
++					else if (is_builtin && builtin == BuiltInCullDistance)
++						statement(ib_var_ref, ".", mbr_name, " = ",
++						          builtin_to_glsl(BuiltInCullDistance, StorageClassFunction), "[", i, "];");
+ 					else
+ 						statement(ib_var_ref, ".", mbr_name, " = ", var_chain, ";");
+ 				});
+@@ -17551,6 +17569,15 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
+ 	case BuiltInDrawIndex:
+ 		SPIRV_CROSS_THROW("DrawIndex is not supported in MSL.");
+ 
++	case BuiltInCullDistance:
++		// CullDistance is flattened to user(cullN) members, unlike the native
++		// clip_distance array. add_composite_variable_to_interface_block()
++		// declares a local array and copies it to those members on exit.
++		// Naming the local array out.gl_CullDistance leaves stores referring
++		// to a non-existent struct member. Primitive culling remains a
++		// pipeline lowering requirement; user varyings alone do not cull.
++		break;
++
+ 	// When used in the entry function, output builtins are qualified with output struct name.
+ 	// Test storage class as NOT Input, as output builtins might be part of generic type.
+ 	// Also don't do this for tessellation control shaders.
+@@ -17567,7 +17594,6 @@ string CompilerMSL::builtin_to_glsl(BuiltIn builtin, StorageClass storage)
+ 	case BuiltInPosition:
+ 	case BuiltInPointSize:
+ 	case BuiltInClipDistance:
+-	case BuiltInCullDistance:
+ 	case BuiltInLayer:
+ 		if (is_tesc_shader())
+ 			break;

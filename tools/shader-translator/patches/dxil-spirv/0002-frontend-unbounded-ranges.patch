@@ -1,0 +1,27 @@
+--- a/dxil_spirv_frontend.cpp
++++ b/dxil_spirv_frontend.cpp
+@@ -42,7 +42,8 @@
+ 
+ // MacRunner: retain logical resource identity before the default CLI aliases
+ // SRV/UAV/CBV/sampler registers into one SPIR-V binding namespace.
+-// Only the standalone static-descriptor path is supported by this option.
++// Only the standalone static-descriptor path is supported by this option
++// (unbounded ranges included: "count" is 4294967295 in the map).
+ struct LogicalBinding
+ {
+ 	unsigned cls, space, reg, size, resource, kind, view;
+@@ -53,8 +54,12 @@
+ static bool map_logical(unsigned cls, const dxil_spv_d3d_binding &src,
+                         dxil_spv_vulkan_binding &dst, unsigned view = 0)
+ {
+-	if (src.register_index == UINT32_MAX || src.register_space == UINT32_MAX ||
+-	    src.range_size == UINT32_MAX || dst.bindless.use_heap ||
++	// MacRunner (admission milestone): an unbounded range of an ordinary register is served; its
++	// size stays UINT32_MAX and the converter declares a runtime array indexed by the handle index.
++	// Rejecting it here made the converter retry with range_size = 1 (dxil_converter.cpp, "We may be
++	// rejected if the unbound range has 1 non-bindless descriptor"), which silently dropped the index.
++	// Only the global descriptor heap (register and space both UINT32_MAX) is still rejected.
++	if (src.register_index == UINT32_MAX || src.register_space == UINT32_MAX || dst.bindless.use_heap ||
+ 	    dst.descriptor_type == DXIL_SPV_VULKAN_DESCRIPTOR_TYPE_BUFFER_DEVICE_ADDRESS ||
+ 	    dst.descriptor_type == DXIL_SPV_VULKAN_DESCRIPTOR_TYPE_INPUT_ATTACHMENT)
+ 		return false;
