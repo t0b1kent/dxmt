@@ -207,9 +207,9 @@ class SourceDXMTTests(unittest.TestCase):
         builder.full.apply_profile.assert_called_once_with({'schema': 1}, job.PROFILE)
         dep.toolchain_preflight.assert_called_once_with(tool, self.root)
 
-    def route_fixture(self, phase, consumer_failure=False):
+    def route_fixture(self, phase, consumer_failure=False, scenario=None):
         args = argparse.Namespace(phase=phase, dxmt_checkout=self.root / 'dxmt',
-                                  wine_checkout=self.root / 'wine')
+                                  wine_checkout=self.root / 'wine', scenario=scenario, jobs=job.DEFAULT_JOBS)
         child = {'status': 'FULL_WINE_BUILT_NOT_ACCEPTED', 'install_skipped': 0}
         pins = {name: 'a' * 64 for name in job.PIN_NAMES}
         def put(path, value):
@@ -233,7 +233,7 @@ class SourceDXMTTests(unittest.TestCase):
         def compile(argv, cwd, env, log, reports, name, deadline, timeout):
             log.write_text('inert mocked producer\n')
             put(cwd / 'dxmt-work/reports/RESULT.json',
-                dict(status='D3D11_SOURCE_BUILT_NOT_FUNCTION_SECTION_ACCEPTED', first_failure=None))
+                dict(status=job.STATUS_PART if scenario else job.STATUS_ALL, first_failure=None))
         dep = SimpleNamespace(inventory=lambda prefix: [], command=Mock(side_effect=compile))
         builder = SimpleNamespace(REPO=self.root, full=SimpleNamespace(load_driver=lambda *a: dep),
             validate_wine=Mock(side_effect=ValueError('inert consumer refusal') if consumer_failure else None,
@@ -268,6 +268,42 @@ class SourceDXMTTests(unittest.TestCase):
         dep.command.assert_called_once()
         argv = dep.command.call_args.args[0]
         self.assertTrue(argv[3].endswith('build_dxmt.py'))
+
+    def test_default_is_two_compiler_workers_and_all_scenarios(self):
+        args = argparse.Namespace(**{name: self.root / name for name in
+                    ('wine_prefix', 'wine_result', 'deps_prefix', 'deps_manifest', 'llvm_prefix', 'llvm_result')})
+        pins = {name: 'a' * 64 for name in job.PIN_NAMES}
+        args.wine_files, args.wine_files_sha256 = self.root / 'preflight-wine-files.json', 'b' * 64
+        argv = job.adapter_argv(self.root / 'dxmt', self.root / 'wine', args, pins, self.root)
+        self.assertEqual(argv[argv.index('--jobs') + 1], '2')
+        self.assertNotIn('--scenario', argv)
+        args.jobs, args.scenario = 1, 'native-r2'
+        argv = job.adapter_argv(self.root / 'dxmt', self.root / 'wine', args, pins, self.root)
+        self.assertEqual(argv[argv.index('--jobs') + 1], '1')
+        self.assertEqual(argv[argv.index('--scenario') + 1], 'native-r2')
+        args.scenario = 'other'
+        with self.assertRaisesRegex(ValueError, 'scenario'):
+            job.adapter_argv(self.root / 'dxmt', self.root / 'wine', args, pins, self.root)
+        args.scenario, args.jobs = 'pe', 5
+        with self.assertRaisesRegex(ValueError, 'workers'):
+            job.adapter_argv(self.root / 'dxmt', self.root / 'wine', args, pins, self.root)
+
+    def test_one_scenario_run_reports_the_scenario_status(self):
+        dep, record = self.route_fixture('full', scenario='pe')
+        self.assertEqual(record['status'], job.STATUS_PART)
+        self.assertEqual(record['scenario'], 'pe')
+        self.assertEqual(dep.command.call_args.args[0][dep.command.call_args.args[0].index('--scenario') + 1], 'pe')
+
+    def test_workflow_runs_one_job_per_scenario_with_a_resource_sampler(self):
+        path = Path(__file__).resolve().parents[2] / '.github/workflows/repro109-dxmt-after-wine27-xcode27-arm64.yml'
+        text = path.read_text()
+        self.assertIn('scenario: [native-r2, native-pe, pe]', text)
+        self.assertIn('fail-fast: false', text)
+        self.assertIn('--scenario "$SCENARIO" --jobs 2', text)
+        self.assertIn('memwatch.sh', text)
+        self.assertIn('repro109-dxmt-after-wine27-${{ matrix.scenario }}-${{ github.sha }}', text)
+        self.assertIn('retention-days: 30', text)
+        self.assertTrue(Path(__file__).with_name('memwatch.sh').is_file())
 
     def test_consumer_failure_keeps_first_failure_and_never_compiles(self):
         dep, record = self.route_fixture('full', consumer_failure=True)

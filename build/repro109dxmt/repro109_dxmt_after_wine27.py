@@ -26,6 +26,10 @@ LLVM_ARCHIVE_SHA = '4ce2e2c69d9f768d9b9c887b9a10cbd87299fce333d1808f6ba6de489f32
 LLVM_RESULT_SHA = 'ede9dc86c65034eb94fc37fc007a92f8a561f32cc2431fed94bcacb120bf4e63'
 PROFILE = 'github-xcode27-arm64'
 PIN_NAMES = ('wine_result', 'deps_manifest', 'wine_dist', 'deps_prefix')
+SCENARIO_NAMES = ('native-r2', 'native-pe', 'pe')
+STATUS_ALL = 'D3D11_SOURCE_BUILT_NOT_FUNCTION_SECTION_ACCEPTED'
+STATUS_PART = 'D3D11_SOURCE_SCENARIO_BUILT_NOT_FUNCTION_SECTION_ACCEPTED'
+DEFAULT_JOBS = 2
 
 
 def require(value, message):
@@ -170,8 +174,14 @@ def load_builder(dxmt, wine, out):
 
 
 def adapter_argv(dxmt, wine, args, pins, root):
+    jobs = getattr(args, 'jobs', None) or DEFAULT_JOBS
+    require(type(jobs) is int and 1 <= jobs <= 4, 'Use 1..4 compiler workers')
     argv = [sys.executable, '-I', '-B', str(dxmt / 'build/repro109dxmt/build_dxmt.py'),
-            '--build', '--profile', PROFILE, '--jobs', '3']
+            '--build', '--profile', PROFILE, '--jobs', str(jobs)]
+    scenario = getattr(args, 'scenario', None)
+    if scenario:
+        require(scenario in SCENARIO_NAMES, 'Unknown scenario')
+        argv += ['--scenario', scenario]
     for name in ('wine_prefix', 'wine_result', 'deps_prefix', 'deps_manifest', 'llvm_prefix', 'llvm_result'):
         argv += ['--' + name.replace('_', '-'), str(getattr(args, name))]
     return argv + ['--wine-result-sha256', pins['wine_result'], '--deps-manifest-sha256',
@@ -251,10 +261,13 @@ def execute(args):
             dep.command(adapter_argv(dxmt, wine, args, pins, root), root, dict(os.environ),
                         out / 'dxmt-driver.log', out, 'dxmt-driver', time.monotonic() + 101 * 60, timeout=100 * 60)
             result['producer'] = json.loads((root / 'dxmt-work/reports/RESULT.json').read_bytes())
-            require(result['producer'].get('status') == 'D3D11_SOURCE_BUILT_NOT_FUNCTION_SECTION_ACCEPTED'
+            expected = STATUS_PART if getattr(args, 'scenario', None) else STATUS_ALL
+            require(result['producer'].get('status') == expected
                     and result['producer'].get('first_failure', 'MISSING') is None,
                     'DXMT producer did not complete')
-            result['status'] = 'D3D11_SOURCE_BUILT_NOT_FUNCTION_SECTION_ACCEPTED'
+            result['status'] = expected
+            if getattr(args, 'scenario', None):
+                result['scenario'] = args.scenario
     except Exception as error:
         result.update(status='FAILED', first_failure=dict(phase=phase, error=str(error)[:1200]))
         raise
@@ -268,6 +281,9 @@ def execute(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--phase', choices=('inputs', 'full'))
+    parser.add_argument('--scenario', choices=SCENARIO_NAMES,
+                        help='Build only this scenario; one matrix job per scenario keeps each runner small')
+    parser.add_argument('--jobs', type=int, default=DEFAULT_JOBS, help='Compiler workers (1..4)')
     parser.add_argument('--dxmt-checkout', required=True, type=Path)
     parser.add_argument('--wine-checkout', required=True, type=Path)
     args = parser.parse_args()

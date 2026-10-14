@@ -39,11 +39,21 @@ concurrency:
 
 jobs:
   dxmt:
+    # One runner per scenario: the first run (38495580133) built all three in one job with three compiler
+    # workers and the runner lost its connection after 45 minutes with no log, no step and no artifact.
+    # A lost job now names its scenario, each job keeps its own artifact, and two compiler workers leave
+    # memory for the compiler's own working set.
+    name: dxmt (${{ matrix.scenario }})
     if: github.repository == 't0b1kent/dxmt' && github.ref == 'refs/heads/macrunner-d3d12'
     runs-on: xcode-27
-    timeout-minutes: 150
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [native-r2, native-pe, pe]
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.app/Contents/Developer
+      SCENARIO: ${{ matrix.scenario }}
     steps:
       - name: Checkout this immutable DXMT recipe and pinned source trees
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -89,9 +99,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Resource sampler: one block per minute into this step's live log and into memwatch.log.
+          bash "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/memwatch.sh" "$RUNNER_TEMP/repro109-dxmt-after-wine27" 60 \
+            "$RUNNER_TEMP/memwatch.log" &
+          watcher=$!
+          status=0
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/repro109_dxmt_after_wine27.py" \
             --dxmt-checkout "$GITHUB_WORKSPACE/dxmt" \
-            --wine-checkout "$GITHUB_WORKSPACE/macrunner-wine"
+            --wine-checkout "$GITHUB_WORKSPACE/macrunner-wine" \
+            --scenario "$SCENARIO" --jobs 2 || status=$?
+          kill "$watcher" || true
+          exit "$status"
       - name: Preserve complete bounded reports and unsigned outputs
         if: always()
         shell: bash
@@ -104,13 +122,14 @@ jobs:
           for part in reports outputs; do
             if [ -d "$root/dxmt-work/$part" ]; then cp -R "$root/dxmt-work/$part" "$out/$part"; fi
           done
+          if [ -f "$RUNNER_TEMP/memwatch.log" ]; then cp "$RUNNER_TEMP/memwatch.log" "$out/memwatch.log"; fi
           git -C "$GITHUB_WORKSPACE/dxmt" rev-parse HEAD > "$out/dxmt-recipe-revision.txt"
           git -C "$GITHUB_WORKSPACE/macrunner-wine" rev-parse HEAD > "$out/wine-recipe-revision.txt"
       - name: Retain source outputs and raw evidence in Actions
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: repro109-dxmt-after-wine27-${{ github.sha }}
+          name: repro109-dxmt-after-wine27-${{ matrix.scenario }}-${{ github.sha }}
           path: ${{ runner.temp }}/repro109-dxmt-after-wine27-results/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 30

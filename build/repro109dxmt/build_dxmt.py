@@ -30,6 +30,16 @@ PE_OUTPUTS = ['src/winemetal/winemetal.dll', 'src/dxgi/dxgi.dll',
 SCENARIOS = [('native-r2', 'native', 'aarch64', 'debug', False),
              ('native-pe', 'pe', 'aarch64', 'release', True),
              ('pe', 'pe', 'x86_64', 'release', True)]
+STATUS_ALL = 'D3D11_SOURCE_BUILT_NOT_FUNCTION_SECTION_ACCEPTED'
+STATUS_PART = 'D3D11_SOURCE_SCENARIO_BUILT_NOT_FUNCTION_SECTION_ACCEPTED'
+
+
+def selected_scenarios(names):
+    """All scenarios when no name is given; otherwise exactly the named ones, in recipe order."""
+    names = list(names or [])
+    known = [row[0] for row in SCENARIOS]
+    require(all(name in known for name in names) and len(set(names)) == len(names), 'Unknown or repeated scenario')
+    return [row for row in SCENARIOS if not names or row[0] in names]
 
 
 def require(ok, message):
@@ -245,6 +255,7 @@ def build(args):
     full.cloud_guard(args.profile)  # Before work creation, downloaded tools or network.
     source, lock = check_inputs()
     require(type(args.jobs) is int and 1 <= args.jobs <= 4, 'Use 1..4 compiler workers')
+    chosen = selected_scenarios(getattr(args, 'scenario', None))
     root = args.work.resolve()
     require(not root.exists() and not root.is_symlink() and not any(c.isspace() for c in str(root)),
             'Fresh owned work path without whitespace required')
@@ -255,7 +266,8 @@ def build(args):
     deadline = time.monotonic() + 95 * 60
     result = dict(schema=1, status='STARTED', first_failure=None, source_inputs=source,
                   comparison='NOT_ENABLED', stands='NOT_ENABLED', selected_package_mapping='NOT_ACCEPTED',
-                  games='NOT_ENABLED', signing='NOT_ENABLED', notarization='NOT_ENABLED', outputs=[])
+                  games='NOT_ENABLED', signing='NOT_ENABLED', notarization='NOT_ENABLED', outputs=[],
+                  scenarios=[row[0] for row in chosen], jobs=args.jobs)
     phase = 'INPUTS'
     def run(name, argv, cwd=root):
         dep.command(argv, cwd, env, out / (name + '.log'), out, name, deadline, timeout=1800)
@@ -282,7 +294,7 @@ def build(args):
             run(name.name + '-version', [str(name), '--version'])
             require((out / (name.name + '-version.log')).read_text().strip() == version, 'Tool version differs')
         result['toolchain'] = tool
-        for scenario in SCENARIOS:
+        for scenario in chosen:
             name, kind, arch, buildtype, builtin = scenario
             phase = name + ':PREPARE'
             prepared = root / name
@@ -291,7 +303,7 @@ def build(args):
             run(name + '-prepare', [sys.executable, '-B', '-I', str(HERE / script), '--out', name])
             for script, options in [('freeze_version.py', []), ('llvm_link.py', []),
                                     ('prepare_directx.py', ['--checkout', 'headers', '--profile', args.profile])]:
-                if script == 'prepare_directx.py' and name == SCENARIOS[0][0]:
+                if script == 'prepare_directx.py' and name == chosen[0][0]:
                     options += ['--fetch']
                 run(name + '-' + script[:-3], [sys.executable, '-B', '-I', str(HERE / script),
                                               '--kind', kind, '--prepared', name, *options])
@@ -347,7 +359,7 @@ def build(args):
                                                                   args.llvm_result_sha256)
         require(result['wine_inputs_after'] == result['wine_inputs'] and
                 result['llvm_inputs_after'] == result['llvm_inputs'], 'Source-built inputs drifted')
-        result['status'] = 'D3D11_SOURCE_BUILT_NOT_FUNCTION_SECTION_ACCEPTED'
+        result['status'] = STATUS_ALL if len(chosen) == len(SCENARIOS) else STATUS_PART
     except Exception as error:
         result.update(status='FAILED', first_failure=dict(phase=phase, error=str(error)[:1600]))
         raise
@@ -389,6 +401,8 @@ def main():
                         default='github-macos15-arm64')
     parser.add_argument('--work', type=Path)
     parser.add_argument('--jobs', type=int, default=4)
+    parser.add_argument('--scenario', action='append', default=[], choices=[row[0] for row in SCENARIOS],
+                        help='Build only this scenario (repeatable); the default builds all three in one run')
     for name in ('wine-prefix', 'wine-result', 'wine-files', 'deps-prefix', 'deps-manifest', 'llvm-prefix', 'llvm-result'):
         parser.add_argument('--' + name, type=Path)
     for name in ('wine-result-sha256', 'wine-files-sha256', 'deps-manifest-sha256', 'llvm-result-sha256'):

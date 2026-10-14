@@ -349,6 +349,33 @@ class CompilerRouteTests(unittest.TestCase):
         self.assertEqual(result['install_skipped'], 0)
         self.assertEqual(result['selected_package_mapping'], 'NOT_ACCEPTED')
 
+    def test_scenario_names_are_checked_and_keep_recipe_order(self):
+        self.assertEqual([row[0] for row in builder.selected_scenarios(None)], ['native-r2', 'native-pe', 'pe'])
+        self.assertEqual([row[0] for row in builder.selected_scenarios(['pe', 'native-r2'])], ['native-r2', 'pe'])
+        for bad in (['other'], ['pe', 'pe']):
+            with self.assertRaisesRegex(ValueError, 'scenario'):
+                builder.selected_scenarios(bad)
+
+    def test_one_scenario_builds_only_its_tree_and_fetches_its_own_headers(self):
+        self.args.scenario = ['pe']
+        self.fake_pipeline()
+        result = json.loads((self.args.work / 'reports/RESULT.json').read_bytes())
+        self.assertEqual(result['status'], builder.STATUS_PART)
+        self.assertEqual(result['scenarios'], ['pe'])
+        self.assertEqual(len(result['outputs']), 4)
+        self.assertTrue(all(component.startswith(('pe-', 'meson', 'ninja')) for component, argv in self.calls))
+        headers = [argv for component, argv in self.calls if component == 'pe-prepare_directx']
+        self.assertEqual(len(headers), 1)
+        self.assertIn('--fetch', headers[0])
+
+    def test_all_scenarios_fetch_headers_only_in_the_first(self):
+        self.fake_pipeline()
+        fetched = [component for component, argv in self.calls
+                   if component.endswith('-prepare_directx') and '--fetch' in argv]
+        self.assertEqual(fetched, ['native-r2-prepare_directx'])
+        result = json.loads((self.args.work / 'reports/RESULT.json').read_bytes())
+        self.assertEqual(result['scenarios'], ['native-r2', 'native-pe', 'pe'])
+
     def test_full_route_first_failure_keeps_partial_outputs_and_logs(self):
         with self.assertRaisesRegex(ValueError, 'injected'):
             self.fake_pipeline('pe-build')
