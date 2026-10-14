@@ -323,16 +323,20 @@ def build(args):
                 path = builddir / relative
                 require(path.stat().st_size <= 64 * 1024**2, 'Configure evidence over cap; original retained')
                 shutil.copyfile(path, out / (name + '-' + relative.replace('/', '-')))
+            # Meson lists the program it found for the native LLVM (-Dnative_llvm_path) as a build-system file. It is
+            # the llvm-config of the pinned LLVM15 prefix, whose inventory is hash-checked before and after the build
+            # (validate_llvm_prefix), so it is an owned tool; run 38501832021 rejected exactly this one path.
+            llvm_config = args.llvm_prefix / 'bin/llvm-config'
             if arch == 'aarch64':
                 tools = [native, cross, Path('/usr/bin/printf'), Path('/usr/bin/xcrun'),
                          Path('/usr/bin/xxd'), args.wine_prefix / 'bin/winebuild',
-                         compiler / 'bin' / (arch + '-w64-mingw32-windres')]
+                         compiler / 'bin' / (arch + '-w64-mingw32-windres'), llvm_config]
                 measured = ownership(selected, builddir, {str(x.resolve()) for x in tools})
                 require(len(measured['native_c']) == 2, 'Native winemetal/cache compilation inputs missing')
             else:
                 # PE configure declares x64 native targets, but selected PE targets must exclude them.
                 tools = [native, cross, Path('/usr/bin/printf'), Path('/usr/bin/xcrun'), Path('/usr/bin/xxd'),
-                         args.wine_prefix / 'bin/winebuild', compiler / 'bin/x86_64-w64-mingw32-windres']
+                         args.wine_prefix / 'bin/winebuild', compiler / 'bin/x86_64-w64-mingw32-windres', llvm_config]
                 measured = ownership_pe(selected, builddir, {str(x.resolve()) for x in tools})
             (out / (name + '-ownership.json')).write_text(json.dumps(measured, indent=2) + '\n')
             targets = PE_TARGETS if arch == 'x86_64' else ['src/winemetal/unix/winemetal.so']

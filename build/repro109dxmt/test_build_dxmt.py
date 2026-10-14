@@ -258,14 +258,15 @@ class CompilerRouteTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 builder.validate_wine(self.args, dep, wine)
 
-    def ownership_fixture(self, source, build, foreign=False, architecture='arm64'):
+    def ownership_fixture(self, source, build, foreign=False, architecture='arm64', llvm_config=None):
         source.mkdir(parents=True, exist_ok=True)
         for name in ('winemetal_unix.c', 'cache.c'):
             if not (source / name).exists():
                 (source / name).write_text('/* owned inert fixture */\n')
         build.mkdir(parents=True, exist_ok=True)
         write_json(build / 'meson-info/intro-buildsystem_files.json',
-                   [str(source / 'cache.c')] + ([str(self.root / 'foreign.c')] if foreign else []))
+                   [str(source / 'cache.c')] + ([str(self.root / 'foreign.c')] if foreign else [])
+                   + ([str(llvm_config)] if llvm_config else []))
         rows = [dict(directory=str(build), file=str(source / name),
                      arguments=['owned-clang', '-arch', architecture, '-c', str(source / name)])
                 for name in ('winemetal_unix.c', 'cache.c')]
@@ -308,8 +309,12 @@ class CompilerRouteTests(unittest.TestCase):
                     (source / file).write_text('/* owned fixture */\n')
             elif component.endswith('-configure'):
                 build, source = Path(argv[2]), Path(argv[3])
+                # Meson reports the native LLVM program as a build-system file (run 38501832021: the pinned prefix's llvm-config).
+                llvm_config = (self.root / 'other-llvm/bin/llvm-config' if inject == 'foreign-llvm-config'
+                               else self.args.llvm_prefix / 'bin/llvm-config')
                 self.ownership_fixture(source, build, foreign=inject == 'foreign-configure',
-                                       architecture='x86_64' if component == 'pe-configure' else 'arm64')
+                                       architecture='x86_64' if component == 'pe-configure' else 'arm64',
+                                       llvm_config=llvm_config)
                 for file in ('intro-machines.json', 'intro-buildoptions.json'):
                     write_json(build / 'meson-info' / file, {})
                 (build / 'build.ninja').write_text('# owned fixture\n')
@@ -393,6 +398,13 @@ class CompilerRouteTests(unittest.TestCase):
     def test_foreign_configure_refused_before_compile(self):
         with self.assertRaisesRegex(ValueError, 'foreign'):
             self.fake_pipeline('foreign-configure')
+        self.assertFalse(any(component.endswith('-build') for component, argv in self.calls))
+
+    def test_pinned_prefix_llvm_config_is_an_owned_tool_but_another_one_is_not(self):
+        self.fake_pipeline()  # both aarch64 and x86_64 configures list <prefix>/bin/llvm-config and pass
+        self.args.work = self.root / 'work-other-llvm'
+        with self.assertRaisesRegex(ValueError, 'foreign'):
+            self.fake_pipeline('foreign-llvm-config')
         self.assertFalse(any(component.endswith('-build') for component, argv in self.calls))
 
     def test_source_drift_during_build_refused_and_recorded(self):
