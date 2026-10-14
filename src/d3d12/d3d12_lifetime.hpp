@@ -1,6 +1,4 @@
 /*
- * Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
- *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License as published by the Free Software Foundation; either

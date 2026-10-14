@@ -24,7 +24,6 @@
 #include "d3d12_pipeline.hpp"
 #include "wave_native_bundle.hpp"
 #include "d3d12_shader_capture.hpp"
-#include "d3d12_diagnostic_counters.hpp"
 #include "log/log.hpp"
 
 namespace dxmt {
@@ -148,7 +147,7 @@ public:
     char enabled[4] = {};
     const DWORD length = GetEnvironmentVariableA("MACRUNNER_DX12_NATIVE_WAVE", enabled, sizeof(enabled));
     if (length != 1 || enabled[0] != '1') return S_FALSE;
-    const auto *entry = native_wave::MatchShader(native_wave::entries, native_wave::entry_count, desc->CS.pShaderBytecode, desc->CS.BytecodeLength);
+    const auto *entry = native_wave::MatchShader(native_wave::entries, 2, desc->CS.pShaderBytecode, desc->CS.BytecodeLength);
     if (!entry) return S_FALSE;
     // This diagnostic candidate implements one verified ABI, not arbitrary roots.
     if (!desc->pRootSignature) return E_NOTIMPL;
@@ -204,7 +203,7 @@ public:
     SM50_SHADER_COMMON_DATA common;
     common.flags = {};
     common.type = SM50_SHADER_COMMON;
-    common.metal_version = (SM50_SHADER_METAL_VERSION)device_->GetShaderMetalVersion();
+    common.metal_version = SM50_SHADER_METAL_310;
     common.next = &rootsig;
 
     if (HRESULT hr = InitializeShader(cs, &shader_cs, &ref_cs); FAILED(hr))
@@ -214,7 +213,6 @@ public:
 
     SM50ShaderBitcode cs_bitcode;
 
-    diagnostic::Add(diagnostic::Counter::CompileCS);
     if (SM50Compile(shader_cs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&common, "cs_main", &cs_bitcode, &sm50_err)) {
       ERR("Failed to compile cs shader");
       return E_FAIL;

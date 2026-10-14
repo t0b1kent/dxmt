@@ -19,6 +19,7 @@
 
 #include "d3d12_device.hpp"
 #include "d3d12_device_child.hpp"
+#include "d3d12_pipeline_timing.hpp"
 #include "com/com_pointer.hpp"
 #include "log/log.hpp"
 #include <vector>
@@ -82,6 +83,8 @@ public:
       fence_->signal(cmdbuf, value);
     else
       fence_->signal(value);
+    pipeline_timing::Get().Emit(pipeline_timing::NativeFence, pipeline_timing::Point, this,
+        value, fence_->sharedEvent().handle, cmdbuf.handle);
     return S_OK;
   }
 
@@ -98,11 +101,15 @@ public:
     {
       std::lock_guard<dxmt::mutex> lock(mutex_);
       if (removed_ || fence_->completedValue() >= value) {
+        pipeline_timing::Get().Emit(pipeline_timing::FenceBranch, pipeline_timing::Point, this,
+            value, pipeline_timing::Pointer(event), fence_->sharedEvent().handle, 1);
         if (event && !SetEvent(event))
           return HRESULT_FROM_WIN32(GetLastError());
         return S_OK;
       }
       if (event) {
+        pipeline_timing::Get().Emit(pipeline_timing::FenceBranch, pipeline_timing::Point, this,
+            value, pipeline_timing::Pointer(event), fence_->sharedEvent().handle, 2);
         std::erase_if(pending_events_, [](auto &pending) {
           return pending.event.signaledValue() >= pending.value;
         });
@@ -111,6 +118,8 @@ public:
         return S_OK;
       }
       native_event = fence_->sharedEvent();
+      pipeline_timing::Get().Emit(pipeline_timing::FenceBranch, pipeline_timing::Point, this,
+          value, 0, native_event.handle, 3);
     }
     native_event.waitUntilSignaledValue(value, ~0ULL);
     return S_OK;
@@ -127,6 +136,8 @@ public:
       flags_(flags) {}
 
   ~MTLD3D12FenceImpl() {
+    pipeline_timing::Get().Emit(pipeline_timing::FenceDestroy, pipeline_timing::Point, this,
+        pipeline_timing::Pointer(state_.get()), 0, 0, 0, 0, 0, true);
     if (state_)
       device_->UnregisterFence(state_.get());
   }
@@ -134,6 +145,8 @@ public:
   HRESULT
   Initialize(UINT64 InitialValue) {
     state_ = std::make_shared<D3D12FenceState>(device_->GetMTLDevice(), InitialValue);
+    pipeline_timing::Get().Emit(pipeline_timing::FenceCreate, pipeline_timing::Point, this,
+        pipeline_timing::Pointer(state_.get()), InitialValue, 0, 0, 0, 0, true);
     return device_->RegisterFence(state_);
   }
 
@@ -160,18 +173,25 @@ public:
 
   UINT64 STDMETHODCALLTYPE
   GetCompletedValue() {
-    return FAILED(device_->GetDeviceRemovedReason()) ? UINT64_MAX : state_->CompletedValue();
+    const auto value = FAILED(device_->GetDeviceRemovedReason()) ? UINT64_MAX : state_->CompletedValue();
+    pipeline_timing::Get().Emit(pipeline_timing::FenceCompleted, pipeline_timing::Point, this,
+        pipeline_timing::Pointer(state_.get()), value);
+    return value;
   }
 
   HRESULT STDMETHODCALLTYPE
   SetEventOnCompletion(UINT64 Value, HANDLE Event) {
-    return state_->SetCompletion(device_->event_listener, Value, Event);
+    pipeline_timing::Scope pipeline(pipeline_timing::FenceCompletion, this, Value,
+        pipeline_timing::Pointer(Event), pipeline_timing::Pointer(state_.get()));
+    return pipeline.Result(state_->SetCompletion(device_->event_listener, Value, Event));
   }
 
   HRESULT STDMETHODCALLTYPE
   Signal(UINT64 Value) {
+    pipeline_timing::Scope pipeline(pipeline_timing::FenceSignal, this, Value,
+        pipeline_timing::Pointer(state_.get()));
     const HRESULT hr = device_->GetDeviceRemovedReason();
-    return FAILED(hr) ? hr : state_->Signal(Value);
+    return pipeline.Result(FAILED(hr) ? hr : state_->Signal(Value));
   }
 
   HRESULT SignalQueue(WMT::CommandBuffer cmdbuf, UINT64 value) override {

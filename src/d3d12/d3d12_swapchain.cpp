@@ -20,6 +20,7 @@
 #include "d3d12_device.hpp"
 #include "d3d12_frame_trace.hpp"
 #include "d3d12_present_timing.hpp"
+#include "d3d12_pipeline_timing.hpp"
 #include "dxgi_interfaces.h"
 #include "dxgi_object.hpp"
 #include "dxmt_hud_state.hpp"
@@ -191,9 +192,13 @@ public:
       hud(WMT::DeveloperHUDProperties::instance()) {
 
     frame_latency = kSwapchainLatency;
+    if (const auto depth = pipeline_timing::LatencyOverride()) frame_latency = depth;
     present_state_ = std::make_shared<D3D12PresentState>(
         pDevice->GetMTLDevice(), hWnd, scale_factor, desc_.SampleDesc.Count, frame_latency
     );
+    pipeline_timing::Get().Emit(pipeline_timing::Swapchain, pipeline_timing::Point, this,
+        pipeline_timing::Pointer(present_state_.get()), pipeline_timing::Pointer(present_state_->semaphore),
+        frame_latency, desc_.Flags, pipeline_timing::Pointer(queue_.ptr()), 0, true);
 
     if (desc_.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) {
       frame_latency_fence_ = std::make_unique<CpuFence>();
@@ -704,6 +709,8 @@ public:
   HRESULT
   STDMETHODCALLTYPE
   Present1(UINT SyncInterval, UINT PresentFlags, const DXGI_PRESENT_PARAMETERS *pPresentParameters) final {
+    pipeline_timing::Scope pipeline(pipeline_timing::Present, this, presentation_count_,
+        pipeline_timing::Pointer(present_state_.get()), PresentFlags);
     const uint64_t timing_begin = present_timing::Get().Begin();
     static FrameTraceResultCounters trace;
     static std::atomic<uint32_t> trace_queue_result{0};
@@ -711,6 +718,7 @@ public:
                SyncInterval, PresentFlags, desc_.Width, desc_.Height, static_cast<const void *>(hWnd),
                static_cast<const void *>(queue_.ptr()));
     const auto trace_result = [&](HRESULT result) {
+      pipeline.Result(result);
       present_timing::Get().End(timing_begin, this, PresentFlags, SyncInterval, desc_.Width, desc_.Height, result);
       TraceFrame(trace.result, "present1.return", this, "hr=%08x flags=%08x width=%u height=%u",
                  unsigned(result), PresentFlags, desc_.Width, desc_.Height);
@@ -790,9 +798,15 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   SetMaximumFrameLatency(UINT max_latency) override {
+    const UINT effective_latency = pipeline_timing::LatencyOverride() ? pipeline_timing::LatencyOverride() : max_latency;
+    pipeline_timing::Get().Emit(pipeline_timing::LatencySet, pipeline_timing::Point, this,
+        pipeline_timing::Pointer(present_state_.get()), max_latency, frame_latency,
+        pipeline_timing::Pointer(present_state_->semaphore), effective_latency,
+        (max_latency == 0 || max_latency > DXGI_MAX_SWAP_CHAIN_BUFFERS) ? uint32_t(E_INVALIDARG) : 0, true);
     if (max_latency == 0 || max_latency > DXGI_MAX_SWAP_CHAIN_BUFFERS) {
       return E_INVALIDARG;
     }
+    max_latency = effective_latency;
     if (max_latency > frame_latency) {
       ReleaseSemaphore(present_state_->semaphore, max_latency - frame_latency, nullptr);
     }
@@ -822,6 +836,9 @@ public:
       return nullptr;
     }
 
+    pipeline_timing::Get().Emit(pipeline_timing::LatencyHandle, pipeline_timing::Point, this,
+        pipeline_timing::Pointer(present_state_.get()), pipeline_timing::Pointer(present_state_->semaphore),
+        pipeline_timing::Pointer(result), frame_latency, desc_.Flags, 0, true);
     return result;
   };
 

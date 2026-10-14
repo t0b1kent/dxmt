@@ -22,6 +22,9 @@
 #include "d3d12_device.hpp"
 #include "d3d12_compute_commands.hpp"
 #include "d3d12_frame_trace.hpp"
+#include "d3d12_fine_locks.hpp"
+#include "d3d12_gpu_timing.hpp"
+#include "d3d12_pipeline_timing.hpp"
 #include "d3d12_command_capture.hpp"
 #include "d3d12_submission_capture.hpp"
 #include "d3d12_pageable.hpp"
@@ -41,9 +44,210 @@ namespace dxmt {
 
 constexpr auto kCommandQueueSize = 32u;
 
+// Committed, not yet completed command buffers the queue keeps before a commit blocks, and the limit of the Metal
+// queue. MACRUNNER_DX12_INFLIGHT_DEPTH=33..1024 raises it; unset, 0 or anything else keeps 32.
+static uint32_t
+InflightDepth() {
+  static const uint32_t depth = [] {
+    const DWORD error = GetLastError();
+    char value[8] = {};
+    const DWORD n = GetEnvironmentVariableA("MACRUNNER_DX12_INFLIGHT_DEPTH", value, sizeof(value));
+    uint32_t parsed = 0;
+    bool valid = n > 0 && n < sizeof(value);
+    for (DWORD i = 0; valid && i < n; i++) {
+      if (value[i] < '0' || value[i] > '9') valid = false;
+      else parsed = parsed * 10 + uint32_t(value[i] - '0');
+    }
+    SetLastError(error);
+    return valid && parsed > kCommandQueueSize && parsed <= 1024 ? parsed : kCommandQueueSize;
+  }();
+  return depth;
+}
+
 const GUID kD3D12CommandQueueDownlevelUUID = {
     0x38a8c5ef, 0x7ccb, 0x4e81, {0x91, 0x4f, 0xa6, 0xe9, 0xd0, 0x72, 0xc4, 0x94}
 };
+
+// --- MacRunner: render-pass coalescing for tile-based GPUs (diagnostic keys, default off) -------------------------
+// Every Metal render pass boundary costs a store and a load of each attachment on a tile-based GPU, and with the
+// queue-wide fence it is also a synchronisation point. D3D12 applications record one logical pass across several
+// command lists and call ClearRenderTargetView / ResourceBarrier / OMSetRenderTargets freely, because on immediate
+// GPUs these are free. The switches below keep one Metal encoder open across recorded passes with identical
+// attachments and turn a full clear into the load action of the pass that follows it.
+//   MACRUNNER_DX12_MERGE_PASSES=1  merge consecutive recorded render passes with identical attachments, but never
+//                                  across a ResourceBarrier: a barrier may make an attachment readable as a shader
+//                                  resource (read-only depth), and a tile-based GPU cannot sample an attachment of
+//                                  the pass it is rendering
+//   MACRUNNER_DX12_MERGE_PASSES=2  also merge across barriers (upper bound; NOT safe in general, diagnostics only)
+//   MACRUNNER_DX12_FOLD_CLEARS=1   a full clear immediately followed by a pass using the view becomes LoadActionClear
+//   MACRUNNER_DX12_PASS_STATS=1    counters only (also printed when either switch is on)
+static bool
+PassEnvironmentSwitch(const char *name) {
+  const DWORD error = GetLastError();
+  char value[4] = {};
+  const bool active = GetEnvironmentVariableA(name, value, sizeof(value)) == 1 && value[0] == '1';
+  SetLastError(error);
+  return active;
+}
+
+static unsigned
+MergePassesMode() {
+  static const unsigned mode = [] {
+    const DWORD error = GetLastError();
+    char value[4] = {};
+    unsigned parsed = 0;
+    if (GetEnvironmentVariableA("MACRUNNER_DX12_MERGE_PASSES", value, sizeof(value)) == 1 && value[0] >= '0' && value[0] <= '2')
+      parsed = unsigned(value[0] - '0');
+    SetLastError(error);
+    return parsed;
+  }();
+  return mode;
+}
+
+static bool
+MergePassesEnabled() {
+  return MergePassesMode() != 0;
+}
+
+static bool
+FoldClearsEnabled() {
+  static const bool enabled = PassEnvironmentSwitch("MACRUNNER_DX12_FOLD_CLEARS");
+  return enabled;
+}
+
+// MACRUNNER_DX12_RENDER_FENCE (timing diagnostics ONLY, not ordering-safe in general: a vertex stage may read data
+// written by an earlier blit, compute or draw pass): 0 default = a draw pass waits for the queue-wide fence before its
+// vertex stage; 1 = it waits before its fragment stage only; 2 = it does not wait at all (it still updates the fence).
+static unsigned
+RenderFenceMode() {
+  static const unsigned mode = [] {
+    const DWORD error = GetLastError();
+    char value[4] = {};
+    unsigned parsed = 0;
+    if (GetEnvironmentVariableA("MACRUNNER_DX12_RENDER_FENCE", value, sizeof(value)) == 1 && value[0] >= '0' && value[0] <= '2')
+      parsed = unsigned(value[0] - '0');
+    SetLastError(error);
+    return parsed;
+  }();
+  return mode;
+}
+
+static bool
+PassStatsEnabled() {
+  static const bool enabled = PassEnvironmentSwitch("MACRUNNER_DX12_PASS_STATS") || MergePassesEnabled() ||
+                              FoldClearsEnabled() || RenderFenceMode() != 0 || FineLocksEnabled() ||
+                              InflightDepth() != kCommandQueueSize;
+  return enabled;
+}
+
+struct D3D12PassStats {
+  std::atomic<uint64_t> executes{0}, lists{0};
+  std::atomic<uint64_t> render_recorded{0}, render_encoders{0}, render_merged{0}, render_mergeable{0};
+  std::atomic<uint64_t> render_mergeable_safe{0};   // same attachments AND no barrier since the previous pass
+  std::atomic<uint64_t> clear_recorded{0}, clear_encoders{0}, clear_folded{0}, clear_foldable{0};
+  std::atomic<uint64_t> blit_skipped{0}, other_encoders{0};
+  std::atomic<uint64_t> commits{0}, commit_stalls{0};   // commit_stalls: the in-flight ring was full at a commit
+};
+static D3D12PassStats g_pass_stats;
+
+static void
+PassStatsReport() {
+  const uint64_t n = g_pass_stats.executes.fetch_add(1, std::memory_order_relaxed) + 1;
+  if (!PassStatsEnabled() || (n != 1 && n % 4096))
+    return;
+  const DWORD error = GetLastError();
+  char line[640];
+  const auto get = [](const std::atomic<uint64_t> &v) { return (unsigned long long)v.load(std::memory_order_relaxed); };
+  const int length = std::snprintf(line, sizeof(line),
+      "dx12_pass_stats executes=%llu lists=%llu render_recorded=%llu render_encoders=%llu render_merged=%llu "
+      "render_mergeable=%llu render_mergeable_safe=%llu clear_recorded=%llu clear_encoders=%llu clear_folded=%llu clear_foldable=%llu "
+      "blit_skipped=%llu other_encoders=%llu commits=%llu commit_stalls=%llu merge=%u fold=%u fence=%u locks=%u "
+      "inflight_depth=%u\n",
+      (unsigned long long)n, get(g_pass_stats.lists), get(g_pass_stats.render_recorded),
+      get(g_pass_stats.render_encoders), get(g_pass_stats.render_merged), get(g_pass_stats.render_mergeable),
+      get(g_pass_stats.render_mergeable_safe), get(g_pass_stats.clear_recorded), get(g_pass_stats.clear_encoders), get(g_pass_stats.clear_folded),
+      get(g_pass_stats.clear_foldable), get(g_pass_stats.blit_skipped), get(g_pass_stats.other_encoders),
+      get(g_pass_stats.commits), get(g_pass_stats.commit_stalls),
+      MergePassesMode(), unsigned(FoldClearsEnabled()), RenderFenceMode(), unsigned(FineLocksEnabled()),
+      InflightDepth());
+  DWORD written;
+  if (length > 0 && size_t(length) < sizeof(line))
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, DWORD(length), &written, nullptr);
+  SetLastError(error);
+}
+
+template <typename Attachment>
+static bool
+SameAttachment(Attachment &a, Attachment &b) {
+  if (bool(a.attachment) != bool(b.attachment))
+    return false;
+  return !a.attachment || (a.attachment.texture().handle == b.attachment.texture().handle && a.level == b.level &&
+                           a.slice == b.slice && a.depth_plane == b.depth_plane);
+}
+
+// True when the two recorded passes would produce the same Metal render pass descriptor.
+static bool
+SameRenderTargets(RenderEncoderData &a, RenderEncoderData &b) {
+  if (a.render_target_width != b.render_target_width || a.render_target_height != b.render_target_height ||
+      a.render_target_array_length != b.render_target_array_length ||
+      a.default_raster_sample_count != b.default_raster_sample_count || a.dsv_planar_flags != b.dsv_planar_flags)
+    return false;
+  for (unsigned i = 0; i < std::size(a.colors); i++) {
+    if (!SameAttachment(a.colors[i], b.colors[i]))
+      return false;
+    if (a.colors[i].attachment && (bool(a.colors[i].resolve_attachment) || bool(b.colors[i].resolve_attachment)))
+      return false;
+  }
+  return SameAttachment(a.depth, b.depth) && SameAttachment(a.stencil, b.stencil);
+}
+
+// True when a full clear can become the load action of this pass: same view, and the pass covers the whole view.
+static bool
+CanFoldClear(ClearEncoderData &clear, RenderEncoderData &render) {
+  if (clear.width != render.render_target_width || clear.height != render.render_target_height ||
+      clear.array_length != render.render_target_array_length)
+    return false;
+  const auto handle = clear.attachment.texture().handle;
+  if (clear.clear_dsv) {
+    if ((clear.clear_dsv & 1) &&
+        !(render.depth.attachment && render.depth.attachment.texture().handle == handle && !render.depth.depth_plane))
+      return false;
+    if ((clear.clear_dsv & 2) && !(render.stencil.attachment &&
+                                   render.stencil.attachment.texture().handle == handle && !render.stencil.depth_plane))
+      return false;
+    return true;
+  }
+  for (auto &color : render.colors)
+    if (color.attachment && color.attachment.texture().handle == handle && color.depth_plane == clear.depth_plane &&
+        !color.level && !color.slice)
+      return true;
+  return false;
+}
+
+static void
+FoldClear(ClearEncoderData &clear, RenderEncoderData &render, WMTRenderPassInfo &info) {
+  const auto handle = clear.attachment.texture().handle;
+  if (clear.clear_dsv) {
+    if (clear.clear_dsv & 1) {
+      info.depth.load_action = WMTLoadActionClear;
+      info.depth.clear_depth = clear.depth_stencil.first;
+    }
+    if (clear.clear_dsv & 2) {
+      info.stencil.load_action = WMTLoadActionClear;
+      info.stencil.clear_stencil = clear.depth_stencil.second;
+    }
+    return;
+  }
+  for (unsigned i = 0; i < std::size(render.colors); i++) {
+    auto &color = render.colors[i];
+    if (color.attachment && color.attachment.texture().handle == handle && color.depth_plane == clear.depth_plane &&
+        !color.level && !color.slice) {
+      info.colors[i].load_action = WMTLoadActionClear;
+      info.colors[i].clear_color = clear.color;
+    }
+  }
+}
+// --- end of MacRunner render-pass coalescing helpers ---------------------------------------------------------------
 
 static bool
 FrameReadbackEnabled() {
@@ -195,6 +399,8 @@ struct D3D12CommandQueueState {
 
   struct InflightCommandBuffer {
     WMT::Reference<WMT::CommandBuffer> cmdbuf{};
+    GpuTimingRecord gpu_timing;
+    uint64_t pipeline_ticket = 0;
     std::shared_ptr<D3D12PresentState> present;
     WMT::Reference<WMT::Texture> present_texture;
     std::shared_ptr<D3D12RemovableFence> retained_fence;
@@ -207,8 +413,10 @@ struct D3D12CommandQueueState {
     D3D12SubmissionCapture *fault_capture = nullptr;
   };
 
-  std::array<InflightCommandBuffer, kCommandQueueSize> inflight_cmdbuf_pool_;
-  std::array<std::unique_ptr<D3D12SubmissionCapture>, kCommandQueueSize> fault_capture_pool_;
+  const uint32_t inflight_depth_ = InflightDepth();
+  std::vector<InflightCommandBuffer> inflight_cmdbuf_pool_ = std::vector<InflightCommandBuffer>(inflight_depth_);
+  std::vector<std::unique_ptr<D3D12SubmissionCapture>> fault_capture_pool_ =
+      std::vector<std::unique_ptr<D3D12SubmissionCapture>>(inflight_depth_);
   dxmt::mutex mutex_commit_;
 
   void
@@ -222,11 +430,35 @@ struct D3D12CommandQueueState {
       if (inflight_cmdbuf_stop_.load() == internal_seq)
         break;
       auto pool = WMT::MakeAutoreleasePool();
-      auto &inflight = inflight_cmdbuf_pool_[internal_seq % kCommandQueueSize];
+      auto &inflight = inflight_cmdbuf_pool_[internal_seq % inflight_depth_];
 
+      const uint64_t wait_begin = inflight.gpu_timing.ticket ? GpuTimingTrace::Clock() : 0;
+      const auto pipeline_wait = inflight.pipeline_ticket ? pipeline_timing::Get().Emit(
+          pipeline_timing::Retire, pipeline_timing::Enter, this, internal_seq,
+          inflight.cmdbuf.handle, pipeline_timing::Pointer(inflight.present.get()), 0, 0, 0, true) : 0;
       if (inflight.cmdbuf.status() <= WMTCommandBufferStatusScheduled)
         inflight.cmdbuf.waitUntilCompleted();
       const auto status = inflight.cmdbuf.status();
+      if (pipeline_wait) {
+        pipeline_timing::PreserveError error;
+        pipeline_timing::Get().Emit(pipeline_timing::Retire, pipeline_timing::Leave, this,
+            pipeline_wait, internal_seq, 0, 0, 0, uint32_t(status), true);
+        const auto gpu_begin = MTLCommandBuffer_property(inflight.cmdbuf.handle, WMTCommandBufferPropertyGPUStartTime);
+        const auto gpu_end = inflight.cmdbuf.gpuEndTime();
+        pipeline_timing::Get().Emit(pipeline_timing::GpuTimes, pipeline_timing::Point, this,
+            internal_seq, gpu_begin, gpu_end, inflight.cmdbuf.handle,
+            pipeline_timing::Pointer(inflight.present.get()), uint32_t(status), true);
+      }
+      GpuTiming().Heartbeat(bool(inflight.present), unsigned(status));
+      if (inflight.gpu_timing.ticket) {
+        const DWORD timing_error = GetLastError();
+        const uint64_t wait_end = GpuTimingTrace::Clock();
+        const uint64_t gpu_begin = MTLCommandBuffer_property(inflight.cmdbuf.handle, WMTCommandBufferPropertyGPUStartTime);
+        const uint64_t gpu_end = inflight.cmdbuf.gpuEndTime();
+        GpuTiming().Complete(inflight.gpu_timing, this, internal_seq, bool(inflight.present), unsigned(status),
+                             wait_begin, wait_end, gpu_begin, gpu_end);
+        SetLastError(timing_error);
+      }
       static std::atomic<uint32_t> trace_complete{0}, trace_error{0};
       TraceFrame(trace_complete, "cmdbuf.complete", this, "seq=%llu status=%u present=%u",
                  static_cast<unsigned long long>(internal_seq), unsigned(status), unsigned(bool(inflight.present)));
@@ -254,8 +486,15 @@ struct D3D12CommandQueueState {
       for (auto &readback : inflight.render_readbacks)
         readback.Complete(this, internal_seq, status);
 
-      if (inflight.present && inflight.present->semaphore)
-        ReleaseSemaphore(inflight.present->semaphore, 1, nullptr);
+      if (inflight.present && inflight.present->semaphore) {
+        const auto ticket = inflight.pipeline_ticket ? pipeline_timing::Get().Emit(
+            pipeline_timing::SemaphoreRelease, pipeline_timing::Enter, this, internal_seq,
+            pipeline_timing::Pointer(inflight.present->semaphore),
+            pipeline_timing::Pointer(inflight.present.get()), 0, 0, 0, true) : 0;
+        const BOOL released = ReleaseSemaphore(inflight.present->semaphore, 1, nullptr);
+        if (ticket) pipeline_timing::Get().Emit(pipeline_timing::SemaphoreRelease, pipeline_timing::Leave,
+            this, ticket, internal_seq, 0, 0, 0, released ? 0 : GetLastError(), true);
+      }
 
       inflight = {};
 
@@ -301,14 +540,20 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
         queue(queue),
         lock(queue->mutex_commit_),
         seq(queue->inflight_cmdbuf_seq_.load(std::memory_order_relaxed)),
-        inflight(queue->inflight_cmdbuf_pool_[seq % kCommandQueueSize]),
+        inflight(queue->inflight_cmdbuf_pool_[seq % queue->inflight_depth_]),
         pool(WMT::MakeAutoreleasePool()) {
       // Serialize the capacity check with all other producers of this ring.
-      queue->inflight_cmdbuf_count_.wait(kCommandQueueSize, std::memory_order_acquire);
+      {
+        pipeline_timing::Scope capacity(pipeline_timing::QueueCapacity, queue, seq, queue->inflight_depth_);
+        g_pass_stats.commits.fetch_add(1, std::memory_order_relaxed);
+        if (queue->inflight_cmdbuf_count_.load(std::memory_order_relaxed) >= queue->inflight_depth_)
+          g_pass_stats.commit_stalls.fetch_add(1, std::memory_order_relaxed);
+        queue->inflight_cmdbuf_count_.wait(queue->inflight_depth_, std::memory_order_acquire);
+      }
       inflight.cmdbuf = queue->queue_.commandBuffer();
       if (FaultCaptureEnabled() && !fault_capture_dumped.load(std::memory_order_relaxed)) {
         const DWORD error = GetLastError();
-        auto &capture = queue->fault_capture_pool_[seq % kCommandQueueSize];
+        auto &capture = queue->fault_capture_pool_[seq % queue->inflight_depth_];
         if (!capture) capture.reset(new (std::nothrow) D3D12SubmissionCapture);
         if (capture) {
           capture->Reset();
@@ -326,7 +571,18 @@ class MTLD3D12CommandQueueImpl : public MTLD3D12Pageable<MTLD3D12CommandQueue, I
       static std::atomic<uint32_t> trace_enter{0}, trace_return{0};
       TraceFrame(trace_enter, "cmdbuf.commit.enter", queue, "seq=%llu present=%u",
                  static_cast<unsigned long long>(seq), unsigned(bool(inflight.present)));
+      inflight.gpu_timing = GpuTiming().Begin();
+      inflight.pipeline_ticket = pipeline_timing::Get().Emit(pipeline_timing::Commit,
+          pipeline_timing::Enter, queue, seq, inflight.cmdbuf.handle,
+          pipeline_timing::Pointer(inflight.present.get()));
       inflight.cmdbuf.commit();
+      if (inflight.pipeline_ticket) pipeline_timing::Get().Emit(pipeline_timing::Commit,
+          pipeline_timing::Leave, queue, inflight.pipeline_ticket, seq, 0, 0, 0, 0, true);
+      if (inflight.gpu_timing.ticket) {
+        const DWORD timing_error = GetLastError();
+        inflight.gpu_timing.commit_end = GpuTimingTrace::Clock();
+        SetLastError(timing_error);
+      }
       TraceFrame(trace_return, "cmdbuf.commit.return", queue, "seq=%llu present=%u",
                  static_cast<unsigned long long>(seq), unsigned(bool(inflight.present)));
       queue->inflight_cmdbuf_count_.fetch_add(1, std::memory_order_relaxed);
@@ -870,7 +1126,7 @@ public:
     auto metal_device = device_->GetMTLDevice();
     state_->device_ = metal_device;
     state_->residency_set_ = device_->GetGlobalResidencySet();
-    state_->queue_ = metal_device.newCommandQueue(kCommandQueueSize);
+    state_->queue_ = metal_device.newCommandQueue(state_->inflight_depth_);
     if (!state_->queue_)
       return E_FAIL;
     state_->queue_.addResidencySet(state_->residency_set_);
@@ -1019,6 +1275,8 @@ public:
 
   void STDMETHODCALLTYPE
   ExecuteCommandLists(UINT Count, ID3D12CommandList *const *ppCommandLists) {
+    pipeline_timing::Scope pipeline(pipeline_timing::Execute, state_.get(), 0, Count,
+                                   pipeline_timing::Pointer(this));
     static std::atomic<uint32_t> trace_enter{0}, trace_accepted{0}, trace_rejected{0};
     TraceFrame(trace_enter, "execute.enter", this, "type=%u count=%u state=%p", unsigned(desc_.Type), Count,
                static_cast<const void *>(state_.get()));
@@ -1082,8 +1340,79 @@ public:
     }
     size_t argument_index = 0, acceleration_index=0;
     auto &cmdbuf = scope.inflight.cmdbuf;
+    // Pass coalescing state lives for one ExecuteCommandLists call, i.e. one Metal command buffer.
+    const bool pass_stats = PassStatsEnabled();
+    const bool coalescing_allowed = !scope.inflight.fault_capture && !FrameReadbackEnabled() && !FullFrameCaptureEnabled();
+    const unsigned merge_mode = coalescing_allowed ? MergePassesMode() : 0;
+    const bool merge_passes = merge_mode != 0;
+    bool barrier_since_render = false;            // a (skipped) ResourceBarrier pass was seen after last_render
+    const bool fold_clears = FoldClearsEnabled() && coalescing_allowed;
+    WMT::RenderCommandEncoder open_render{};      // Metal encoder kept open across recorded passes (merge only)
+    bool render_open = false;
+    RenderEncoderData *last_render = nullptr;     // last recorded pass with nothing encoded after it
+    struct PendingClear {
+      ClearEncoderData *data;
+      const void *list;
+    };
+    std::vector<PendingClear> pending_clears;     // full clears not yet encoded (fold only)
+    std::vector<ClearEncoderData *> virtual_clears; // counters only: clears a following pass could have absorbed
+    const auto encode_clear_pass = [&](ClearEncoderData *data, const void *list) {
+      WMTRenderPassInfo info;
+      WMT::InitializeRenderPassInfo(info);
+      if (data->clear_dsv) {
+        if (data->clear_dsv & 1) {
+          info.depth.clear_depth = data->depth_stencil.first;
+          info.depth.texture = data->attachment.texture();
+          info.depth.load_action = WMTLoadActionClear;
+          info.depth.store_action = WMTStoreActionStore;
+          info.depth.depth_plane = data->depth_plane;
+        }
+        if (data->clear_dsv & 2) {
+          info.stencil.clear_stencil = data->depth_stencil.second;
+          info.stencil.texture = data->attachment.texture();
+          info.stencil.load_action = WMTLoadActionClear;
+          info.stencil.store_action = WMTStoreActionStore;
+          info.stencil.depth_plane = data->depth_plane;
+        }
+        info.render_target_width = data->width;
+        info.render_target_height = data->height;
+      } else {
+        info.colors[0].clear_color = data->color;
+        info.colors[0].texture = data->attachment.texture();
+        info.colors[0].load_action = WMTLoadActionClear;
+        info.colors[0].store_action = WMTStoreActionStore;
+        info.colors[0].depth_plane = data->depth_plane;
+      }
+      info.render_target_array_length = data->array_length;
+      CaptureRenderPass(scope, list, data, info);
+      auto encoder = cmdbuf.renderCommandEncoder(info);
+      encoder.setLabel(WMT::String::string("ClearPass", WMTUTF8StringEncoding));
+      encoder.waitForFence(state_->fence_, WMTRenderStageFragment);
+      encoder.updateFence(state_->fence_, WMTRenderStageFragment);
+      encoder.endEncoding();
+      g_pass_stats.clear_encoders.fetch_add(1, std::memory_order_relaxed);
+    };
+    const auto close_open_render = [&] {
+      if (!render_open)
+        return;
+      open_render.updateFence(state_->fence_, WMTRenderStageFragment);
+      open_render.endEncoding();
+      render_open = false;
+    };
+    // Anything that is not a mergeable draw pass ends the sequence: earlier draws and clears must be encoded first.
+    const auto break_sequence = [&] {
+      close_open_render();
+      for (auto &pending : pending_clears)
+        encode_clear_pass(pending.data, pending.list);
+      pending_clears.clear();
+      virtual_clears.clear();
+      last_render = nullptr;
+      barrier_since_render = false;
+    };
     for (unsigned i = 0; i < Count; i++) {
       auto pCommandList = static_cast<MTLD3D12GraphicsCommandList *>(ppCommandLists[i]);
+      pipeline_timing::Get().Emit(pipeline_timing::ExecuteList, pipeline_timing::Point, state_.get(),
+          scope.seq, pipeline_timing::Pointer(pCommandList), i, Count, pCommandList->GetRecordingTraceEpoch());
       if (FullFrameCaptureEnabled() && TransferWindowEnabled()) {
         const auto frame = capture_next_present.load(std::memory_order_relaxed);
         const auto &recording = pCommandList->GetRecordingTrace();
@@ -1108,48 +1437,45 @@ public:
           auto data = static_cast<ClearEncoderData *>(current);
           TraceTransfer(scope, pCommandList, current, "clear.target", "texture=%llx dsv=%u size=%u,%u",
                         (unsigned long long)data->attachment.texture().handle, data->clear_dsv, data->width, data->height);
-          {
-            WMTRenderPassInfo info;
-            WMT::InitializeRenderPassInfo(info);
-            if (data->clear_dsv) {
-              if (data->clear_dsv & 1) {
-                info.depth.clear_depth = data->depth_stencil.first;
-                info.depth.texture = data->attachment.texture();
-                info.depth.load_action = WMTLoadActionClear;
-                info.depth.store_action = WMTStoreActionStore;
-                info.depth.depth_plane = data->depth_plane;
-              }
-              if (data->clear_dsv & 2) {
-                info.stencil.clear_stencil = data->depth_stencil.second;
-                info.stencil.texture = data->attachment.texture();
-                info.stencil.load_action = WMTLoadActionClear;
-                info.stencil.store_action = WMTStoreActionStore;
-                info.stencil.depth_plane = data->depth_plane;
-              }
-              info.render_target_width = data->width;
-              info.render_target_height = data->height;
-            } else {
-              info.colors[0].clear_color = data->color;
-              info.colors[0].texture = data->attachment.texture();
-              info.colors[0].load_action = WMTLoadActionClear;
-              info.colors[0].store_action = WMTStoreActionStore;
-              info.colors[0].depth_plane = data->depth_plane;
-            }
-            info.render_target_array_length = data->array_length;
-            CaptureRenderPass(scope, pCommandList, current, info);
-            auto encoder = cmdbuf.renderCommandEncoder(info);
-            encoder.setLabel(WMT::String::string("ClearPass", WMTUTF8StringEncoding));
-            encoder.waitForFence(state_->fence_, WMTRenderStageFragment);
-            encoder.updateFence(state_->fence_, WMTRenderStageFragment);
-            encoder.endEncoding();
+          g_pass_stats.clear_recorded.fetch_add(1, std::memory_order_relaxed);
+          // A clear takes effect after the draws already recorded, so it always ends the open pass.
+          close_open_render();
+          last_render = nullptr;
+          barrier_since_render = false;
+          if (fold_clears) {
+            pending_clears.push_back({data, pCommandList});
+          } else {
+            if (pass_stats)
+              virtual_clears.push_back(data);
+            encode_clear_pass(data, pCommandList);
           }
           break;
         }
         case EncoderType::Render: {
           auto data = static_cast<RenderEncoderData *>(current);
+          g_pass_stats.render_recorded.fetch_add(1, std::memory_order_relaxed);
+          const bool plain_pass = data->visibility_targets.empty();
+          if (last_render && plain_pass && pending_clears.empty() && SameRenderTargets(*last_render, *data)) {
+            g_pass_stats.render_mergeable.fetch_add(1, std::memory_order_relaxed);
+            if (!barrier_since_render)
+              g_pass_stats.render_mergeable_safe.fetch_add(1, std::memory_order_relaxed);
+            if (render_open && (merge_mode == 2 || !barrier_since_render)) {
+              // Same attachments and nothing encoded in between: continue in the open Metal encoder.
+              // Every recorded pass re-emits its complete state, so the command chains can simply follow each other.
+              g_pass_stats.render_merged.fetch_add(1, std::memory_order_relaxed);
+              TraceTransferCommands(scope, pCommandList, current, reinterpret_cast<wmtcmd_base *>(&data->cmd_head));
+              open_render.encodeCommands(&data->cmd_head);
+              last_render = data;
+              barrier_since_render = false;
+              virtual_clears.clear();
+              break;
+            }
+          }
+          close_open_render();
           WMTRenderPassInfo render_pass_info;
           WMT::InitializeRenderPassInfo(render_pass_info);
           if (!data->visibility_targets.empty()) {
+            break_sequence();
             wmtcmd_blit_nop head{};
             wmtcmd_blit_fillbuffer clear{};
             head.type = WMTBlitCommandNop;
@@ -1215,11 +1541,40 @@ public:
             render_pass_info.render_target_width = data->render_target_width;
             render_pass_info.render_target_height = data->render_target_height;
           }
+          if (fold_clears && !pending_clears.empty()) {
+            // Only a suffix may fold: a clear that cannot fold must still precede every later clear (views can alias).
+            size_t first_fold = pending_clears.size();
+            while (first_fold && CanFoldClear(*pending_clears[first_fold - 1].data, *data))
+              first_fold--;
+            for (size_t n = 0; n < first_fold; n++)
+              encode_clear_pass(pending_clears[n].data, pending_clears[n].list);
+            for (size_t n = first_fold; n < pending_clears.size(); n++) {
+              FoldClear(*pending_clears[n].data, *data, render_pass_info);
+              g_pass_stats.clear_folded.fetch_add(1, std::memory_order_relaxed);
+            }
+            pending_clears.clear();
+          } else if (!virtual_clears.empty()) {
+            size_t first_fold = virtual_clears.size();
+            while (first_fold && CanFoldClear(*virtual_clears[first_fold - 1], *data))
+              first_fold--;
+            g_pass_stats.clear_foldable.fetch_add(virtual_clears.size() - first_fold, std::memory_order_relaxed);
+            virtual_clears.clear();
+          }
           CaptureRenderPass(scope, pCommandList, current, render_pass_info);
           auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
-          encoder.waitForFence(state_->fence_, WMTRenderStageVertex);
+          g_pass_stats.render_encoders.fetch_add(1, std::memory_order_relaxed);
+          if (const unsigned fence_mode = RenderFenceMode(); fence_mode != 2)
+            encoder.waitForFence(state_->fence_, fence_mode == 1 ? WMTRenderStageFragment : WMTRenderStageVertex);
           TraceTransferCommands(scope, pCommandList, current, reinterpret_cast<wmtcmd_base *>(&data->cmd_head));
           encoder.encodeCommands(&data->cmd_head);
+          last_render = plain_pass ? data : nullptr;
+          barrier_since_render = false;
+          if (merge_passes && plain_pass) {
+            // Leave the encoder open: the next recorded pass may continue it.
+            open_render = encoder;
+            render_open = true;
+            break;
+          }
           encoder.updateFence(state_->fence_, WMTRenderStageFragment);
           encoder.endEncoding();
           EncodeRenderReadback(scope, *data);
@@ -1263,8 +1618,20 @@ public:
           auto data = static_cast<BlitEncoderData *>(current);
           if (data->barrier_only && !state_->immediate_out_pending_) {
             TraceTransfer(scope, pCommandList, current, "blit.skip", "barrier_only=%u", 1u);
+            g_pass_stats.blit_skipped.fetch_add(1, std::memory_order_relaxed);
+            barrier_since_render = true;   // the open pass stays open; mode 1 will not continue it past this point
+            // A barrier may make a cleared attachment readable by the next pass (read-only depth sampled in the shader):
+            // a clear that is still pending must reach memory first, so it cannot become that pass's load action.
+            if (!pending_clears.empty()) {
+              for (auto &pending : pending_clears)
+                encode_clear_pass(pending.data, pending.list);
+              pending_clears.clear();
+            }
+            virtual_clears.clear();
             break;
           }
+          break_sequence();
+          g_pass_stats.other_encoders.fetch_add(1, std::memory_order_relaxed);
           // Counter samples use queue-wide ordering. Completing prior work
           // also satisfies the stronger-than-required MARKER_IN barrier.
           const auto timestamp_barrier = [&] {
@@ -1326,6 +1693,8 @@ public:
           break;
         }
         case EncoderType::Compute: {
+          break_sequence();
+          g_pass_stats.other_encoders.fetch_add(1, std::memory_order_relaxed);
           auto data = static_cast<ComputeEncoderData *>(current);
           auto encoder = cmdbuf.computeCommandEncoder(false);
           encoder.waitForFence(state_->fence_);
@@ -1336,6 +1705,8 @@ public:
           break;
         }
         case EncoderType::AccelerationBuild: {
+          break_sequence();
+          g_pass_stats.other_encoders.fetch_add(1, std::memory_order_relaxed);
           auto &build=scope.inflight.acceleration_builds[acceleration_index++];
           const auto status=cmdbuf.buildAccelerationStructure(build.Descriptor(),build.result->Native().resource,
               build.scratch->buffer,0,state_->fence_);
@@ -1347,6 +1718,8 @@ public:
           break;
         }
         case EncoderType::ArgumentCompute: {
+          break_sequence();
+          g_pass_stats.other_encoders.fetch_add(1, std::memory_order_relaxed);
           auto &dispatch = scope.inflight.argument_dispatches[argument_index++];
           wmtcmd_compute_nop head{};
           head.type = WMTComputeCommandNop;
@@ -1400,6 +1773,8 @@ public:
           break;
         }
         case EncoderType::Resolve: {
+          break_sequence();
+          g_pass_stats.other_encoders.fetch_add(1, std::memory_order_relaxed);
           auto data = static_cast<ResolveEncoderData *>(current);
           TraceTransfer(scope, pCommandList, current, "resolve", "src=%llx dst=%llx",
                         (unsigned long long)data->src.texture().handle, (unsigned long long)data->dst.texture().handle);
@@ -1423,7 +1798,10 @@ public:
         }
         current = current->next;
       }
+      g_pass_stats.lists.fetch_add(1, std::memory_order_relaxed);
     }
+    break_sequence();
+    PassStatsReport();
     if (state_->immediate_out_pending_) {
       // Separate ExecuteCommandLists calls are ordered even when the next
       // submission relies on buffer decay/promotion instead of a barrier.
@@ -1444,6 +1822,8 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   Signal(ID3D12Fence *pFence, UINT64 Value) {
+    pipeline_timing::Scope pipeline(pipeline_timing::QueueSignal, state_.get(),
+                                   pipeline_timing::Pointer(pFence), Value);
     if (!pFence)
       return E_INVALIDARG;
     const HRESULT hr = device_->GetDeviceRemovedReason();
@@ -1452,11 +1832,15 @@ public:
     auto scope = StartCommitting();
     auto &cmdbuf = scope.inflight.cmdbuf;
     scope.inflight.retained_fence = static_cast<MTLD3D12Fence *>(pFence)->GetRemovalState();
-    return static_cast<MTLD3D12Fence *>(pFence)->SignalQueue(cmdbuf, Value);
+    pipeline_timing::Get().Emit(pipeline_timing::QueueIdentity, pipeline_timing::Point, this,
+        scope.seq, pipeline_timing::Pointer(state_.get()), pipeline_timing::Pointer(pFence), Value, cmdbuf.handle);
+    return pipeline.Result(static_cast<MTLD3D12Fence *>(pFence)->SignalQueue(cmdbuf, Value));
   };
 
   HRESULT STDMETHODCALLTYPE
   Wait(ID3D12Fence *pFence, UINT64 Value) {
+    pipeline_timing::Scope pipeline(pipeline_timing::QueueWait, state_.get(),
+                                   pipeline_timing::Pointer(pFence), Value);
     if (!pFence)
       return E_INVALIDARG;
     const HRESULT hr = device_->GetDeviceRemovedReason();
@@ -1465,7 +1849,9 @@ public:
     auto scope = StartCommitting();
     auto &cmdbuf = scope.inflight.cmdbuf;
     scope.inflight.retained_fence = static_cast<MTLD3D12Fence *>(pFence)->GetRemovalState();
-    return static_cast<MTLD3D12Fence *>(pFence)->WaitQueue(cmdbuf, Value);
+    pipeline_timing::Get().Emit(pipeline_timing::QueueIdentity, pipeline_timing::Point, this,
+        scope.seq, pipeline_timing::Pointer(state_.get()), pipeline_timing::Pointer(pFence), Value, cmdbuf.handle);
+    return pipeline.Result(static_cast<MTLD3D12Fence *>(pFence)->WaitQueue(cmdbuf, Value));
   };
 
   HRESULT STDMETHODCALLTYPE
@@ -1500,6 +1886,8 @@ public:
 
   HRESULT
   Present(const std::shared_ptr<D3D12PresentState> &present, ID3D12Resource *backbuffer, double after) override {
+    pipeline_timing::Scope pipeline(pipeline_timing::QueuePresent, state_.get(),
+        pipeline_timing::Pointer(present.get()), pipeline_timing::Pointer(this));
     static std::atomic<uint32_t> trace_enter{0}, trace_encoded{0};
     TraceFrame(trace_enter, "queue_present.enter", this, "type=%u state=%p backbuffer=%p after=%.6f",
                unsigned(desc_.Type), static_cast<const void *>(state_.get()), static_cast<const void *>(backbuffer), after);

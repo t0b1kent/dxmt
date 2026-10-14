@@ -20,6 +20,7 @@
 #include "d3d12_command_allocator.hpp"
 #include "com/com_pointer.hpp"
 #include "d3d12_command_failure_trace.hpp"
+#include "d3d12_pipeline_timing.hpp"
 
 namespace dxmt {
 
@@ -156,12 +157,14 @@ MTLD3D12CommandAllocatorImpl::DestroyRecordedPasses() {
 
 HRESULT STDMETHODCALLTYPE
 MTLD3D12CommandAllocatorImpl::Reset() {
+  pipeline_timing::Scope pipeline(pipeline_timing::AllocatorReset, this);
   if (encoder_last)
     return TraceCommandFailure(CommandFailureOperation::AllocatorReset, "allocator.reset.failure", this,
                                E_FAIL, "still_recording");
   DestroyRecordedPasses();
 
   const HRESULT hr = Initialize();
+  pipeline.Result(hr);
   return TraceCommandFailure(CommandFailureOperation::AllocatorReset, "allocator.reset.failure", this,
                              hr, "Initialize");
 };

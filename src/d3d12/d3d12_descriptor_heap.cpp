@@ -19,6 +19,8 @@
 
 #include "d3d12_device.hpp"
 #include "d3d12_descriptor_heap.hpp"
+#include "d3d12_fine_locks.hpp"
+#include <utility>
 #include "d3d12_pageable.hpp"
 #include "com/com_pointer.hpp"
 #include "dxmt_sampler.hpp"
@@ -79,7 +81,7 @@ class MTLD3D12DescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12DescriptorHea
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
   std::vector<capture::Slot<D3D12ResourceCaptureSource, ShaderVisibleDescriptorCPUStorage>> descriptors_;
-  std::mutex capture_mutex_;
+  DescriptorSlotLocks slot_locks_;
   Rc<Buffer> buffer_;
   ShaderVisibleDescriptorGPUStorage *mapped_argument_buffer_ = nullptr;
   uint64_t argument_buffer_gpu_address_ = 0;
@@ -172,7 +174,7 @@ public:
 
   virtual HRESULT
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp, resource_shape::View Shape) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     auto &cpu_storage = descriptors_[Index].payload;
@@ -192,7 +194,7 @@ public:
   }
     virtual HRESULT
   AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     auto &cpu_storage = descriptors_[Index].payload;
@@ -213,7 +215,7 @@ public:
 
   virtual HRESULT
   AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View, resource_shape::View Shape) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     auto &cpu_storage = descriptors_[Index].payload;
@@ -234,7 +236,7 @@ public:
 
   virtual HRESULT
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferViewKey View, BufferSlice Slice, resource_shape::View Shape) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     auto &cpu_storage = descriptors_[Index].payload;
@@ -261,7 +263,7 @@ public:
 
   virtual HRESULT
   AddUnorderedAccessView(UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes, resource_shape::View Shape) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     auto &cpu_storage = descriptors_[Index].payload;
@@ -287,7 +289,7 @@ public:
   }
 
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice, resource_shape::View Shape) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     auto &cpu_storage = descriptors_[Index].payload;
@@ -313,7 +315,7 @@ public:
   }
 
   virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferSlice Slice, resource_shape::View Shape) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     auto &cpu_storage = descriptors_[Index].payload;
@@ -338,7 +340,7 @@ public:
 
   virtual HRESULT
   AddShaderResourceView(UINT Index, D3D12_SHADER_RESOURCE_VIEW_DESC const *pDesc) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     if (!pDesc)
@@ -360,7 +362,7 @@ public:
 
   virtual HRESULT
   AddUnorderedAccessView(UINT Index, D3D12_UNORDERED_ACCESS_VIEW_DESC const *pDesc) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (Index >= descriptors_.size())
       return E_INVALIDARG;
     if (!pDesc)
@@ -387,7 +389,7 @@ public:
 
   HRESULT CaptureDescriptor(UINT index, D3D12DescriptorCapture &out) override {
     out = {};
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(index));
     if (index >= descriptors_.size() || !mapped_argument_buffer_) return E_INVALIDARG;
     capture::Snapshot<D3D12ResourceCaptureSource, ShaderVisibleDescriptorCPUStorage> snapshot;
     const auto status = descriptors_[index].Acquire(snapshot);
@@ -466,8 +468,23 @@ public:
             std::memcpy(&to->mapped_argument_buffer_[dest], &mapped_argument_buffer_[from], sizeof(ShaderVisibleDescriptorGPUStorage));
           });
     };
-    if (to == this) { std::lock_guard lock(capture_mutex_); copy(); }
-    else { std::scoped_lock lock(capture_mutex_, to->capture_mutex_); copy(); }
+    if (FineLocksEnabled()) {
+      if (!mapped_argument_buffer_ || !to->mapped_argument_buffer_) return;
+      // One slot at a time and never two slot locks together: no lock order to respect, no heap-wide stall.
+      capture::CopyRange(descriptors_.size(), From, to->descriptors_.size(), DescriptorTo, CopyCount, to == this,
+          [&](uint64_t from, uint64_t dest) {
+            auto slot = [&] {
+              std::lock_guard lock(slot_locks_.For(from));
+              return std::pair(descriptors_[from], mapped_argument_buffer_[from]);
+            }();
+            std::lock_guard lock(to->slot_locks_.For(dest));
+            to->descriptors_[dest] = slot.first;
+            std::memcpy(&to->mapped_argument_buffer_[dest], &slot.second, sizeof(ShaderVisibleDescriptorGPUStorage));
+          });
+      return;
+    }
+    if (to == this) { std::lock_guard lock(slot_locks_.For(0)); copy(); }
+    else { std::scoped_lock lock(slot_locks_.For(0), to->slot_locks_.For(0)); copy(); }
   }
 };
 
@@ -576,7 +593,7 @@ class MTLD3D12SamplerDescriptorHeapImpl : public MTLD3D12Pageable<MTLD3D12Sample
   D3D12_DESCRIPTOR_HEAP_DESC desc_;
 
   std::vector<Rc<Sampler>> samplers_;
-  std::mutex capture_mutex_;
+  DescriptorSlotLocks slot_locks_;
 
   Rc<Buffer> buffer_;
   SamplerGPUStorage *mapped_argument_buffer_ = nullptr;
@@ -671,7 +688,7 @@ public:
 
   virtual HRESULT
   AddSampler(UINT Index, const D3D12_SAMPLER_DESC *pDesc) override {
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(Index));
     if (!pDesc)
       return E_INVALIDARG;
     if (Index >= samplers_.size())
@@ -696,7 +713,7 @@ public:
 
   HRESULT CaptureDescriptor(UINT index, D3D12DescriptorCapture &out) override {
     out = {};
-    std::lock_guard lock(capture_mutex_);
+    std::lock_guard lock(slot_locks_.For(index));
     if (index >= samplers_.size() || !samplers_[index] || !mapped_argument_buffer_) return E_INVALIDARG;
     D3D12DescriptorCapture next;
     next.heap = this;
@@ -725,8 +742,22 @@ public:
             std::memcpy(&to->mapped_argument_buffer_[dest], &mapped_argument_buffer_[from], sizeof(SamplerGPUStorage));
           });
     };
-    if (to == this) { std::lock_guard lock(capture_mutex_); copy(); }
-    else { std::scoped_lock lock(capture_mutex_, to->capture_mutex_); copy(); }
+    if (FineLocksEnabled()) {
+      if (!mapped_argument_buffer_ || !to->mapped_argument_buffer_) return;
+      capture::CopyRange(samplers_.size(), From, to->samplers_.size(), DescriptorTo, CopyCount, to == this,
+          [&](uint64_t from, uint64_t dest) {
+            auto slot = [&] {
+              std::lock_guard lock(slot_locks_.For(from));
+              return std::pair(samplers_[from], mapped_argument_buffer_[from]);
+            }();
+            std::lock_guard lock(to->slot_locks_.For(dest));
+            to->samplers_[dest] = slot.first;
+            std::memcpy(&to->mapped_argument_buffer_[dest], &slot.second, sizeof(SamplerGPUStorage));
+          });
+      return;
+    }
+    if (to == this) { std::lock_guard lock(slot_locks_.For(0)); copy(); }
+    else { std::scoped_lock lock(slot_locks_.For(0), to->slot_locks_.For(0)); copy(); }
   }
 };
 

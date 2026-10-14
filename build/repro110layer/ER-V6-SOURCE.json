@@ -1,0 +1,2305 @@
+{
+"added": [
+"src/d3d12/d3d12_pipeline_timing.hpp",
+"src/d3d12/d3d12_fine_locks.hpp",
+"src/d3d12/d3d12_gpu_timing.hpp"
+],
+"d3d12_dll_working_sha256": "0bec3f8d4fd985c06b4bc59f5cbaf6d575520a2172b04d71f956edc824f97810",
+"description": "\u0418\u0441\u0445\u043e\u0434\u043d\u043e\u0435 \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435 d3d12.dll 0bec3f8d (Elden Ring, \u0441\u0431\u043e\u0440\u043a\u0430 v6): sha256 \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u0444\u0430\u0439\u043b\u0430 \u0434\u0435\u0440\u0435\u0432\u0430 T0 \u0438 \u0441\u0442\u0440\u043e\u043a\u0438 \u0437\u0430\u043c\u0435\u0442\u043e\u043a MacRunner, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u043f\u0443\u0431\u043b\u0438\u0447\u043d\u0430\u044f \u0432\u0435\u0440\u0441\u0438\u044f \u043d\u0435\u0441\u0451\u0442 \u043f\u043e\u0432\u0435\u0440\u0445 \u043d\u0435\u0433\u043e.",
+"dropped": [
+"src/d3d12/d3d12_diagnostic_counters.hpp",
+"src/d3d12/d3d12_root_validation.hpp",
+"src/dxmt/dxmt_shader_metal.hpp"
+],
+"entries": {
+"libs/DXBCParser/BlobContainer.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "14e0d1f77f4f08aa3597f144ba13884aa3aae6ddb5c1d5ae9334d33f4a181997"
+},
+"libs/DXBCParser/BlobContainer.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f169a04e969788401c6065e8e4bae1b33fbd7c251336d8148f13f0efc27e2715"
+},
+"libs/DXBCParser/DXBCUtils.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6667f6944e6fbf94fd69e24fc3ae066e0300c7e88a2d5cf5efd4b71d0a3d2db9"
+},
+"libs/DXBCParser/DXBCUtils.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a272e59be9ccda7ea50cb20254c47661dad076a328cb14f6831c7ee6400b7200"
+},
+"libs/DXBCParser/ShaderBinary.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9f41c0325dd4ce50ec6caca559b33572813ee11ed18271e86ce63bd7558c41d7"
+},
+"libs/DXBCParser/ShaderBinary.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d841c8b8f9c3922a325cb18b382e641dd287664470278f417ca325eedc658c22"
+},
+"libs/DXBCParser/d3d12tokenizedprogramformat.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a4b5a8ff11e48bb1581b7002a7b249c32e3fcff084922267076bd92aea3ccbf2"
+},
+"libs/DXBCParser/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f278403560532a3c63aa6c7dfb66a6fd641bd6e481ad526157ccd26cfd36d87a"
+},
+"libs/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f0613c8914b2a8f00d7b2b6d4958a0ee08d02ffe1d74277a6af1c5ce7a957fdd"
+},
+"src/airconv/.clang-format": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a0cd436352cddcc47fbb90aa9faab076ac27838467867aaf6659cb44f9888c3e"
+},
+"src/airconv/air_operations.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a60680fb095e91a19c6cdd2d2d300cd33769d565ff929377a37490ddae65e734"
+},
+"src/airconv/air_operations.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "7e4cb42f49f78e055a63103e7e2ccdbdf69e7ff2246c75991b9481c9d5cf2d50"
+},
+"src/airconv/air_signature.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "91a2a2087b137267ac831483edcc6aa54bacb6d820014eea14e1fb87baa23d3f"
+},
+"src/airconv/air_signature.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3990d79ca4f6d2a7d3ce1f3eebdba0600e31fc4eea6d084146c917a954d5a7c5"
+},
+"src/airconv/air_type.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f26e473dfb48480ef41d06533ffcb42500da5c539f3d0ba7ff04c6b05792d80a"
+},
+"src/airconv/air_type.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5e82440f34b1331ecb13ce5bdfd0da8014a47d77f98e6a117da0a37e19bb6743"
+},
+"src/airconv/airconv_cli.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3a6e24e7d4e54e3e9f35158ef1fa19b0b89f5899a500a34dc436a925cd2e2053"
+},
+"src/airconv/airconv_context.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "32f02ca6a0a0d4406b200c2a7184e1611b8301f555f742898fc4deeebab40a87"
+},
+"src/airconv/airconv_context.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c5098e77b7058b0ff6ecc4e6c01608a08452e0b1c05e5a747938f6919e98190e"
+},
+"src/airconv/airconv_error.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "33176229f05747668c4661144f3761532cbd89e101c5f9cbef3821f99001e540"
+},
+"src/airconv/airconv_public.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "0934b5b1cbd0a3167c1c11699096e91955b48374f2e7ff278f2f66066762fc6c"
+},
+"src/airconv/darwin/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c453d3d997d1cc38624ffc38c8925667b7f2b50e274eadd89a4e0762e5349331"
+},
+"src/airconv/dxbc_binding_rootsig.cpp": {
+"inserted": [],
+"origin": "t0-differs",
+"sha256_t0": "590663adcbe9e303e91a9c807eae31cbd17e3b3c6de48f3930610660d9ed9f72"
+},
+"src/airconv/dxbc_binding_sm50.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "de0131d7b863ba5b38cb9bca66f4ee06a1cb33ddc79cb70da7be6e4423166174"
+},
+"src/airconv/dxbc_constants.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "28f67ce6ffe36d77c389dc17cf75c1622b35bf6448a13f779acf48278c4272a8"
+},
+"src/airconv/dxbc_converter.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5b001c958c16b9dbe2bfdb577c680b6475a299bd8d6323fcc6753e5bd426e2f3"
+},
+"src/airconv/dxbc_converter.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6960f2b6b43cea02911b58f7433577d3b17370c357c554ecd918e51a2b3bebc3"
+},
+"src/airconv/dxbc_converter_basicblock.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6ce6b0710e51b536aa4d8fd3b1474dcf42cdb5fcd306e66f87637d9eb4ccf794"
+},
+"src/airconv/dxbc_converter_cfg.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "be6fe382b149d0159f8e5d3e32d6eb8bb879385248961bc37bce3e9936441f26"
+},
+"src/airconv/dxbc_converter_gs.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f4f62d12a209f486dfc4918913711b3813fdeef8045fa47e6aea9cb30f94c857"
+},
+"src/airconv/dxbc_converter_ts.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e0312f31b4f7f1cc979884084c08a32c97ffba1626f4ea900df926a386b50901"
+},
+"src/airconv/dxbc_instructions.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6ad2a773e2796f25ac5f0ab794a81e871f73e648d0f9e5ba8887db99917858d7"
+},
+"src/airconv/dxbc_instructions.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9d11d96340c7d5c535bb91f3c366381f771f8c9737523818781989f900a0265d"
+},
+"src/airconv/dxbc_root_signature.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "30a935467c834caf874d954952d1f42b8eb21f2d30425df83cdbcbbbf8d72da2"
+},
+"src/airconv/dxbc_signature.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d44ed33906d511de8873b37f839a6494dee463d1d6dea60b419460161b924a5a"
+},
+"src/airconv/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "42890c18f303e400ee91ae44bffe20945af6b45e9440354f8bb95f9d42b7ad5c"
+},
+"src/airconv/metallib_writer.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "523e824c45e1452d281eca08eacef7a8512000a1d8a0ad040d8d1baaf568f02e"
+},
+"src/airconv/metallib_writer.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6aeffa01e67cbeb06fbdcca43e47fd154458d5f6e6bce38107412ac9ad0fa415"
+},
+"src/airconv/monad.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ef36fff435fceaf223daf93a79f888f38af2b3e3923a8ef5886288f5c8235908"
+},
+"src/airconv/nt/air_builder.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8e1b77b3b3aea42cd3402746efbe0b844887e0139c5044ea16fb8084297c9343"
+},
+"src/airconv/nt/air_builder.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "53a3151b3eca26f765aea8b1257fd9c03105f1a2cba8cbeb644a9686ec458326"
+},
+"src/airconv/nt/dxbc_binding_map.hpp": {
+"inserted": [],
+"origin": "t0-differs",
+"sha256_t0": "319ab3d7b9ee057a10b5d489ce18d72b85ca7d6ec9d74f5cf25d03ad7bf214e6"
+},
+"src/airconv/nt/dxbc_converter_base.cpp": {
+"inserted": [],
+"origin": "t0-differs",
+"sha256_t0": "d8ae5cf6b59fe3b03a603a9672ba80190708ec47185ac1fbf7f0c4a7a8819f26"
+},
+"src/airconv/nt/dxbc_converter_base.hpp": {
+"inserted": [],
+"origin": "t0-differs",
+"sha256_t0": "694322ec0e472043208ee63072517d32d93dd8f5862354b18cb41536aa14302f"
+},
+"src/airconv/packed_variant_list.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3f1591f7a4db77be53925fde020089e3146226aab12ce243eea97cf60377c027"
+},
+"src/airconv/sha256.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ad25b4191a4d294a13562b8cf48aa33571b09d4ff66112f2b88b2c4e22eef447"
+},
+"src/airconv/shader_common.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "97e80c96c82e3e1e03e2f8ce0369057da49333c7bf2fef3037917325e5e244fe"
+},
+"src/airconv/shaders/air_msad.metal": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "bb1f622f63026a0154164ed385e91e9d759f5bada897e6b0a76ff7710bc5565d"
+},
+"src/airconv/shaders/air_samplepos.metal": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f17da691bffe9d2ab60d20e137d3ee71c3cbade714de3f35c0ee827578f320b8"
+},
+"src/airconv/shaders/air_tessellation.metal": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "400295e638720ca62a1fe1d6f2e2a58340c36a902cfc8527e9f54e8cc9bfabd3"
+},
+"src/airconv/stage_linkage.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "06857c5e7d028fe256d7f1c9bb939629bfaa3b7493b4fdff4dc1b41415414da1"
+},
+"src/airconv/transforms/lower_16bit_texread.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "cfd48de735d8ea0666d2f36886452829f9397c141fee46add91347524f356ab3"
+},
+"src/airconv/transforms/lower_16bit_texread.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "832ca297b8b0ff20d75afa583bf0c72da07914265d207396b8c6eb9e9ac43e3a"
+},
+"src/airconv/transforms/simdgroup_implicit_membarrier.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8fbdf9b8e6ac8ec000d137bdc47366956e9f28391518bdba6439419b82c6ded3"
+},
+"src/airconv/transforms/simdgroup_implicit_membarrier.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "542ce3a6de50ff1ca3530b9911060f9db0a0cec035711b0ae5b1691a52127ed1"
+},
+"src/d3d10/.clang-format": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ad614f08121a45ed1ac2c4bfdb27155979f50b45024ff9a35e5a0b59d844c3e9"
+},
+"src/d3d10/d3d10_blob.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "24dcdbd4fe23bc4724bfca2988d486fc739c60f3e77db09c3025b38ce3604c41"
+},
+"src/d3d10/d3d10_blob.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ef2d367f37f2e24a5a97cd7382fd6f7a1a05422179ccbacbb10e528f87a985c8"
+},
+"src/d3d10/d3d10_buffer.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "39417feb040ca2eddb3b5e905aa9653cd832543bc30ee43e5b4f3f8f10adf4af"
+},
+"src/d3d10/d3d10_buffer.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9d0eecca9eb9a699ba6dfa591b6b7190181b8d76cf7c42f3db2ed4253b71bb09"
+},
+"src/d3d10/d3d10_device.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5bbd5efeebec6ca6b42092aa0ce15ac1e803dd997fcae566f7cd418324ce798d"
+},
+"src/d3d10/d3d10_device.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ca21dd9501a13ed52ebc10687be964624ed03b7e2d8de54642cc3e5b16b9be0a"
+},
+"src/d3d10/d3d10_input_layout.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "36d040eb73d3f0b7a6624c3dc5bcc568687920a389aea3f86c25c22268997b14"
+},
+"src/d3d10/d3d10_query.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6ebb9eb1d98e4f9d6facf4049ea7b5169f958d0cb5550cfdaa5b7f61ce21576a"
+},
+"src/d3d10/d3d10_shader.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "599843a948f70ca30f834af317f172b2b8a11f199d6207d44a4cd0fefdbfd13c"
+},
+"src/d3d10/d3d10_state_object.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9c4b2733f8ea43236a37ee7e2fb7d8800a7ab03b419c14e32e77f99f380d908f"
+},
+"src/d3d10/d3d10_state_object.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "695e9a3de97b913a914f2e5632d702f1a97edc29774f7d7e30d8c1bfc3960889"
+},
+"src/d3d10/d3d10_texture.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2028be09afa7fe5a00dbe652331a0c1de23b1de6722685fdd3aabd125c27b975"
+},
+"src/d3d10/d3d10_texture.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "91eaaffaf236a21041fed9ef701ac5ae32e06173054a9730589ff0f0c28454cb"
+},
+"src/d3d10/d3d10_util.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2ef4438a5f31504b6353f6e33815099dfe400fce154771d72be50fd7a8492e85"
+},
+"src/d3d10/d3d10_util.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a030cb8c610907f996487230cc59f96694cbefcbf1da735e31e3d7ec504e1eb8"
+},
+"src/d3d10/d3d10_view.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8d28f2330b0ff0acd86bf547502e17734a6667d0ad5dabb0be3f22657f771b59"
+},
+"src/d3d10/d3d10_view.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "22b242a843723983c8514d95f286088c5761f9423c525a5d71baee41e86099c3"
+},
+"src/d3d10/d3d10core.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b0b2fb5c7e627b0fd73ff37145aeebb42d26539bba1a37abfceba3fc68d47c00"
+},
+"src/d3d10/d3d10core.def": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "16c5f3c45b1d9e53193328157360c267a183a322d205f66d2e62a4b438d9b3d9"
+},
+"src/d3d10/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "bbb310269b2ff46549ad5e66f951253dedf7844376f0313a9549d7a2c50d6c00"
+},
+"src/d3d10/version.rc": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3869f27594a11202b31f3754b908df41c53385869d908c8530def9bb2d3c99e4"
+},
+"src/d3d11/.clang-format": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ad614f08121a45ed1ac2c4bfdb27155979f50b45024ff9a35e5a0b59d844c3e9"
+},
+"src/d3d11/d3d11.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4df09936a776c86c7082995f8f0173639813cd17713bf484de3ce66b212aa89c"
+},
+"src/d3d11/d3d11.def": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "7eac2d74195567b45c11cc541ba7967d195982278cb86dabe1ebe7963e2800d8"
+},
+"src/d3d11/d3d11_annotation.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9452861d80fee43cdbd1cb667fee6a40756a93786bdcd155baebb1a575c6b54a"
+},
+"src/d3d11/d3d11_buffer.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "75fb67ba67b958f225a908951d759a697a12949a51cda7c34ca53977f795d12d"
+},
+"src/d3d11/d3d11_class_linkage.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9678150bbe154713df39d79e4c4c191d27815cbe3a802c3eeb7244b4d27c0fae"
+},
+"src/d3d11/d3d11_class_linkage.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "302a4a397e24d56d5eda3c638aca04d1815f9cb52c8fd59ed80467fbf5d2a317"
+},
+"src/d3d11/d3d11_context.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ed9eccee3ba00ae352308e1072d96130ba27e7cd63a7cc7aefa06548c310c47b"
+},
+"src/d3d11/d3d11_context_def.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "98674c139ca4b3e7f957981e3241d8ac0dac2c5a3a0bcc8127b3c0bd86a0d199"
+},
+"src/d3d11/d3d11_context_imm.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "cbd6b302a0c16bfa3898e43c1ab83a118108deef647d2c0c3df25e28090b2356"
+},
+"src/d3d11/d3d11_context_impl.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2baab7d882bbbcf6774da4d7d60b7567aaa37fa4e23c4479794156b0aac7a792"
+},
+"src/d3d11/d3d11_context_state.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d0253f7d835b9d3f55dc5ea5c4dab3a06e62602d2e387892c1f39a0dce6e5d9f"
+},
+"src/d3d11/d3d11_device.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d05bec8f400403d5634425f3bb8b1497462e599e8f6032d1a46cb8708d4524a8"
+},
+"src/d3d11/d3d11_device.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3ecb3b9c9b0ef4eb65b9fb2044efa2c9f02c7603d6eb0ddd4385a19696f777d7"
+},
+"src/d3d11/d3d11_device_child.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2b7fdb65eae8b039d9cd2e4fbfd61e8e87d895978315d955190ad2eadc662f6c"
+},
+"src/d3d11/d3d11_enumerable.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "109ce10ac7b520701af6e98536ba6faabed222c7304906acc6501450a7b7fa42"
+},
+"src/d3d11/d3d11_enumerable.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9350d0855b5b900fea41134c3edb7ad6d0d540f3937653c7338bdf5cea7d7d6e"
+},
+"src/d3d11/d3d11_fence.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "027bf990e46c19f6a16b7efa3ae7d05a5c1113c62d13d5c3255bfe1ffd2c3e93"
+},
+"src/d3d11/d3d11_fence.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5817e5a1cfadda7327b50c1f5cf2c675924c866a295580fa297de5ca608afe51"
+},
+"src/d3d11/d3d11_input_layout.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3268a4f74537b600be4eac3c313082d815d832cc860d30fcbdb7bfe4551377ad"
+},
+"src/d3d11/d3d11_input_layout.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a21b29d205c3b29714dd80ddfb2b007c4fde6a8a6189bb8de9dc85660c09d33c"
+},
+"src/d3d11/d3d11_inspection.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8457de70294e9783d3653c8ee69b91869a039bf520e564ab6835bcaea63ee141"
+},
+"src/d3d11/d3d11_inspection.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4f6685b4bdea72dcd74a1f8c46e3462111967884a4abd9f54f724c403d9239d4"
+},
+"src/d3d11/d3d11_interfaces.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "753033ca4b23f3d373822d0c0b6786d1909a2d544ba8a6b1325282aacbd9baff"
+},
+"src/d3d11/d3d11_multithread.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5ee1e4a3ec5a7d00370dd778a298f3cfa6f2d2e5228b46a49f3d657749435ced"
+},
+"src/d3d11/d3d11_multithread.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ebfdb860669a5b4f5203f6080139b520f07c1575d0122b50982818dea3fdca0c"
+},
+"src/d3d11/d3d11_pipeline.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2af13b75804dbaf35e6f1b0f9844d459abf8e5cf300bb7882e8f7ab2b2afd095"
+},
+"src/d3d11/d3d11_pipeline.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "fae87cdf35f402ad0d9e93ba257fcb2f55825c7d67a8e46be6f715be26e3598b"
+},
+"src/d3d11/d3d11_pipeline_cache.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "265e3b7155d8281387ca90d486d92e0b8482ba61111c64794d68b8916cf947e4"
+},
+"src/d3d11/d3d11_pipeline_cache.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ed1e2aff4e1c7e4ff2487287460a52048b64de1df2fdf02395ea1e52592f99a0"
+},
+"src/d3d11/d3d11_pipeline_gs.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a15e695dadff05e724665200c0d763ac9f122111ed5da5db6d9836ff400edbcc"
+},
+"src/d3d11/d3d11_pipeline_ts.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9c12b5cd5d3bc0312ccf014e03bab1c82fbcd9e8dcf77c73b3ce1d51e7c7a898"
+},
+"src/d3d11/d3d11_private.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "700a1a8f9b2f57ff1e2f9d3bafb140d92670ee8ec2b6c6550e7d59aa156c3cfd"
+},
+"src/d3d11/d3d11_query.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "28b5293e6887afca38c9d298b46fefc98d797e9d18b6795ce24cccfedf35723a"
+},
+"src/d3d11/d3d11_query.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "20de8e9d52e897892654e9f45e64a1b59461a843e45de3230a8946e4f80e905e"
+},
+"src/d3d11/d3d11_resource.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6084821b9e895a20a6e9fd46d58d80e34990a658ee5ccd1fd0e85d8466f3d899"
+},
+"src/d3d11/d3d11_resource_helper.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9b8da37dc23773f745b49e8420c8ca2728f0492096df9a4d88d6a3f63e7b5ee3"
+},
+"src/d3d11/d3d11_resource_staging.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a8739bcdfd0267b5a1a8c1cc500db33d78d6dcb0d790da5e6c9f842e178cbb3f"
+},
+"src/d3d11/d3d11_resource_view_helper.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f6b028dcf257a5ff3450b7ecfc87c7c25b0e0a9aac91799c90e8d558dab6f3c3"
+},
+"src/d3d11/d3d11_shader.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9647bf369894e95d2b9b271e506cc627e9eadef9fc3e8bb2b0c850855dad5b8b"
+},
+"src/d3d11/d3d11_shader.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d905888930fd45b379ded02b4603b18df579638d5f9091691edc5d5c286c6e88"
+},
+"src/d3d11/d3d11_state_object.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "61c323bebceb013d22389eed57c9ca6aa5ae168c82b2807ef8128aa1dc6ba13f"
+},
+"src/d3d11/d3d11_state_object.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "038084cfc1e21452ef3f208a7b5ab722d67fc2477e6dc351b5150e25622e5ee2"
+},
+"src/d3d11/d3d11_swapchain.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "7afae62c7b6d4e7ead2e0d4190a88dcfe4d19706d98a065e74e83f2dd62f3f68"
+},
+"src/d3d11/d3d11_swapchain.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f37e218891ac0dee14ef2719a7b2619ccd5f30b4c168a6072003f48cad7c8af0"
+},
+"src/d3d11/d3d11_texture.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "956007dcd3b6d2dee305c100c841597078252f37efd302d93b2c5643a4207d10"
+},
+"src/d3d11/d3d11_texture.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4ae54032902e66897b044275ec0fea337411d1b5fdcf7f43d1f3d87a99acdec4"
+},
+"src/d3d11/d3d11_texture_device.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4739536cc9b247fca35623edf69b1ddd81148b1c51cb816d055a467aec2ca52d"
+},
+"src/d3d11/d3d11_texture_dynamic.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "424d8d747116af3e9b2946bd7923feacfbb2df05c08cf9d4d73abf00e9fda2d2"
+},
+"src/d3d11/d3d11_texture_linear.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "7d27337cad8f5b7c1de169b965f32adae5a010373efceaea3187c550d229251b"
+},
+"src/d3d11/d3d11_view.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9e542f00b4beb2a84b51041f81b5509e228701bda4bd871cc70e9f7c8995c43f"
+},
+"src/d3d11/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "bfb58b9934c44d85a91885a9ba2488e58d62d22fb2be4f5b55d29fc1ec61ef94"
+},
+"src/d3d11/version.rc": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8dbd25c986df5219f177e00278a93dde688a0038abea5a99bb442d2ed5792ece"
+},
+"src/d3d12/.clang-format": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ad614f08121a45ed1ac2c4bfdb27155979f50b45024ff9a35e5a0b59d844c3e9"
+},
+"src/d3d12/compiler/dxil-resource-footprint.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8f39412914a6595970664f4ebd78b7fbeb39ed4749e364d6c7811019069184ad"
+},
+"src/d3d12/d3d12.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "0d49d2a95e50b2b312d3bd71f952be907ae72eed801ab28612c70876a39bb791"
+},
+"src/d3d12/d3d12.def": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e73b627d08110da7144537add64aee1d36728a3e602abee66bd8c862113c70e8"
+},
+"src/d3d12/d3d12_acceleration_build.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "99ff38c5e7ac9c23c8690b603ca57c09b6c7d9696a5f7f72f2e93b140f00acf2"
+},
+"src/d3d12/d3d12_acceleration_capture.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "3ba2562e278b1eb625df23e65545b29863b5d105908536a83421c7f71c172f9c"
+},
+"src/d3d12/d3d12_argument_access.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "4b7e0ec5a3c27fb68bfc3237f26bbd33605408fc28a9d0abc50aeff80a85d781"
+},
+"src/d3d12/d3d12_argument_upload.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "2d8480463401bfb0f2a68acc01bd868c31d7737dae26adb7e36c364663357388"
+},
+"src/d3d12/d3d12_buffer.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "a53b97e0625425beddfdde3f9c0beb30c7aba1b32ab2c00e2e6ffbd156906ad2"
+},
+"src/d3d12/d3d12_capture_ownership.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "478364f8d5a4276ea8fb5b06a0c23e54fab6743346adaa5aa28b533e12a951f2"
+},
+"src/d3d12/d3d12_command_allocator.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "e71c54f18dca6b1d98dd86bc08355b082f0a6632d848e6d422a927fb5de5536c"
+},
+"src/d3d12/d3d12_command_allocator.hpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "ae2a1b2fd550362a8bc89d6a90543bad322be5c59ab1907ebda3e4752818b884"
+},
+"src/d3d12/d3d12_command_capture.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "235da2381caa42513ad58eb205aba6e760a0a9f281d33917e20d08479cfe7b95"
+},
+"src/d3d12/d3d12_command_encoder.hpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "f2eda333758ddc1ba344a58fa1958653e67f90ffe192c16d1ce9e980547e82ee"
+},
+"src/d3d12/d3d12_command_failure_trace.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "61d95d01542843cce155e742dac86bd5d87ad96d87378c46276101c8a51abab0"
+},
+"src/d3d12/d3d12_command_list.cpp": {
+"inserted": [
+[
+5,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "e91c1ab1da6538d04e6a71a2c034dbe3a8a15b146a7730fa6483613b8f97b3ca"
+},
+"src/d3d12/d3d12_command_list.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "c3a6d10d0d4f6ff02237d31871931f1df78e6bc97794469039c70303cbc49e7e"
+},
+"src/d3d12/d3d12_command_queue.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "b5f1bdeb33cb45a88622f77868b15ac212305cc0f067109a47e51209099e5a27"
+},
+"src/d3d12/d3d12_command_signature.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "556e34d25844a16942904f087664c74f4f652497c9abdf798481ed4f72fafc07"
+},
+"src/d3d12/d3d12_compiler_resource.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "f0d0e9ab616dc1a86c874c8eec07b8caf2588b5b6b6415fbb0abc38fa1bfad56"
+},
+"src/d3d12/d3d12_compute_commands.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "1fd2b0fe1259d8fcacc8c09f5270115850b08394998b0e2291cac94d8fa60add"
+},
+"src/d3d12/d3d12_descriptor_heap.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "d4b6b2c58e319641f4e54a2d74a749fb093a83900a2e54fa94f9b962e69df243"
+},
+"src/d3d12/d3d12_descriptor_heap.hpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "713786718ef93d2e06ca3cfcf40f73b6172d70cac0fef9f41ed42cdf04e94252"
+},
+"src/d3d12/d3d12_device.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "cfc765c553adde1e20f0ddd905f8069c829fa81b91a69ec74f97c8797670fa59"
+},
+"src/d3d12/d3d12_device.hpp": {
+"inserted": [],
+"origin": "t0-differs",
+"sha256_t0": "211efaf585a65cb93bc4f9eff071f66ef898d4b2427d4808e6dfad40767d0da6"
+},
+"src/d3d12/d3d12_device_child.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "df05e34567384058200c896efc33d4593708852cb8984af5e97c52a6b2d449a2"
+},
+"src/d3d12/d3d12_dxil_artifact.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "806b3e25ef08f9751b1326fb4cda8951672b47e1821747a0de4f7aba21148fb1"
+},
+"src/d3d12/d3d12_fence.cpp": {
+"inserted": [],
+"origin": "t0-differs",
+"sha256_t0": "d0430952b8d13fbf997028196f2f62c76e74ba297f0c5f0e4358fa880d0d996c"
+},
+"src/d3d12/d3d12_fine_locks.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-new",
+"sha256_t0": "27237a5d4d8d2dd99d855d0204cfd57be267005fa3bbe5375f0e6d90c0ecb2f6"
+},
+"src/d3d12/d3d12_frame_trace.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "296a90d3e3e22092aaaee4719fd5409ce60c0af474e75a9ac087fe90fd89ba71"
+},
+"src/d3d12/d3d12_gpu_timing.hpp": {
+"inserted": [],
+"origin": "t0-new",
+"sha256_t0": "62ec659387339f12165e29127517b411833e85ca94a89fea0b92e1972ed1edcf"
+},
+"src/d3d12/d3d12_gs_contract_reader.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "0b5401434e59b5df5295a96f91999a6da14799d97f3375eb2eeb46cdd5489459"
+},
+"src/d3d12/d3d12_gs_passthrough.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "db7ac4fae19b1993534314fdba5e81efe7cb946b4b7d145906dfc0b4c7718c9f"
+},
+"src/d3d12/d3d12_gs_point.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "8caac5a7a200532f7be50dbf8c80718ecf4867cd7dc8d1da3b1d96b076aa2777"
+},
+"src/d3d12/d3d12_heap.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "125f24298cf6717a1813079dfa268abe094e04327056ea0a81b3361301523af6"
+},
+"src/d3d12/d3d12_lifetime.hpp": {
+"inserted": [],
+"origin": "t0-differs",
+"sha256_t0": "47e66dafe430458613fd2760baa9253337d1a0f42184d67c05ed7ce520d44867"
+},
+"src/d3d12/d3d12_local_root_layout.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "b9ac7786f3b168268bf37f060a79929dcb790d927edb598001df3440d5bdaeff"
+},
+"src/d3d12/d3d12_metal_argument.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "34e313c2c84ffd7c6c8673794f311be9082cb4b578f342d4721d895659bfdc65"
+},
+"src/d3d12/d3d12_object_grid.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "fa6db7e03ba629ae7c0ad310a917b8a6634758e1c0be14d532d7e9d27ab30bc7"
+},
+"src/d3d12/d3d12_pageable.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f4ad381a24665a088f5bb220a7c867c173f107abc5ff97607126cc3e6af536e9"
+},
+"src/d3d12/d3d12_pipeline.hpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "aba196e0a5911e5154bfd7b45c0ab7746ee9d698de0a978c587eceffd8f9e1c6"
+},
+"src/d3d12/d3d12_pipeline_compute.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "73278d2bc84735e6492f888c4fdeff76afefcf750262a34423049d27a0ab2e3e"
+},
+"src/d3d12/d3d12_pipeline_graphics.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "b469b0d207e814de976c56d4032eeaf5d0cf4101f9050ca1cfe1edb124eba95d"
+},
+"src/d3d12/d3d12_pipeline_timing.hpp": {
+"inserted": [],
+"origin": "t0-new",
+"sha256_t0": "ab20ffa81e6075d2a27c85c1f717abe0f0a63fbc86da8533629b6134b869cf00"
+},
+"src/d3d12/d3d12_present_timing.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "e27413bb3ea8e55648b5057c931002b08abddf184ffb634d5d2369126941e111"
+},
+"src/d3d12/d3d12_query_heap.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "9afb6603c4be1ca40bfde7f2193a66aa9fd9320d355219d934d75538443fc232"
+},
+"src/d3d12/d3d12_raytracing_bindings.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "8d149cf43876361f073b7c78ff1eb1ed5627802008f69cefad09aaa3b7899440"
+},
+"src/d3d12/d3d12_raytracing_library.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "01201c5a1ca3bba568f656dc23503408bc8df40df03d676887c2e4115e87dfd8"
+},
+"src/d3d12/d3d12_raytracing_state_plan.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "98031fa160f72611b31e0d7d8cb438d1d17a77122972bf956d47da6dee695216"
+},
+"src/d3d12/d3d12_recorded_binding.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "900fdd48387869d9b007e5d4e2a2b090aa67bb5caa39e70d5490d248bdd51e54"
+},
+"src/d3d12/d3d12_recording_guard.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "ac4b81ec4d1ae32254a266c556728e25a551f248ec2b4ef4f8894e07b439bc5b"
+},
+"src/d3d12/d3d12_resource_helper.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6187d09844ed968ec77235f9cad07601e01fcf18d34e35c758b1c3cd9e72908f"
+},
+"src/d3d12/d3d12_resource_shape.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "3f4160aabc588f011d6ba91089c0d1aec6630361dcc5f62b3970cbf7d2dd887d"
+},
+"src/d3d12/d3d12_root_signature.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "94dd37dbd19f033da05cc7c9db8710c165bea97a7a7172d1363d31c6bdc168d0"
+},
+"src/d3d12/d3d12_sampler.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "0574ca540a893ac4b1a54060f9b8525e70af3eb3bc7b8b3c314a611dc71fee0c"
+},
+"src/d3d12/d3d12_shader_capture.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "c568bc2ea91df5539a247c84d2c866a412da4b5e1ec33c61964f770c4c069227"
+},
+"src/d3d12/d3d12_state_object_associations.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "d7b43c052bc5b6519fd70658becbc2e1a63e682463b35a07d3405c40126c4a31"
+},
+"src/d3d12/d3d12_state_object_libraries.hpp": {
+"inserted": [
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "d53ebdf7597d03013e2e5f48c84525b28d8af53d9df2f261a5ff5480bf5c3dce"
+},
+"src/d3d12/d3d12_submission_capture.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "53625ac60249f442808d8427bf26575e2c8d87b73ec05c494edff6d55be83e66"
+},
+"src/d3d12/d3d12_swapchain.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "e1d18c2e1f064d0ff6c382962e5ed144a0697af1aaac1b42c59381c0cfa5b4ab"
+},
+"src/d3d12/d3d12_texture.cpp": {
+"inserted": [
+[
+2,
+" * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "938404217063b0f9be9bac395bd8e606c58142e3aa9765d0a9db1d59c143b590"
+},
+"src/d3d12/encode-mesh-indirect.inc": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "32a23a0d438288e041aaeb20115efe8c560a3854e04164878a7a6bb8eb4a0956"
+},
+"src/d3d12/gpu-heap-bounds.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "836bbc26c446a538e7617cae520e82058545bb76225aad7a22dfb080e3722f6b"
+},
+"src/d3d12/indirect-mesh-contract.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "47764e2a4ffad52b8cee6d32162c2a9ff14594d10ce436cabaeb509c76fe75f0"
+},
+"src/d3d12/indirect-mesh-resolver.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "916052a9f2ff0ff3b66c35923c137fead200f233e3cd6fd6c70ab76b568175ca"
+},
+"src/d3d12/indirect-mesh-sync.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "b39495074135f82565a1e28058939ce5a89fbd5a2dde508feb92ca99e7ef702d"
+},
+"src/d3d12/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8de669d5aa08aedb1daa94de9785e7f131b0048d432dc50d1449366545cc788a"
+},
+"src/d3d12/tests/acceleration-build.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "13e7cc19fb1fdbbaddc5b5f9bd4e16fe2bca9b69108c5f6a59f99422ca1ec98e"
+},
+"src/d3d12/tests/acceleration-capture.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "72d8a68e51b770207c49fc2f63257cb0305b07c6df38baa5d43b06a4fdeb6070"
+},
+"src/d3d12/tests/argument-access.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "513c85449c643c02db0892169b536ba4be2c8fdca70e7d60f1b08c03b1886f3a"
+},
+"src/d3d12/tests/argument-upload.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "0cba05ed00818c339671f193079d0874ec915b215e4a5285d5403bc307ad68f6"
+},
+"src/d3d12/tests/capture-all-CONTRACT.md": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c1965b31e26f424ecdc318ba362dd8b729dc56d66c434d9842e5fefeada84d6a"
+},
+"src/d3d12/tests/capture-all-RESULT.md": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b4ab9104293bfacf878e1b1f2f9bfd7d2333d2148462423c1ed1078a5f0b3c1b"
+},
+"src/d3d12/tests/capture-all-mock.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "51702e76d0403d3c0c8c91f4362861c5c0b63757c92782814c9f19ae8706e45d"
+},
+"src/d3d12/tests/capture-all-run.cjs": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5714809f55b43ef6a8c72137bd4784f72dff10f7300cba2f05762d035f483cdd"
+},
+"src/d3d12/tests/capture-ownership.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e38965ad705858fc0898fac36058fedf182b34ab5b2b0bb16688fa0fd2e9450b"
+},
+"src/d3d12/tests/compiler-resource.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "860b6009c99c79985077ec30f027cc7d774f68a85a2e287b6154f36c35c7ec23"
+},
+"src/d3d12/tests/compute-entry.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f2336f2dc5edce00fd93bc7a6eddc7ac17abdc28388a8eb97e499ad9a09cc50c"
+},
+"src/d3d12/tests/local-root-layout.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d6a7171f59bcac511e1586f0c73c27a0ed7b41959c06d284220ede3cbafbf62f"
+},
+"src/d3d12/tests/metal-argument.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e1b081d261f94f830d7e129fd1bc2c5190cdab97b7760cd1016fabce3ebf7bc3"
+},
+"src/d3d12/tests/raytracing-bindings.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a16b49be31e35480ef0019f14b152c42a40e551b3567242734bf0527b60889c0"
+},
+"src/d3d12/tests/raytracing-library.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4c0e132dcc1218aefa78a6a84b42573ee1345a1b0d63936cc79e2a8955f7124a"
+},
+"src/d3d12/tests/raytracing-state-plan.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "1397d6973de0ff7af5785caced8c1b09de3785f4dbd09b364e02ff5ccec18bbd"
+},
+"src/d3d12/tests/recorded-binding.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9d7678a3d52576a42dffa9ebe74ca2694cb1bed25387d4725f9e50e3745c7d28"
+},
+"src/d3d12/tests/shaped-argument.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e70f1294760b639d7f02fc36f9accae9ce5c47dc4b999fac2c0bb3102b08cbd5"
+},
+"src/d3d12/wave_native_bundle.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "t0-differs",
+"sha256_t0": "dc53766ef8f774d7f742ecc411c7f1128cce09f0a90ee1abd3470d5a0f2b54c9"
+},
+"src/d3d12/wave_native_match.hpp": {
+"inserted": [
+[
+0,
+"// SPDX-License-Identifier: LGPL-2.1-or-later"
+],
+[
+1,
+"// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md"
+]
+],
+"origin": "public-header-only",
+"sha256_t0": "2882514b963fca2e888d236f01c17a2035ed9ec4cadd28233bb362ce1464fd91"
+},
+"src/dxgi/dxgi.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "062891b3f17b1f184345839317a4b492703a80b83ecd10c65a18ecdbec106303"
+},
+"src/dxgi/dxgi.def": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "761614d9904bb1a932b82fd9690f23c42c602c282d8aae0a0ad0ee29b8d8210e"
+},
+"src/dxgi/dxgi_adapter.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b774fe3bf154ec966531115051d9a6e38b1a1f7771b34720f9c0b5c339435a57"
+},
+"src/dxgi/dxgi_factory.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5b6e8c1c98fd99990fd65be78837fafb458be803963189bad017142ca8e06b4a"
+},
+"src/dxgi/dxgi_interfaces.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "34b876a78706c8394ffaf099a9fbeba8e6746a5da26fe987c7202a24bbea21a1"
+},
+"src/dxgi/dxgi_object.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "31d2289bfd008bd329ed70e0b6cbfdd4ad78cee147345bcfde18d95961c86634"
+},
+"src/dxgi/dxgi_options.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ce8ce26bc319d31b09de3ecaeaab0bd641c3a53135de577743c3add75d138ec3"
+},
+"src/dxgi/dxgi_options.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "94cacb69505bead4dda91990d23d091c31d8573c78e0cfedbdf7cc3ad2c579d8"
+},
+"src/dxgi/dxgi_output.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "cb913a04f12922ac9f9977312adde8f0afb52726fbeb427fdaba092149dcbef2"
+},
+"src/dxgi/dxgi_output.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "92db6e325ad89b3d79b718d847047eda6a4ac75ac54e5e595515904c1e73ac1a"
+},
+"src/dxgi/dxgi_resource.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9e044b8c692cdcb01dfc3c017c821ee96f2b93c844aa0762826206ba1b16c68b"
+},
+"src/dxgi/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9494a8a9e0752ae8e885f177cbb33e38ef7217cb20cd2ca85c626888650457cf"
+},
+"src/dxgi/version.rc": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b57340a0571fb9aef2aae5c13de4d3375566415df7f0aa6f9750b2137f610f4f"
+},
+"src/dxmt/.clang-format": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ad614f08121a45ed1ac2c4bfdb27155979f50b45024ff9a35e5a0b59d844c3e9"
+},
+"src/dxmt/dxmt_allocation.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "344937cfc4278c90ed9b51e2887af4dba2d99c722d81566909b5edf408ac3602"
+},
+"src/dxmt/dxmt_allocation.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d5c5d7cba22a81a2fc6d5c6c6fc5dd72d63c9b87d07f7ccd6a7e838eb1c47731"
+},
+"src/dxmt/dxmt_binding_set.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c4a19fa0610450aaaf6fb339846c45e6508899239e9bdcaf05e04c1193a26cfd"
+},
+"src/dxmt/dxmt_buffer.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "14c87c78a2a2873cdba97d1ae422aa3f9b90128176c6dc1e3ea6cf61059e4c5f"
+},
+"src/dxmt/dxmt_buffer.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3a21b4cd0cf4ff27a879543b61856e2b564edb720095e2906f1a4408ca81c966"
+},
+"src/dxmt/dxmt_capture.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "61fa2bd74f860a17b5524a8de732f625254e267548a4205d9666a46c16480493"
+},
+"src/dxmt/dxmt_capture.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e7a67f2abbe9869a4c16069f1ce1d06f982d7e40466d55e626f1c017110a02dd"
+},
+"src/dxmt/dxmt_command.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ee6ef1c141d0c574adcdff944d9852fe0fde13645d278e7ca5d47c864a85ee61"
+},
+"src/dxmt/dxmt_command.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a40db9326ac77d54d3829502cf85a57c17c908f6f8d2c2745477cacfd2f04c1a"
+},
+"src/dxmt/dxmt_command.metal": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8c07739065fd1b6c0b6d4aebc1e70473ec4918c540cb79f789db8ea113cf2ff0"
+},
+"src/dxmt/dxmt_command_clear.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4da3b41cfc74471bba33265d44ef010e2a0c5c177c591f8ae8ac8c0f487bf56e"
+},
+"src/dxmt/dxmt_command_constants.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6145cddd7ea3885c1885f1920768c6843655ca178647924a527f91f717ac57d9"
+},
+"src/dxmt/dxmt_command_context.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3172677794f3e0275d21f9dc7515b4b8f2db6c66733c9b0b329c7df6b4d2cda3"
+},
+"src/dxmt/dxmt_command_list.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "7b65b49376452340e2ae16ad248cf8e6400784de19335f580b12f19c5d468a0b"
+},
+"src/dxmt/dxmt_command_queue.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2be4df086570b50c80bd1da037a454586c898b0e0afd016e76d1578e2fbe49e3"
+},
+"src/dxmt/dxmt_command_queue.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "965ab33d83903a6f3f7d04baa55615c861c6de899fcdd03d41e2cbfa7006378d"
+},
+"src/dxmt/dxmt_context.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "bb831428c5a062b25f8dd0a76cc0ba011dbebdfc33e6af2c83509bb76b22a6d1"
+},
+"src/dxmt/dxmt_context.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3244635b648f22266cd929b7dfa6e0f2e5c06bd8daf944b47283c11624e511b2"
+},
+"src/dxmt/dxmt_counter.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "183c44a7a8ebad6d6de038cb81245c68d85b21b81cdc0a764369e72c0ea4423b"
+},
+"src/dxmt/dxmt_counter.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2cbf34d04a00cfdaf2f1682cf5cf530277436bde52fecb124f2a3864746aed15"
+},
+"src/dxmt/dxmt_deptrack.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "cfdad255f12be04f5c9a7f72f2ac287cc9e23f7058762780bc9d09a345e15ca1"
+},
+"src/dxmt/dxmt_deptrack.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "0c134a99c8f36c6ac99a846eabcdba478f09227128a59f238b836a63b676aaf0"
+},
+"src/dxmt/dxmt_device.cpp": {
+"inserted": [],
+"origin": "t0-differs",
+"sha256_t0": "364eea7c3333c18553887746990f3c4e7e3b79e01c2b58d51b6fcfb8becff59a"
+},
+"src/dxmt/dxmt_device.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "df96c0eeed19b1f2c0af50658e14a2d4c67f549f1310111e4f889b5ede47a570"
+},
+"src/dxmt/dxmt_dynamic.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a67c31c88d6ee7e7e3a0824f88a2e5f2b1298fc53ec51c7e3769b382f8cc12d7"
+},
+"src/dxmt/dxmt_dynamic.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e9b42fb8d3a7cbc3f39ffa5981100e5e06f08dc20ef8f02bbb515299d53f7892"
+},
+"src/dxmt/dxmt_fence.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5b754ea0ecb079c270d2deea3d2f0f761833c5430bbd9cdacff83a067fc8565a"
+},
+"src/dxmt/dxmt_fence.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b821df094db51e6010a836a3198088f2b10b1bb66f8736181db04cacc2bbed2b"
+},
+"src/dxmt/dxmt_format.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "309568ae689c81035d3b8f32fd9b6fc5379792072bc8b034e28483665f654c68"
+},
+"src/dxmt/dxmt_format.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "66eb0cac87dc57be109f2f95d21fc9c278c6e48b26cb250e270bb81a34acc1bc"
+},
+"src/dxmt/dxmt_hud_state.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a8afbf3a65db80bddb40c1effc08106ca215544fc417f292e2aa16867bbef995"
+},
+"src/dxmt/dxmt_hud_state.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "81473e0ac06d6d253966393937e330d974346f06a6eb845a9b89f14c7396b098"
+},
+"src/dxmt/dxmt_info.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c8a3706fe82d6af58f413cd91b3bcbafb82030b4076f0d725f728927983c6f92"
+},
+"src/dxmt/dxmt_info.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ba30406b9268be0681702652e44e21879434f8dba829faebbf42ad69bbbdb88d"
+},
+"src/dxmt/dxmt_keyed_mutex.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "833ed984c282728e984cd840ac97803a6539776d07eaf26d4e05c6beef075c24"
+},
+"src/dxmt/dxmt_keyed_mutex.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e8c336acd9aa4b1b84eaffc93abc743906e002c9066a0c05f9d6d02d91ba6ca5"
+},
+"src/dxmt/dxmt_names.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5682bb8fe87acfe2f789bc2160db24602c7e9466b467458bb5be5f1f6575f71a"
+},
+"src/dxmt/dxmt_names.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a8b20f8a9b7023d1919d0ab73cb396058c3b02516e5c2d755296ce10b82a7bbe"
+},
+"src/dxmt/dxmt_occlusion_query.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e0632d98a4dec84cb0d30ee21647801a1fe8004987f1c37304aec61aab45375f"
+},
+"src/dxmt/dxmt_presenter.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "758595df2157d07ca90be47e26de5da72e7b65443893a146cac9da70fceedeaa"
+},
+"src/dxmt/dxmt_presenter.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f6416156ff530aebba0c925a869a115debd05bfd7dbb302b45d78430708e7c0f"
+},
+"src/dxmt/dxmt_residency.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c3b1757bda1bce4789b0ca4b9d1bbcc6633ec4e7c8383a08ea472efdb7eaa1bb"
+},
+"src/dxmt/dxmt_resource_initializer.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a3336c30546fc1a237eaea00659a58b0f44c991c0ae7f8eae0afbf3642701175"
+},
+"src/dxmt/dxmt_resource_initializer.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d95a47b66f0dbc25631bcc6814eeee820ea2d4995b536f0fb3610c4489c91b62"
+},
+"src/dxmt/dxmt_ring_bump_allocator.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a6b1a3f9f15d457dd94192558ee5e75b93fb3dc39f746ef034cff5b07f2852a9"
+},
+"src/dxmt/dxmt_sampler.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f912c9a82a9a1b12fe82a9e7b34267d5473c303cca1b36afdfb7fb1c155428cb"
+},
+"src/dxmt/dxmt_sampler.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2067837afbf16f7b31f8b1a5a2236ed9b7f8f3f5baf615cbb5a486e83f29b0f5"
+},
+"src/dxmt/dxmt_scaler.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e7749ca3aa71a1b06e619bb71c2015fd05a16f6716b837c1a3820be0c5867920"
+},
+"src/dxmt/dxmt_scaler.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "0ccdb6fbff5fb25524f810c9016fbd14ccc7b67ebd1f2c66d722dcb34879310f"
+},
+"src/dxmt/dxmt_shader_cache.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9efde0f4a07bbcb4c6f8024be7c801fdd5aeacf707d6d0710c736aeaa3527ae7"
+},
+"src/dxmt/dxmt_shader_cache.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ff8ce519570d8f27d0cba8d5279d709de23957fa60bf3235df872dde7623b47e"
+},
+"src/dxmt/dxmt_staging.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e6639a5171f197cacd99d2eb284056558296e044bf98ba3d0c3db00a390d7d05"
+},
+"src/dxmt/dxmt_staging.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "80e4697eddf5fef1bf2976cb010f5688d95961e1d8d94b60d023efc6394be343"
+},
+"src/dxmt/dxmt_statistics.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "dfe299f6ed0e83d73a23677680ca88ad169658eb0a102d56f2835655a05a36d0"
+},
+"src/dxmt/dxmt_subresource.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "74d2108baef99ebf4fd6369d42fdf165922758b28f3fdcab8cdc9b0d8b783e76"
+},
+"src/dxmt/dxmt_subresource.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f0e42015aee1497092ee33e16df096095df8e83692d0adc258a0328b66ce9e57"
+},
+"src/dxmt/dxmt_tasks.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3e4d00a1e99cb1332001b0cd18ced5eb28df1de395e5cb5d811542f6ffa85ee7"
+},
+"src/dxmt/dxmt_texture.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3236316901c3156439ac4338dfe693ff2515bed0da145af0e1b0d0bab4f79553"
+},
+"src/dxmt/dxmt_texture.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3419e76132386a338691c4acb674683595d062b7bf10e0ff6dd2477f356183bc"
+},
+"src/dxmt/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "73243e0c7d5636519f72921cf2e8f2ef50ef1475ade5a4c27f491c9aa76a37ef"
+},
+"src/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "1504f6b8666fbfdc04b7fed5806148e266ec9712eddbae234f1f8aec504e1e22"
+},
+"src/nativemetal/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6edf382eac7269c75b1f2580a821a8391157619ae8fe13f12df6839fcc688f10"
+},
+"src/nativemetal/wineunixlib.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "02557e31853ed2f34e7896eda5f32e9f2508d8e98a95cf47be864026f83b761c"
+},
+"src/nvapi/.clang-format": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ad614f08121a45ed1ac2c4bfdb27155979f50b45024ff9a35e5a0b59d844c3e9"
+},
+"src/nvapi/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "24ac4afb42497736154ba2a58acf0721578ec9d45402c0a235bfca6ee5f6fe34"
+},
+"src/nvapi/nvapi.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "7786511727f0daae48190f4b9ed02d2ce4aa5b6b82d57374a1b4ee7f3ff9b91f"
+},
+"src/nvapi/nvapi64.def": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "fdd8bef681b27ccef101219770fc16180d9494214c9785371ade13dd3e5e6518"
+},
+"src/nvngx/.clang-format": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ad614f08121a45ed1ac2c4bfdb27155979f50b45024ff9a35e5a0b59d844c3e9"
+},
+"src/nvngx/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "bbefd115d594b5617e8572a6ba25e81e0ec6ff27390bceb59d402bccd0146f3e"
+},
+"src/nvngx/nvngx.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b7a09375699c8d6de89a2940e75fb9dd8505359bef856dad9036a9f025531d8d"
+},
+"src/nvngx/nvngx.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "17fc49d9a2fad2add4207150e914989c74bd549f0293dbc44fac0cf72a55501f"
+},
+"src/nvngx/nvngx_feature.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a78fcd8a024288ce1ef4f0fe61a2ba0577bbb6535a36393a24c3f22a2f4d2d8a"
+},
+"src/nvngx/nvngx_parameter.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6307fce54929fcdb7d3ff1f540377be3f7e140c99fe53037ccd431f1980345ea"
+},
+"src/shared/point_root_contract.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c3fd54a3f5bd5148738ae784da7fde7a12ca5fb7c9652bdfbb1820c69f9612cf"
+},
+"src/util/com/com_aggregatable.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c0c7b0aa5718c56ba4ca6ad6e7d3a9e5bed6a37d4972057b83a5de1ac2467932"
+},
+"src/util/com/com_guid.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9f8c117478a27d9e397a9ecad16dbc88ed87aa7e84f3080a2a0bab5891a5ca69"
+},
+"src/util/com/com_guid.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d8c52307eaca76b7b8271a2561926c83004fdd0c48bad393ab5437310259e07f"
+},
+"src/util/com/com_object.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "375dba95191c168517b28c832befe4c556d8dd0847f9054928fdbd39e0254c04"
+},
+"src/util/com/com_pointer.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f2d7ff38b2527a7608dbe34acbfad806cd79467b5feac306ece58029a8f09fd5"
+},
+"src/util/com/com_private_data.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6611acae19edc826f40837c832d51465119ed6bc320394929b3a0b0a744dd729"
+},
+"src/util/com/com_private_data.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "65386d1a7149633121cabb6905952018cc2f6353839fe43b1f158b839e0faa6e"
+},
+"src/util/config/config.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "59530aab6172e15c2fa0a0732caf8730a2e2d9f36988d4beb6d8bb2745033b6a"
+},
+"src/util/config/config.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3588c6886b4acf132631fdc8d7dabc8a79a0bca1aaf81d318762318c72c47713"
+},
+"src/util/dxvk.LICENSE": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "03ca4af84f5cd28cef3ed3f1ef4d17996992d35ccdbe82b29cc020ca02c16f3d"
+},
+"src/util/log/log.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "330aca1918703c99c8607ba14a469d57784912389432a93f60f2c3a9e83ad90a"
+},
+"src/util/log/log.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2a6cdf2b657085c09461a245bffc6429660110d95336043ab331b32b37baf587"
+},
+"src/util/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "cc7febd39e36cb4ec9bf9173ec2750c92e7c30f57239f85114148630dec2732d"
+},
+"src/util/objc_pointer.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "2c00825c0fa84e2906cea39b4117f55716b0a70f88736cfb908857ef7e367d22"
+},
+"src/util/rc/util_rc.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "1db3bf937e29a40972243edc817a0b43076e68943f0458eddcefe2f76378b321"
+},
+"src/util/rc/util_rc_ptr.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f0bd1e9e9b6ef3a6514c9edce37d13e952d8a7d763e834a02493b0e27dd5265d"
+},
+"src/util/sha1/sha1.c": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "0a4de1193121d76f48f0c0d7e59fcc0097056d44cce6d56bbb2299ef84b29cb5"
+},
+"src/util/sha1/sha1.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "de9c1d2a585b06f36fcdb914078a9761ff7f7455a0e266e7333eb06037523399"
+},
+"src/util/sha1/sha1_util.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5d5d91094283d96587cd39c0ebcfd4e041db19885ab71dd1fa760a0a70dc9611"
+},
+"src/util/sha1/sha1_util.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f122c0be8a02097cce46432f6295d12e928ac5ac979922e21dd85d85b7cca5fd"
+},
+"src/util/thread.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "3b0793735826733c8b7f4864dde7bfdf0494b1d2320786c95c0e7266918af939"
+},
+"src/util/thread.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "319bbb7b9cdac995c1def146a34b07d303336946fb95388ec3d1126699e3bb9c"
+},
+"src/util/threadpool.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e9cfd63fdc2db22bdf06b73aa0c104fb552545e1473b56a0fe41311d8eb86eb1"
+},
+"src/util/util_bit.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "672860598526697acdd1f3dff65e814582afeefc44222291b8b82c03caa2a99a"
+},
+"src/util/util_bloom.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "0bfe9f7cf6a2e2576d146a5431dc084888c5be73f89bf83a36f78c51f0db400c"
+},
+"src/util/util_bloom.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "411bb34e2608ce78066e02fe193c7e63e0beade0e923aa603cbc11fd60685e06"
+},
+"src/util/util_cpu_fence.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "1334d61dbc61a615bc53854368c411c3c0ef266740b637499de047de54ac1f3b"
+},
+"src/util/util_d3dkmt.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4b397e15af4a305f1f278638eec7f4213ac8fc7d0cac9dc33b45e8552aabdbdd"
+},
+"src/util/util_env.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "00f3cf81ee8ee44f2ef9b51ae0c1115eeeed1ab743fcb8f804e541c6817a1693"
+},
+"src/util/util_env.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "60726e559ae310c391e44de7e3f5d512b087acd744d3484a5a986e49d1810996"
+},
+"src/util/util_error.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a40dd1019f3514e69b1f95a432741f655e7baf874769bf322177bacedfca0062"
+},
+"src/util/util_flags.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e63eb8bb6a5b5b36c049733ac04ccc2890ed13adcd5f743bfbf6f98a001a235d"
+},
+"src/util/util_hash.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "5ac20e7f57a9618501d6033c0fdc45b33c1960b2d77ff9c48423ad4f898a37c7"
+},
+"src/util/util_likely.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "7edb80ac64919094cd72e4dea41b6d5d59cf62c026736dcd18654cff4dc02bd9"
+},
+"src/util/util_math.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "bb70c7aa86b374ec0126ff9b320b38ff0514759ba4c13a417b9514e975da6f48"
+},
+"src/util/util_md5.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b42bf9dad407667bdd17a6bb6e1814931cf8e5e9b677571a0d7116901cbd3b59"
+},
+"src/util/util_md5.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "f0c4c45e00aa98d809b398affef22fcc5efea26218c66b873be0105dbcf203f2"
+},
+"src/util/util_names.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "cf63b3e3a93a76a233f87f9408684098dfeb3d861c7f7d3a68fb0e3633803a78"
+},
+"src/util/util_string.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ef9d0bef8e9a3abe8606bda8b5e981d6f591b31e48849dc00ae5a9340dd7c416"
+},
+"src/util/util_string.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b153e6174ed6a8c7454969a37c38a21b27ea6961ab3f49036c89b5594cf3882d"
+},
+"src/util/util_svector.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "de71394cf7601467daf0e2165825105f04f3a7da9b3e3ec5d0d0d949764799be"
+},
+"src/util/util_win32_compat.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "fb238a7df5b8eadf628a9376fd59bd387878709dbc6005a305bd6204cb19b68b"
+},
+"src/util/wsi_monitor.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "1e3638a578b2a0344ae974e5ee20a30045d788954581146dbc8d858c4192202f"
+},
+"src/util/wsi_monitor_headless.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "8b445fb912f8cf6ffd629c9230b0eccd5899eb93a28fc045cf1fb62149d8cfb2"
+},
+"src/util/wsi_monitor_win32.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4984005b8532db5a24c3c4d8b8bb85c846fbdb42945262ea040b76bb453e091d"
+},
+"src/util/wsi_platform.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d5016f0585ed57444262997c81fe6cc4373d6d55bd283b1e707f4d896e7792e1"
+},
+"src/util/wsi_platform_darwin.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e317be232dc0d5f1359c824ef3218d7aeab60814f882404a67ab512b6f2737b8"
+},
+"src/util/wsi_platform_win32.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "9848491e4891ee559cb44129fb6231a673608734cf19868c762f3752385bee90"
+},
+"src/util/wsi_platform_win32.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "b8977f40aa1924ebe1473286dd63c59cb3afcb363b5edb43b6817ba8ebd27b18"
+},
+"src/util/wsi_window.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "1915d1ac47901900dc2fe64865f76c1378cd7e052ca5ac2cf56a0c131b0ea282"
+},
+"src/util/wsi_window_headless.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "58f91fe34cda77a6536d8a58cfddfc622c5b0e3b3b3a5bdb2f30d01d9f4c1a6e"
+},
+"src/util/wsi_window_win32.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "e5870796df6559abedeaae3efbebbe6ef9cec97f8e9a8df0ede2633f4bb0470a"
+},
+"src/winemetal/.clang-format": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "ad614f08121a45ed1ac2c4bfdb27155979f50b45024ff9a35e5a0b59d844c3e9"
+},
+"src/winemetal/Metal.hpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "d175c5872bc15422cec9dd2ceb2688633fb3c52b643ee02b0d08f1e54de8904e"
+},
+"src/winemetal/airconv_thunks.c": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "be66032b51faf5817f08f0f0d6a97676de949fae666a376f4569c37989a426af"
+},
+"src/winemetal/airconv_thunks.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4902be82172b93f0508ab512340906a47c276af22139b9b3c549664a5adf8fb0"
+},
+"src/winemetal/main.c": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "17eaef01c3fa5a220a7bcb64a7b15cf79afbc66e28ab3715f1477dd2b206236a"
+},
+"src/winemetal/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "99890c9e63678bcb35a0ebdc936c27438c1ac5c51ddf1043aa7f40afa857e425"
+},
+"src/winemetal/tests/acceleration-layout.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "00edf308b28f8eddba13523e956e1744e02cab7a08b396e2858da8613975226d"
+},
+"src/winemetal/tests/acceleration.mm": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "4ee6d2db29bfde5b45627f87fb663b08ac1cb4934cf6f6d467e22fb2cd11838a"
+},
+"src/winemetal/tests/argument-buffer.mm": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "811ffa0c277f55e1430c2299a2137f8851ab4fa8f44a85c8f06cbafa05a35792"
+},
+"src/winemetal/tests/argument-layout.cpp": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "53fcb4d3f52bfbe24b018beabff866afd0752229c4804962a2491bcbab0062b1"
+},
+"src/winemetal/tests/compute-entry.mm": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "c034d347b3c0d5e2aa23588a06866592f4933f6bbf35e06c34b1d713198d9224"
+},
+"src/winemetal/unix/cache.c": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "02400a160e9c561dfa71e618c3467b186800aacfb3d0d5ae96cfadd3b87ed597"
+},
+"src/winemetal/unix/install.sh": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "55f249ccc6de638b6d99fc89eb179bb0c4cf20038ee2b6366ed769c4f4a8827e"
+},
+"src/winemetal/unix/meson.build": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "da746b0ac0fc68a5fa93b177421987a06486b12417c9819bfde4d3892a7b3308"
+},
+"src/winemetal/unix/winemetal_acceleration.inc": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "fa6912707c71b04711b2ebd0b4919b65ef0945236892a90e5caf86ed0050ca42"
+},
+"src/winemetal/unix/winemetal_arguments.inc": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "6080a0bb7e0f36719fe25c40485eaacc622d6dc232dee3122cc802aff6223730"
+},
+"src/winemetal/unix/winemetal_compute_entry.inc": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "1e72fd769e23bb5f8e474f406db12959975556bd704ea040c2ddd88b7d22f5bb"
+},
+"src/winemetal/unix/winemetal_unix.c": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "62bcd1c3bdd55d90dc44c9fecc2c1150a6ac6a79ab96aad86e6a58b766cce9b5"
+},
+"src/winemetal/winemetal.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "aaed1b7cb01afbd864090ac82a0d75e609a58cec02da0998962f9a14f0140f09"
+},
+"src/winemetal/winemetal_thunks.c": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "1ef1e20b95b3af1c930692ec9b208679a0996b227e6116a009c4768f6c8c6134"
+},
+"src/winemetal/winemetal_thunks.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "aaf9d1e71abf1af5b42e9c9cfa63fa793b1d00fdd4ac05271966aa5c91d35654"
+},
+"src/winemetal/wineunixlib.h": {
+"inserted": [],
+"origin": "public-equal",
+"sha256_t0": "a2a7403b0347dc7ad329ef6cea08e4c6f52d02dddc8939079904e5ea1eda6a9c"
+}
+},
+"expected_objects": {
+"d3d12": "4cf6e8da90f871da",
+"d3d12_buffer": "5bc11579d3285f49",
+"d3d12_command_allocator": "ffd49ed9936ee335",
+"d3d12_command_list": "3f0dbe8cb87d2a28",
+"d3d12_command_queue": "d2b9ab2f7df85437",
+"d3d12_command_signature": "5364f9ac0c60ecf9",
+"d3d12_descriptor_heap": "803550c2c6f3317d",
+"d3d12_device": "5ed81e8cc7b37ae2",
+"d3d12_fence": "7e47a806f20f2ab7",
+"d3d12_heap": "cf2d0427b017ac6a",
+"d3d12_pipeline_compute": "208c24dd026217f2",
+"d3d12_pipeline_graphics": "1908b23b65824839",
+"d3d12_query_heap": "cf3ee09b974f6002",
+"d3d12_resource_helper": "c28b97e0ed6286e9",
+"d3d12_root_signature": "7a2afca5ca41627b",
+"d3d12_sampler": "a49672fd0ef88211",
+"d3d12_swapchain": "9ec8232bb4060f45",
+"d3d12_texture": "7f722feb86deeb06"
+},
+"frozen_git_describe": "266e503",
+"schema": 1
+}

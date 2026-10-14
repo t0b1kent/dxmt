@@ -11,6 +11,19 @@ working tree before this publication.
 
 ## Modified upstream files (45)
 
+2026-10-14: the D3D12 layer sources (`src/d3d12`, and the three `src/airconv` /
+`src/dxmt` files below) are aligned with the exact source state that built the working
+`d3d12.dll` `0bec3f8d4fd985c0...` (Elden Ring, build v6). `build/repro110layer/ER-V6-SOURCE.json`
+lists the sha256 of every file of that state; the recipe `build/repro110layer` rebuilds the
+DLL from it. Changed against the earlier public text: `d3d12_pipeline_timing.hpp`,
+`d3d12_fine_locks.hpp` and `d3d12_gpu_timing.hpp` are added (default-off diagnostics and
+striped locks used by that binary); `d3d12_diagnostic_counters.hpp`,
+`d3d12_root_validation.hpp` and `src/dxmt/dxmt_shader_metal.hpp` are removed again because
+that binary does not contain them (the entries dated 2026-10-03 above describe the earlier
+text and stay in the history of this branch); `src/airconv/dxbc_binding_rootsig.cpp`,
+`src/airconv/nt/dxbc_binding_map.hpp`, `src/airconv/nt/dxbc_converter_base.{cpp,hpp}` and
+`src/dxmt/dxmt_device.cpp` take the versions compiled into that binary.
+
 2026-10-03: `src/d3d12/d3d12_device.hpp` additionally counts existing residency
 retain/release and membership add/remove/commit paths when diagnostics are enabled.
 The policy and ownership transitions are unchanged; observed add/remove balance

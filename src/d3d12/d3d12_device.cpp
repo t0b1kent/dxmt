@@ -18,11 +18,10 @@
  */
 
 #include "d3d12_device.hpp"
-#include "dxmt_shader_metal.hpp"
+#include "d3d12_fine_locks.hpp"
 #include "d3d12_device_child.hpp"
 #include "d3d12_lifetime.hpp"
 #include "d3d12_frame_trace.hpp"
-#include "d3d12_diagnostic_counters.hpp"
 #include "d3d12_command_failure_trace.hpp"
 #include "d3d12_state_object_libraries.hpp"
 #include "d3d12_state_object_associations.hpp"
@@ -101,11 +100,10 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
   Com<IMTLDXGIAdapter> adapter_;
   std::shared_ptr<D3D12DeviceCache> device_cache_;
   const uint64_t adapter_luid_;
-  const WMTMetalVersion shader_metal_version_;
 
   bool advertise_numa_ = false;
 
-  dxmt::mutex residency_lock_;
+  dxmt::shared_mutex residency_lock_;   // lookups shared, registration exclusive
   WMT::Reference<WMT::ResidencySet> residency_set_;
   std::shared_ptr<D3D12ResidencyState> residency_owner_ = std::make_shared<D3D12ResidencyState>();
   struct BufferInterval {
@@ -126,13 +124,12 @@ class MTLD3D12DeviceImpl : public MTLD3D12Object<ComObject<MTLD3D12Device>> {
 public:
   MTLD3D12DeviceImpl(IMTLDXGIAdapter *adapter, std::shared_ptr<D3D12DeviceCache> cache, uint64_t adapter_luid) :
       adapter_(adapter), device_cache_(std::move(cache)), adapter_luid_(adapter_luid),
-      shader_metal_version_(dxmt::GetShaderMetalVersion(adapter_->GetMTLDevice())),
       command_library(adapter_->GetMTLDevice()) {
     static std::atomic<uint32_t> trace_enabled{0};
     TraceFrame(trace_enabled, "enabled", this, "MACRUNNER_DX12_FRAME_TRACE=1 type=device");
   }
 
-  ~MTLD3D12DeviceImpl() { RemoveDevice(); diagnostic::Dump(this); }
+  ~MTLD3D12DeviceImpl() { RemoveDevice(); }
 
   ULONG STDMETHODCALLTYPE
   Release() override {
@@ -175,11 +172,6 @@ public:
   GetMTLDevice() {
     return adapter_->GetMTLDevice();
   };
-
-  WMTMetalVersion
-  GetShaderMetalVersion() override {
-    return shader_metal_version_;
-  }
 
   D3D_FEATURE_LEVEL
   GetFeatureLevel() {
@@ -1700,7 +1692,7 @@ public:
 
   HRESULT
   RegisterResidencyAndVA(BufferAllocation *allocation, uint64_t logical_length) {
-    diagnostic::ResidencyLock lock(residency_lock_, diagnostic::LockPath::RegisterVA);
+    std::unique_lock<dxmt::shared_mutex> lock(residency_lock_);
     interval_map_.emplace(allocation->gpuAddress(), BufferInterval{allocation, logical_length, {}});
     if (allocation->flags().test(BufferAllocationFlag::AllocatedOnHeap))
       return S_OK;
@@ -1711,7 +1703,7 @@ public:
 
   HRESULT
   UnregisterResidencyAndVA(BufferAllocation *allocation) {
-    diagnostic::ResidencyLock lock(residency_lock_, diagnostic::LockPath::UnregisterVA);
+    std::unique_lock<dxmt::shared_mutex> lock(residency_lock_);
     interval_map_.erase(allocation->gpuAddress());
     if (allocation->flags().test(BufferAllocationFlag::AllocatedOnHeap))
       return S_OK;
@@ -1721,7 +1713,7 @@ public:
   }
 
   void RegisterCaptureSource(const std::shared_ptr<D3D12ResourceCaptureSource> &source) override {
-    diagnostic::ResidencyLock lock(residency_lock_, diagnostic::LockPath::RegisterSource);
+    std::unique_lock<dxmt::shared_mutex> lock(residency_lock_);
     capture_sources_[source->Identity()] = source;
     if (source->native->buffer_allocation) {
       auto entry = interval_map_.find(source->native->buffer_allocation->gpuAddress());
@@ -1731,7 +1723,7 @@ public:
   }
 
   void UnregisterCaptureSource(const D3D12ResourceCaptureSource &source) override {
-    diagnostic::ResidencyLock lock(residency_lock_, diagnostic::LockPath::UnregisterSource);
+    std::unique_lock<dxmt::shared_mutex> lock(residency_lock_);
     auto entry = capture_sources_.find(source.Identity());
     if (entry != capture_sources_.end() && entry->second.lock().get() == &source) capture_sources_.erase(entry);
     if (source.native->buffer_allocation) {
@@ -1742,7 +1734,7 @@ public:
   }
 
   std::shared_ptr<D3D12ResourceCaptureSource> LookupCaptureSource(const void *identity) override {
-    diagnostic::ResidencyLock lock(residency_lock_, diagnostic::LockPath::Identity);
+    SharedLookupLock lock(residency_lock_);
     auto entry = capture_sources_.find(identity);
     auto source = entry == capture_sources_.end() ? nullptr : entry->second.lock();
     return source && source->Live() ? source : nullptr;
@@ -1750,7 +1742,7 @@ public:
 
   std::shared_ptr<D3D12ResourceCaptureSource> LookupCaptureByVA(uint64_t address, uint64_t bytes, uint64_t &offset) override {
     offset = 0;
-    diagnostic::ResidencyLock lock(residency_lock_, diagnostic::LockPath::CaptureVA);
+    SharedLookupLock lock(residency_lock_);
     auto entry = interval_map_.upper_bound(address);
     if (entry == interval_map_.begin()) return {};
     --entry;
@@ -1763,7 +1755,7 @@ public:
 
   Rc<BufferAllocation> LookupBufferByVA(D3D12_GPU_VIRTUAL_ADDRESS VA, uint64_t length, uint64_t *pOffset) {
     if (!pOffset) return {};
-    diagnostic::ResidencyLock lock(residency_lock_, diagnostic::LockPath::BufferVA);
+    SharedLookupLock lock(residency_lock_);
     return root_argument::AcquireByVA(interval_map_, VA, length, *pOffset,
                                       [](BufferAllocation *allocation) { return Rc<BufferAllocation>(allocation); });
   }

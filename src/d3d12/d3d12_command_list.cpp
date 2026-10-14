@@ -1,3 +1,6 @@
+#include "d3d12_object_grid.hpp"
+#include "indirect-mesh-contract.hpp"
+#include "indirect-mesh-sync.hpp"
 /*
  * Copyright 2026 Feifan He for CodeWeavers
  * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
@@ -16,14 +19,11 @@
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
-#include "d3d12_object_grid.hpp"
-#include "indirect-mesh-contract.hpp"
-#include "indirect-mesh-sync.hpp"
 
 #include "d3d12_command_allocator.hpp"
 #include "d3d12_command_list.hpp"
 #include "d3d12_frame_trace.hpp"
-#include "d3d12_diagnostic_counters.hpp"
+#include "d3d12_pipeline_timing.hpp"
 #include "d3d12_command_failure_trace.hpp"
 #include "d3d12_recording_guard.hpp"
 #include "com/com_pointer.hpp"
@@ -306,7 +306,10 @@ public:
   MTLD3D12GraphicsCommandListImpl(MTLD3D12Device *pDevice) : MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice),
       max_object_threadgroups_(ObjectGridLimit(pDevice->GetMTLDevice().supportsFamily(WMTGPUFamilyApple7))) {}
 
-  ~MTLD3D12GraphicsCommandListImpl() {}
+  ~MTLD3D12GraphicsCommandListImpl() {
+    pipeline_timing::Get().Emit(pipeline_timing::ListDestroy, pipeline_timing::Point, this,
+        recording_trace_.epoch_, 0, 0, 0, 0, 0, true);
+  }
 
   const std::vector<std::string> &GetRecordingTrace() const override { return recording_trace_.GetRecordingTrace(); }
   uint64_t GetRecordingTraceEpoch() const override { return recording_trace_.GetRecordingTraceEpoch(); }
@@ -343,13 +346,9 @@ public:
 
     rootsig_graphics_ = nullptr;
     rootarg_graphics_staging_ = {};
-    diagnostic::Add(diagnostic::Counter::RootStateZeroCalls);
-    diagnostic::Add(diagnostic::Counter::RootStateZeroBytes, sizeof(rootarg_graphics_staging_));
 
     rootsig_compute_ = nullptr;
     rootarg_compute_staging_ = {};
-    diagnostic::Add(diagnostic::Counter::RootStateZeroCalls);
-    diagnostic::Add(diagnostic::Counter::RootStateZeroBytes, sizeof(rootarg_compute_staging_));
 
     bound_heaps_ = {};
     bound_heap_ranges_ = {};
@@ -390,6 +389,8 @@ public:
     close_result = E_FAIL;
     const HRESULT hr = allocator_->StartRecord(&entry);
     recording_state_.Begin(SUCCEEDED(hr));
+    pipeline_timing::Get().Emit(pipeline_timing::ListReset, pipeline_timing::Point, this,
+        recording_trace_.epoch_, pipeline_timing::Pointer(pAllocator), 0, 0, 0, uint32_t(hr));
     TraceRecording("Reset", FAILED(hr) ? "rejected" : "accepted", FAILED(hr) ? "StartRecord_failed" : "new_recording",
                    "hr=%08x initial_pso=%p", unsigned(hr), static_cast<const void *>(pInitialPipelineState));
     return TraceCommandFailure(CommandFailureOperation::ListInitialize, "list.initialize.failure", this,
@@ -425,8 +426,10 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   Close() {
+    pipeline_timing::Scope pipeline(pipeline_timing::ListClose, this, recording_trace_.epoch_);
     ++recording_invocation_;
     if (!recording_state_.open || encoder_count < std::numeric_limits<size_t>::max()) {
+      pipeline.Result(E_FAIL);
       TraceRecording("Close", "rejected", "already_closed", "hr=%08x", unsigned(E_FAIL));
       return TraceCommandFailure(CommandFailureOperation::ListClose, "list.close.failure", this,
                                  E_FAIL, "already_closed", allocator_.ptr(), encoder_count);
@@ -436,6 +439,7 @@ public:
     HRESULT hr = allocator_->EndRecord(&encoder_count);
     recording_state_.End();
     close_result = FAILED(hr) ? hr : recording_error_;
+    pipeline.Result(close_result);
     TraceRecording("Close", FAILED(close_result) ? "rejected" : "accepted",
                    FAILED(hr) ? "EndRecord_failed" : !active_queries_.empty() ? "active_queries" :
                    FAILED(recording_error_) ? "recording_error" : "closed",
@@ -449,18 +453,22 @@ public:
 
   HRESULT STDMETHODCALLTYPE
   Reset(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialState) {
+    pipeline_timing::Scope pipeline(pipeline_timing::ListReset, this, recording_trace_.epoch_,
+        pipeline_timing::Pointer(pAllocator));
     ++recording_invocation_;
     if (encoder_count == std::numeric_limits<size_t>::max()) {
+      pipeline.Result(E_FAIL);
       TraceRecording("Reset", "rejected", "still_recording", "hr=%08x", unsigned(E_FAIL));
       return TraceCommandFailure(CommandFailureOperation::ListReset, "list.reset.failure", this,
                                  E_FAIL, "still_recording", pAllocator);
     }
     if (FAILED(close_result)) {
+      pipeline.Result(close_result);
       TraceRecording("Reset", "rejected", "previous_Close_failed", "hr=%08x", unsigned(close_result));
       return TraceCommandFailure(CommandFailureOperation::ListReset, "list.reset.failure", this,
                                  close_result, "previous_Close_failed", pAllocator);
     }
-    return Initialize(pAllocator, pInitialState);
+    return pipeline.Result(Initialize(pAllocator, pInitialState));
   };
 
   void STDMETHODCALLTYPE
@@ -1113,8 +1121,6 @@ public:
   uint64_t
   EncodeRootArgument(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], UINT Count = 1) {
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(sizeof(uint64_t) * pRootSig->UploadQwords * Count, 64);
-    diagnostic::Add(diagnostic::Counter::RootUploadCalls);
-    diagnostic::Add(diagnostic::Counter::RootUploadBytes, sizeof(uint64_t) * pRootSig->UploadQwords * Count);
     for (unsigned i = 0; i < Count; i++)
       memcpy(
           reinterpret_cast<uint64_t *>(Ptr) + i * pRootSig->UploadQwords, pStaging,
@@ -1127,7 +1133,6 @@ public:
   EncodeStaticSamplers(MTLD3D12RootSignature *pRootSig) {
     auto static_sampler_encode_size = sizeof(uint64_t) * pRootSig->NumStaticSamplers * 4;
     auto [Ptr, Offset] = allocator_->AllocateGPUHeap(static_sampler_encode_size, 64);
-    diagnostic::Add(diagnostic::Counter::StaticSamplerBytes, static_sampler_encode_size);
     memcpy(Ptr, pRootSig->EncodedStaticSamplers, static_sampler_encode_size);
     return Offset;
   }
@@ -2078,8 +2083,6 @@ public:
     }
     rootsig_compute_ = impl.ptr();
     rootarg_compute_staging_ = {};
-    diagnostic::Add(diagnostic::Counter::RootStateZeroCalls);
-    diagnostic::Add(diagnostic::Counter::RootStateZeroBytes, sizeof(rootarg_compute_staging_));
     dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature);
     } catch (const GPUHeapExhausted &e) {
       SetRecordingError(E_OUTOFMEMORY, "SetComputeRootSignature", __LINE__);
@@ -2201,8 +2204,6 @@ public:
     }
     rootsig_graphics_ = impl.ptr();
     rootarg_graphics_staging_ = {};
-    diagnostic::Add(diagnostic::Counter::RootStateZeroCalls);
-    diagnostic::Add(diagnostic::Counter::RootStateZeroBytes, sizeof(rootarg_graphics_staging_));
     dirty_state_.set(DirtyState::GraphicsRootArguments, DirtyState::GraphicsRootSignature);
     } catch (const GPUHeapExhausted &e) {
       SetRecordingError(E_OUTOFMEMORY, "SetGraphicsRootSignature", __LINE__);
