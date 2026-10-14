@@ -82,6 +82,9 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
+          # GitHub runs this shell with -e: without the next line the first missing-metal probe ended the step
+          # before the download (run 38504352630). The explicit check at the end still fails the step by name.
+          set +e
           log="$RUNNER_TEMP/metal-toolchain.log"
           { printf '== before %s\n' "$(date -u +%H:%M:%S)"; xcodebuild -version; xcrun -sdk macosx metal --version; } > "$log" 2>&1
           if ! xcrun -sdk macosx metal --version > /dev/null 2>&1; then
