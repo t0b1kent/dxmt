@@ -305,6 +305,16 @@ class SourceDXMTTests(unittest.TestCase):
         self.assertIn('retention-days: 30', text)
         self.assertTrue(Path(__file__).with_name('memwatch.sh').is_file())
 
+    def test_workflow_provides_the_metal_toolchain_before_any_producer_work(self):
+        path = Path(__file__).resolve().parents[2] / '.github/workflows/repro109-dxmt-after-wine27-xcode27-arm64.yml'
+        text = path.read_text()
+        step = text.index('name: Provide the Metal Toolchain component')
+        self.assertIn('xcodebuild -downloadComponent MetalToolchain', text[step:])
+        self.assertLess(step, text.index('name: Check offline orchestration'))
+        self.assertLess(step, text.index('name: Use the same preparation for inputs and full'))
+        self.assertIn("xcrun -sdk macosx metal --version > /dev/null 2>&1 || { printf 'Metal Toolchain still missing", text)
+        self.assertIn('metal-toolchain.log', text[text.index('Preserve complete bounded reports'):])
+
     def test_consumer_failure_keeps_first_failure_and_never_compiles(self):
         dep, record = self.route_fixture('full', consumer_failure=True)
         self.assertEqual(record['first_failure']['phase'], 'CONSUMER_INPUTS')

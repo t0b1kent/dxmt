@@ -74,6 +74,24 @@ jobs:
         with:
           python-version: '3.13.7'
           architecture: arm64
+      - name: Provide the Metal Toolchain component
+        # Run 38503153301 (pe) reached the compiler and stopped at the first shader: "cannot execute tool 'metal' due to
+        # missing Metal Toolchain; use: xcodebuild -downloadComponent MetalToolchain". The runner image has Xcode 27
+        # without that component; every scenario compiles .metal sources, so it is fetched here and checked before any
+        # work, so a failure of the download is named by this step and not by the compiler.
+        shell: bash
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/metal-toolchain.log"
+          { printf '== before %s\n' "$(date -u +%H:%M:%S)"; xcodebuild -version; xcrun -sdk macosx metal --version; } > "$log" 2>&1
+          if ! xcrun -sdk macosx metal --version > /dev/null 2>&1; then
+            printf '== downloading the Metal Toolchain component %s\n' "$(date -u +%H:%M:%S)" | tee -a "$log"
+            xcodebuild -downloadComponent MetalToolchain >> "$log" 2>&1
+            printf '== download rc=%s %s\n' "$?" "$(date -u +%H:%M:%S)" | tee -a "$log"
+          fi
+          { printf '== after\n'; xcrun -sdk macosx metal --version; } 2>&1 | tee -a "$log"
+          tail -n 12 "$log"
+          xcrun -sdk macosx metal --version > /dev/null 2>&1 || { printf 'Metal Toolchain still missing\n'; exit 1; }
       - name: Check offline orchestration and Wine source ownership controls
         env:
           REPRO109_TEST_TMP: ${{ runner.temp }}/repro109-dxmt-control-scratch
@@ -123,6 +141,7 @@ jobs:
             if [ -d "$root/dxmt-work/$part" ]; then cp -R "$root/dxmt-work/$part" "$out/$part"; fi
           done
           if [ -f "$RUNNER_TEMP/memwatch.log" ]; then cp "$RUNNER_TEMP/memwatch.log" "$out/memwatch.log"; fi
+          if [ -f "$RUNNER_TEMP/metal-toolchain.log" ]; then cp "$RUNNER_TEMP/metal-toolchain.log" "$out/metal-toolchain.log"; fi
           git -C "$GITHUB_WORKSPACE/dxmt" rev-parse HEAD > "$out/dxmt-recipe-revision.txt"
           git -C "$GITHUB_WORKSPACE/macrunner-wine" rev-parse HEAD > "$out/wine-recipe-revision.txt"
       - name: Retain source outputs and raw evidence in Actions
