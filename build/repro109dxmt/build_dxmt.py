@@ -196,7 +196,8 @@ def ownership(source, build, allowed_tools):
     require(type(paths) is list and paths and all(type(x) is str for x in paths), 'Meson source inventory missing')
     foreign = [x for x in paths if not Path(x).resolve().is_relative_to(source.resolve())
                and str(Path(x).resolve()) not in allowed_tools]
-    require(not foreign, 'Meson configured foreign source/tool inputs')
+    require(not foreign, 'Meson configured foreign source/tool inputs; count=' + str(len(foreign)) +
+            '; paths=' + json.dumps(foreign, ensure_ascii=False)[:2000])
     commands = json.loads((build / 'compile_commands.json').read_bytes())
     require(type(commands) is list and commands, 'Meson compiler inventory missing')
     native_c = []
@@ -304,6 +305,12 @@ def build(args):
             run(name + '-version-header', [str(ninja), '-C', str(builddir), 'version.h'])
             require(sha(builddir / 'version.h') == json.loads((HERE / 'sources.lock.json').read_bytes())[
                     'historical_version']['version_h_sha256'], 'Configured DXMT version differs')
+            # Preserve the exact post-version inputs that the ownership check reads.
+            for relative in ('compile_commands.json', 'meson-info/intro-buildsystem_files.json',
+                             'meson-info/intro-machines.json', 'meson-info/intro-buildoptions.json', 'build.ninja'):
+                path = builddir / relative
+                require(path.stat().st_size <= 64 * 1024**2, 'Configure evidence over cap; original retained')
+                shutil.copyfile(path, out / (name + '-' + relative.replace('/', '-')))
             if arch == 'aarch64':
                 tools = [native, cross, Path('/usr/bin/printf'), Path('/usr/bin/xcrun'),
                          Path('/usr/bin/xxd'), args.wine_prefix / 'bin/winebuild',
@@ -316,11 +323,6 @@ def build(args):
                          args.wine_prefix / 'bin/winebuild', compiler / 'bin/x86_64-w64-mingw32-windres']
                 measured = ownership_pe(selected, builddir, {str(x.resolve()) for x in tools})
             (out / (name + '-ownership.json')).write_text(json.dumps(measured, indent=2) + '\n')
-            for relative in ('compile_commands.json', 'meson-info/intro-buildsystem_files.json',
-                             'meson-info/intro-machines.json', 'meson-info/intro-buildoptions.json', 'build.ninja'):
-                path = builddir / relative
-                require(path.stat().st_size <= 64 * 1024**2, 'Configure evidence over cap; original retained')
-                shutil.copyfile(path, out / (name + '-' + relative.replace('/', '-')))
             targets = PE_TARGETS if arch == 'x86_64' else ['src/winemetal/unix/winemetal.so']
             run(name + '-commands', [str(ninja), '-C', str(builddir), '-t', 'commands', *targets])
             if arch == 'x86_64':
@@ -365,8 +367,10 @@ def ownership_pe(source, build, allowed_tools):
     commands = json.loads((build / 'compile_commands.json').read_bytes())
     require(type(paths) is list and paths and all(type(x) is str for x in paths), 'PE Meson inventory missing')
     require(type(commands) is list and commands, 'PE compiler inventory missing')
-    require(all(Path(x).resolve().is_relative_to(source.resolve()) or str(Path(x).resolve()) in allowed_tools
-                for x in paths), 'PE Meson configured foreign source/tool inputs')
+    foreign = [x for x in paths if not Path(x).resolve().is_relative_to(source.resolve())
+               and str(Path(x).resolve()) not in allowed_tools]
+    require(not foreign, 'PE Meson configured foreign source/tool inputs; count=' + str(len(foreign)) +
+            '; paths=' + json.dumps(foreign, ensure_ascii=False)[:2000])
     for row in commands:
         directory = Path(row['directory']).resolve()
         file = (directory / row['file']).resolve()
