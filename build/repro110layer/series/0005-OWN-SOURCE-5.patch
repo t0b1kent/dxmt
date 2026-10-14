@@ -1,0 +1,494 @@
+diff --git a/CHANGES-MACRUNNER.md b/CHANGES-MACRUNNER.md
+index d820b2e..96e5171 100644
+--- a/CHANGES-MACRUNNER.md
++++ b/CHANGES-MACRUNNER.md
+@@ -285,3 +285,30 @@ DIAGNOSTIC_ONLY. Checked by small D3D12 probes under Wine with injected
+ provider failures (key off: the pipeline fails as before; key on: the regular
+ path builds it from ready SM5.0 bytecode and the pixels equal the regular
+ path). No application has been run on it.
++
++## Shader-source seam: the answer as MSL text (`MACRUNNER_DX12_OWN_SHADER_KIND`)
++
++The provider `own` can answer a stage with the MSL text the translator wrote, and the layer builds the Metal library
++itself. One new key, read once per process; unset, `library` or any other value: nothing changes (ready libraries,
++`.metallib`, as before).
++
++- `MACRUNNER_DX12_OWN_SHADER_KIND=source`: for the stage the layer reads
++  `<shader>.<root>.<ps|vs|gs|hs|ds|cs>[.<variant>].msl` (or the name without root), next to the same `.desc`, whose two new
++  fields say what it is: `kind=source` and `language=<major>.<minor>` (3.1: the translator's text is written for it). A
++  description without them is an unusable translation. The library is built with `MTLCompileOptions.languageVersion` set
++  to that version and every other option at its default (the system default language moves with the OS: 4.1 on macOS 27,
++  about 3.5 times slower on this corpus); once per process for the same text and language, later pipelines take it from the
++  process. A build error fails the stage (reason `vs_library` / `ps_library` / `cs_library`) and leaves one stderr line
++  `dx12_shader_source_compile_failed key=<sha1 of the text> language=<hex> bytes=.. error=<Metal text>`.
++  `MACRUNNER_DX12_OWN_STATS` adds `source_libs=<built>/<found in process>/<ms spent building>` to its line when used.
++- winemetal: Unix call 163 `MTLDevice_newLibraryWithSourceOptions(device, source, length, language_version, flags, &error)`
++  (language_version: MTLLanguageVersion value, 0 = system default; flags: reserved, must be 0). The renumbering rule if a tree
++  already uses 163: the call goes to the next free table position and the thunk number follows.
++  `MACRUNNER_WMT_SOURCE_TRACE=1` prints once per process `wmt_source_identity pid= page_size= process= bundle_id= bundle_path=
++  executable=` when the call is first used (the identity of the process that talks to Metal).
++
++Touched: `d3d12_shader_source.hpp`, `d3d12_shader_source_stats.hpp`, `d3d12_pipeline_graphics.cpp` (two library calls),
++`d3d12_pipeline_compute.cpp` (one), `src/winemetal/{Metal.hpp,winemetal.h,winemetal_thunks.[ch],unix/winemetal_unix.c}`.
++Needs a rebuilt `winemetal.so` AND `winemetal.dll` next to the layer (the layer imports the new name).
++
++DIAGNOSTIC_ONLY. No application has been run on it.
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 91d43e0..e373c61 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -199,7 +199,7 @@ public:
+     const auto &threads = cs.response.threads;
+     // Description formats 2 and 3 carry the thread group size; format 1 binds nothing and has none.
+     if (cs.response.format < 2 || !threads[0] || !threads[1] || !threads[2]) return failed("thread_group_size");
+-    auto library = metal.newLibrary(cs.response.library.data(), cs.response.library.size(), error);
++    auto library = shader_source::MakeLibrary(metal, cs.response, error);
+     if (!library) return failed("cs_library");
+     auto cs_function = library.newFunction(cs.response.entry);
+     if (!cs_function) return failed("cs_entry");
+diff --git a/src/d3d12/d3d12_pipeline_graphics.cpp b/src/d3d12/d3d12_pipeline_graphics.cpp
+index 054848b..21ba87f 100644
+--- a/src/d3d12/d3d12_pipeline_graphics.cpp
++++ b/src/d3d12/d3d12_pipeline_graphics.cpp
+@@ -1651,7 +1651,7 @@ public:
+     std::vector<uint32_t> vertex_values;
+     const HRESULT hr = TranslatedVertexInputs(pDesc, vs, vertex_slots, vertex_values);
+     if (FAILED(hr)) return TranslatedFailure(stages, "vertex_inputs", error, hr);
+-    auto library = device_->GetMTLDevice().newLibrary(vs.library.data(), vs.library.size(), error);
++    auto library = shader_source::MakeLibrary(device_->GetMTLDevice(), vs, error);
+     if (!library) return TranslatedFailure(stages, "vs_library", error);
+     if (vertex_values.empty()) {
+       function = library.newFunction(vs.entry);
+@@ -1695,7 +1695,7 @@ public:
+         return E_FAIL;
+       }
+     }
+-    auto library = device_->GetMTLDevice().newLibrary(ps.library.data(), ps.library.size(), error);
++    auto library = shader_source::MakeLibrary(device_->GetMTLDevice(), ps, error);
+     if (!library) return TranslatedFailure(stages, "ps_library", error);
+     if (pDesc->SampleMask != 0xffffffffu) {
+       // The variant "sm" has a coverage output and takes the mask as a function constant.
+diff --git a/src/d3d12/d3d12_shader_source.hpp b/src/d3d12/d3d12_shader_source.hpp
+index 8fc4318..9e84784 100644
+--- a/src/d3d12/d3d12_shader_source.hpp
++++ b/src/d3d12/d3d12_shader_source.hpp
+@@ -57,6 +57,17 @@
+ //           (stage, shader, root and, for a pixel variant, variant); one request
+ //           per process for the same stage, shader, root and variant
+ //
++// Kind of the answer (MACRUNNER_DX12_OWN_SHADER_KIND, read once per process):
++//   library   (default, also when unset) the ready Metal library files above, as always
++//   source    MSL text: <shader>.<root>.<stage>[.<variant>].msl (or without root) next to the same
++//             .desc, which then carries
++//                 kind=source          the answer is text; a .desc without it is a broken translation
++//                 language=<M>.<m>     MSL language version the text is built with (3.1)
++//             The layer builds the library itself with that language version and every other compile
++//             option at its default (the translator's text is written for it; the system default moves with
++//             the OS), once per process for the same text and language. A build error fails the stage with
++//             the Metal error text on stderr (dx12_shader_source_compile_failed).
++//
+ // Two opt-in keys for running an application (d3d12_shader_source_stats.hpp):
+ //   MACRUNNER_DX12_OWN_FALLBACK=1        a provider failure rebuilds the pipeline by the
+ //                                        legacy path, with one reason line, instead of failing it
+@@ -72,6 +83,8 @@
+ #include <cstring>
+ #include <mutex>
+ #include <string>
++#include <string_view>
++#include <unordered_map>
+ #include <unordered_set>
+ #include <vector>
+ 
+@@ -104,8 +117,16 @@ struct VertexInput {
+   char semantic[64] = {};
+ };
+ 
++// What the provider's `library` bytes are (MACRUNNER_DX12_OWN_SHADER_KIND).
++enum class Kind : uint32_t { Library = 0, Source = 1 };
++
++// MTLLanguageVersion3_1: the language the translator's text is written for.
++constexpr uint32_t kLanguage31 = (3u << 16) | 1u;
++
+ struct Response {
+-  std::vector<uint8_t> library; // Metal library, "MTLB"
++  Kind kind = Kind::Library;    // library: Metal library, "MTLB"; source: MSL text the layer builds a library from
++  uint32_t language = 0;        // source: MTLLanguageVersion (major << 16 | minor)
++  std::vector<uint8_t> library; // Metal library, "MTLB" (kind library) or MSL text (kind source)
+   char entry[128] = {};         // function name inside the library
+   uint32_t format = 0;          // description format: 1 binds nothing, 2 and 3 follow the legacy convention
+   uint32_t resources = 0;       // resources the function reads through the root arguments
+@@ -263,6 +284,8 @@ LeaveRequest(const Request &request) {
+ //   variant=<none|sm|ds|ds.sm>            what the function was translated as
+ //   coverage_output=<0|1>                 pixel only
+ //   colors=<8 characters f i u ->         pixel only
++// kind=<library|source>, language=<M.m>  (any format) what the answer is and, for text, the language version;
++//                                        read only when MACRUNNER_DX12_OWN_SHADER_KIND=source asks for text
+ inline bool
+ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+   const std::string text(bytes.begin(), bytes.end());
+@@ -313,6 +336,14 @@ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+         std::memcpy(response.variant, value.c_str(), value.size() + 1);
+       }
+       seen |= 16;
++    } else if (name == "kind") {
++      if (value == "source") response.kind = Kind::Source;
++      else if (value == "library") response.kind = Kind::Library;
++      else return false;
++    } else if (name == "language") {
++      unsigned major = 0, minor = 0;
++      if (std::sscanf(value.c_str(), "%u.%u", &major, &minor) != 2 || !major || major > 255 || minor > 255) return false;
++      response.language = (major << 16) | minor;
+     } else if (name == "coverage_output") {
+       response.coverage_output = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
+     } else if (name == "colors") {
+@@ -325,6 +356,19 @@ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+          response.inputs.size() == response.vertex_inputs && (response.root[0] || !response.resources);
+ }
+ 
++// The kind of answer asked for, read once: "source" = MSL text; "library", unset or anything else = ready libraries.
++inline Kind
++SelectedKind() {
++  static const Kind kind = [] {
++    const std::string value = Environment("MACRUNNER_DX12_OWN_SHADER_KIND");
++    if (value == "source") return Kind::Source;
++    if (!value.empty() && value != "library")
++      Trace("dx12_shader_source kind=library requested=%.32s reason=unknown_kind\n", value.c_str());
++    return Kind::Library;
++  }();
++  return kind;
++}
++
+ inline HRESULT
+ Fetch(const Request &request, Response &response, std::string &missing) {
+   static const std::string directory = Environment("MACRUNNER_DX12_OWN_SHADER_DIR");
+@@ -332,17 +376,19 @@ Fetch(const Request &request, Response &response, std::string &missing) {
+     missing = "MACRUNNER_DX12_OWN_SHADER_DIR";
+     return S_FALSE;
+   }
++  const bool text = SelectedKind() == Kind::Source;
++  const char *const extension = text ? ".msl" : ".metallib";
+   // The translation made for this root signature first, then the one that reads no root arguments.
+   const std::string stage =
+       std::string(StageName(request.stage)) + (request.variant[0] ? std::string(".") + request.variant : std::string());
+   std::string name = std::string(request.key) + "." + request.root_key + "." + stage;
+-  int read = request.root ? Read(directory + "\\" + name + ".metallib", 64u << 20, response.library) : 1;
++  int read = request.root ? Read(directory + "\\" + name + extension, 64u << 20, response.library) : 1;
+   if (read == 1) {
+-    missing = request.root ? name + ".metallib" : std::string();
++    missing = request.root ? name + extension : std::string();
+     name = std::string(request.key) + "." + stage;
+-    read = Read(directory + "\\" + name + ".metallib", 64u << 20, response.library);
++    read = Read(directory + "\\" + name + extension, 64u << 20, response.library);
+     if (read == 1) {
+-      missing = missing.empty() ? name + ".metallib" : missing + "|" + name + ".metallib";
++      missing = missing.empty() ? name + extension : missing + "|" + name + extension;
+       LeaveRequest(request);
+       return S_FALSE;
+     }
+@@ -352,6 +398,13 @@ Fetch(const Request &request, Response &response, std::string &missing) {
+   std::vector<uint8_t> description;
+   if (Read(directory + "\\" + name + ".desc", 16384, description) || !ParseDescription(description, response))
+     return E_FAIL;
++  if (text) {
++    // The text needs its description to say so, and the language it is built with.
++    if (response.kind != Kind::Source || !response.language) return E_FAIL;
++  } else {
++    response.kind = Kind::Library; // kind and language of a description are for the text answer only
++    response.language = 0;
++  }
+   return S_OK;
+ }
+ 
+@@ -425,8 +478,9 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+   }
+   const auto &response = shader.response;
+   // A function translated as one variant under the name of another is a broken translation.
+-  if (FAILED(hr) || response.library.size() < 16 || std::memcmp(response.library.data(), "MTLB", 4) ||
+-      !response.entry[0] || !std::memchr(response.entry, 0, sizeof(response.entry)) ||
++  const bool text = response.kind == Kind::Source;
++  if (FAILED(hr) || response.library.size() < 16 || (!text && std::memcmp(response.library.data(), "MTLB", 4)) ||
++      (text && !response.language) || !response.entry[0] || !std::memchr(response.entry, 0, sizeof(response.entry)) ||
+       std::strcmp(response.variant, variant) || (*variant && response.format != 3)) {
+     Trace("dx12_shader_source pipeline=%s owner=%p source=%s failed=unusable_translation stage=%s shader=%s hr=%08x\n",
+           pipeline, owner, provider.name, StageName(stage), shader.request.key, unsigned(hr));
+@@ -458,4 +512,45 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+   return S_OK;
+ }
+ 
++// The Metal library of one translated stage. Kind library: made from the ready bytes, every call, as always.
++// Kind source: built from the MSL text with the response's language version and every other option at its default,
++// once per process for the same text and language; the pipelines after the first take the library from the process.
++// A build error leaves the Metal text on stderr; `error` is borrowed, as with newLibrary.
++inline WMT::Reference<WMT::Library>
++MakeLibrary(WMT::Device device, const Response &response, WMT::Error &error) {
++  if (response.kind != Kind::Source) return device.newLibrary(response.library.data(), response.library.size(), error);
++  char key[41 + 9];
++  Sha1Hex(response.library.data(), response.library.size(), key);
++  std::snprintf(key + 40, 9, ":%x", unsigned(response.language));
++  static dxmt::mutex mutex;
++  static std::unordered_map<std::string, WMT::Reference<WMT::Library>> built;
++  {
++    std::lock_guard<dxmt::mutex> lock(mutex);
++    const auto found = built.find(key);
++    if (found != built.end()) {
++      stats::CountSourceLibrary(false, 0);
++      return found->second;
++    }
++  }
++  LARGE_INTEGER frequency, begin, end;
++  QueryPerformanceFrequency(&frequency);
++  QueryPerformanceCounter(&begin);
++  auto library = device.newLibraryWithSource(
++      std::string_view(reinterpret_cast<const char *>(response.library.data()), response.library.size()),
++      response.language, error);
++  QueryPerformanceCounter(&end);
++  if (!library) {
++    std::string text = error.handle ? error.description().getUTF8String() : std::string("none");
++    for (auto &c : text)
++      if (c == '\n' || c == '\r') c = '|';
++    Trace("dx12_shader_source_compile_failed key=%.40s language=%x bytes=%llu error=%.600s\n", key,
++          unsigned(response.language), (unsigned long long)response.library.size(), text.c_str());
++    return library;
++  }
++  stats::CountSourceLibrary(true, uint64_t((end.QuadPart - begin.QuadPart) * 1000000 / frequency.QuadPart));
++  std::lock_guard<dxmt::mutex> lock(mutex);
++  built.emplace(key, library);
++  return library;
++}
++
+ } // namespace dxmt::shader_source
+diff --git a/src/d3d12/d3d12_shader_source_stats.hpp b/src/d3d12/d3d12_shader_source_stats.hpp
+index 1513581..987ffda 100644
+--- a/src/d3d12/d3d12_shader_source_stats.hpp
++++ b/src/d3d12/d3d12_shader_source_stats.hpp
+@@ -24,7 +24,7 @@
+ //         dx12_shader_source_stats seq=<n> final=<0|1> uptime_ms=<n> fallback=<0|1>
+ //             graphics=<own>/<declined>/<fallback>/<failed>/<legacy_failed>
+ //             compute=<own>/<declined>/<fallback>/<failed>/<legacy_failed>
+-//             requests=<n> reasons=<name>:<graphics>/<compute>,...
++//             requests=<n> [source_libs=<built>/<found in process>/<ms spent building>] reasons=<name>:<graphics>/<compute>,...
+ //       own            built from provider libraries
+ //       declined       provider did not take it, legacy path built it
+ //       fallback       provider failed, legacy path built it (fallback key)
+@@ -83,6 +83,7 @@ struct Data {
+   std::atomic<uint64_t> outcomes[KindCount][OutcomeCount] = {};
+   std::atomic<uint64_t> reasons[kReasonCount][KindCount] = {};
+   std::atomic<uint64_t> requests{0};
++  std::atomic<uint64_t> source_built{0}, source_hit{0}, source_us{0}; // MACRUNNER_DX12_OWN_SHADER_KIND=source libraries
+   std::atomic<uint64_t> changes{0}, printed_changes{0};
+   std::atomic<uint64_t> last_print_ms{0};
+   std::atomic<uint32_t> seq{0};
+@@ -137,6 +138,19 @@ CountRequest() {
+   data.changes.fetch_add(1, std::memory_order_relaxed);
+ }
+ 
++// A library of kind "source": built from text (`built`, with the microseconds the system took) or found in the process.
++inline void
++CountSourceLibrary(bool built, uint64_t microseconds) {
++  auto &data = Get();
++  if (built) {
++    data.source_built.fetch_add(1, std::memory_order_relaxed);
++    data.source_us.fetch_add(microseconds, std::memory_order_relaxed);
++  } else {
++    data.source_hit.fetch_add(1, std::memory_order_relaxed);
++  }
++  data.changes.fetch_add(1, std::memory_order_relaxed);
++}
++
+ inline void
+ Print(bool final) {
+   auto &data = Get();
+@@ -144,16 +158,20 @@ Print(bool final) {
+   char line[2048];
+   const auto get = [](const std::atomic<uint64_t> &value) { return (unsigned long long)value.load(std::memory_order_relaxed); };
+   const uint64_t changes = data.changes.load(std::memory_order_relaxed);
++  char source_libs[96] = "";
++  if (get(data.source_built) + get(data.source_hit))
++    std::snprintf(source_libs, sizeof(source_libs), " source_libs=%llu/%llu/%llums", get(data.source_built),
++                  get(data.source_hit), get(data.source_us) / 1000);
+   int length = std::snprintf(
+       line, sizeof(line),
+       "dx12_shader_source_stats seq=%u final=%u uptime_ms=%llu fallback=%u graphics=%llu/%llu/%llu/%llu/%llu "
+-      "compute=%llu/%llu/%llu/%llu/%llu requests=%llu reasons=",
++      "compute=%llu/%llu/%llu/%llu/%llu requests=%llu%s reasons=",
+       data.seq.fetch_add(1, std::memory_order_relaxed) + 1, unsigned(final),
+       (unsigned long long)(GetTickCount64() - data.start_ms), unsigned(FallbackEnabled()),
+       get(data.outcomes[Graphics][Own]), get(data.outcomes[Graphics][Declined]), get(data.outcomes[Graphics][Fallback]),
+       get(data.outcomes[Graphics][Failed]), get(data.outcomes[Graphics][LegacyFailed]),
+       get(data.outcomes[Compute][Own]), get(data.outcomes[Compute][Declined]), get(data.outcomes[Compute][Fallback]),
+-      get(data.outcomes[Compute][Failed]), get(data.outcomes[Compute][LegacyFailed]), get(data.requests));
++      get(data.outcomes[Compute][Failed]), get(data.outcomes[Compute][LegacyFailed]), get(data.requests), source_libs);
+   bool any = false;
+   for (unsigned i = 0; i < kReasonCount && length > 0 && size_t(length) < sizeof(line) - 96; i++) {
+     const unsigned long long graphics = get(data.reasons[i][Graphics]), compute = get(data.reasons[i][Compute]);
+diff --git a/src/winemetal/Metal.hpp b/src/winemetal/Metal.hpp
+index 126dd5a..2f480d0 100644
+--- a/src/winemetal/Metal.hpp
++++ b/src/winemetal/Metal.hpp
+@@ -950,6 +950,14 @@ public:
+     return Reference<Library>(MTLDevice_newLibraryWithSource(handle, view.data(), view.length(), &error.handle));
+   }
+ 
++  // MacRunner shader-source seam: MSL text with an explicit language version (MTLLanguageVersion value; 0 = system default).
++  Reference<Library>
++  newLibraryWithSource(std::string_view view, uint32_t language_version, Error &error) {
++    return Reference<Library>(
++        MTLDevice_newLibraryWithSourceOptions(handle, view.data(), view.length(), language_version, 0, &error.handle)
++    );
++  }
++
+   Reference<ComputePipelineState>
+   newComputePipelineState(const Function &compute_function, Error &error) {
+     WMTComputePipelineInfo info;
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 61e2b97..448af03 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -3135,6 +3135,54 @@ _MTLDevice_newIndirectCommandBuffer(void *obj) {
+   return STATUS_SUCCESS;
+ }
+ 
++/* MacRunner shader-source seam: library from MSL text with explicit options (language version only; flags must be 0).
++ * MACRUNNER_WMT_SOURCE_TRACE=1: once per process, one stderr line naming the process identity that calls Metal. */
++static void
++_macrunner_source_trace_identity(void) {
++  static dispatch_once_t once;
++  dispatch_once(&once, ^{
++    const char *trace = getenv("MACRUNNER_WMT_SOURCE_TRACE");
++    if (!trace || trace[0] != '1')
++      return;
++    NSBundle *bundle = [NSBundle mainBundle];
++    fprintf(
++        stderr,
++        "wmt_source_identity pid=%d page_size=%d process=%s bundle_id=%s bundle_path=%s executable=%s\n", getpid(),
++        getpagesize(),
++        [[[NSProcessInfo processInfo] processName] UTF8String],
++        bundle.bundleIdentifier ? [bundle.bundleIdentifier UTF8String] : "(nil)",
++        bundle.bundlePath ? [bundle.bundlePath UTF8String] : "(nil)",
++        bundle.executablePath ? [bundle.executablePath UTF8String] : "(nil)"
++    );
++  });
++}
++
++static NTSTATUS
++_MTLDevice_newLibraryWithSourceOptions(void *obj) {
++  struct unixcall_mtldevice_newlibrarywithsourceoptions *params = obj;
++  id<MTLDevice> device = (id<MTLDevice>)params->device;
++  _macrunner_source_trace_identity();
++  params->ret_library = 0;
++  params->ret_error = 0;
++  if (params->flags) {
++    return STATUS_UNSUCCESSFUL;
++  }
++  NSString *source =
++      [[NSString alloc] initWithBytes:params->source.ptr length:params->length encoding:NSUTF8StringEncoding];
++  if (!source) {
++    return STATUS_UNSUCCESSFUL;
++  }
++  MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
++  if (params->language_version)
++    options.languageVersion = (MTLLanguageVersion)params->language_version;
++  NSError *err = NULL;
++  params->ret_library = (obj_handle_t)[device newLibraryWithSource:source options:options error:&err];
++  params->ret_error = (obj_handle_t)err;
++  [options release];
++  [source release];
++  return STATUS_SUCCESS;
++}
++
+ static NTSTATUS
+ _MTLDevice_newLibraryWithSource(void *obj) {
+   struct unixcall_mtldevice_newlibrarywithsource *params = obj;
+@@ -3611,6 +3659,7 @@ const void *__wine_unix_call_funcs[] = {
+     &_MTLDevice_accelerationStructureSizes,
+     &_MTLDevice_newAccelerationStructure,
+     &_MTLCommandBuffer_buildAccelerationStructure,
++    &_MTLDevice_newLibraryWithSourceOptions,
+ };
+ 
+ #ifndef DXMT_NATIVE
+@@ -3778,5 +3827,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
+     &_MTLDevice_accelerationStructureSizes,
+     &_MTLDevice_newAccelerationStructure,
+     &_MTLCommandBuffer_buildAccelerationStructure,
++    &_MTLDevice_newLibraryWithSourceOptions,
+ };
+ #endif
+diff --git a/src/winemetal/winemetal.h b/src/winemetal/winemetal.h
+index 4f599ea..5a7773a 100644
+--- a/src/winemetal/winemetal.h
++++ b/src/winemetal/winemetal.h
+@@ -2153,6 +2153,14 @@ WINEMETAL_API obj_handle_t MTLDevice_newIndirectCommandBuffer(
+ WINEMETAL_API obj_handle_t
+ MTLDevice_newLibraryWithSource(obj_handle_t device, const char *source, uint64_t length, obj_handle_t *err_out);
+ 
++/* Library from MSL text with explicit compile options (MacRunner, shader-source seam).
++ * language_version: MTLLanguageVersion value (major << 16 | minor, 3.1 = 0x30001); 0 leaves the system default.
++ * flags: reserved, must be 0 (every other option stays at its default). */
++WINEMETAL_API obj_handle_t MTLDevice_newLibraryWithSourceOptions(
++    obj_handle_t device, const char *source, uint64_t length, uint32_t language_version, uint32_t flags,
++    obj_handle_t *err_out
++);
++
+ WINEMETAL_API void MTLTexture_getBytes(
+     obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,
+     struct WMTMemoryPointer data, uint64_t bytes_per_row, uint64_t bytes_per_image
+diff --git a/src/winemetal/winemetal_thunks.c b/src/winemetal/winemetal_thunks.c
+index 768f681..81a402a 100644
+--- a/src/winemetal/winemetal_thunks.c
++++ b/src/winemetal/winemetal_thunks.c
+@@ -1315,6 +1315,25 @@ MTLDevice_newLibraryWithSource(obj_handle_t device, const char *source, uint64_t
+   return params.ret_library;
+ }
+ 
++WINEMETAL_API obj_handle_t
++MTLDevice_newLibraryWithSourceOptions(
++    obj_handle_t device, const char *source, uint64_t length, uint32_t language_version, uint32_t flags,
++    obj_handle_t *err_out
++) {
++  struct unixcall_mtldevice_newlibrarywithsourceoptions params;
++  params.device = device;
++  WMT_MEMPTR_SET(params.source, source);
++  params.length = length;
++  params.language_version = language_version;
++  params.flags = flags;
++  params.ret_error = 0;
++  params.ret_library = 0;
++  UNIX_CALL(163, &params);
++  if (err_out)
++    *err_out = params.ret_error;
++  return params.ret_library;
++}
++
+ WINEMETAL_API void
+ MTLTexture_getBytes(
+     obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,
+diff --git a/src/winemetal/winemetal_thunks.h b/src/winemetal/winemetal_thunks.h
+index 2f66dce..9a31846 100644
+--- a/src/winemetal/winemetal_thunks.h
++++ b/src/winemetal/winemetal_thunks.h
+@@ -126,6 +126,16 @@ struct unixcall_mtldevice_newlibrarywithsource {
+   obj_handle_t ret_library;
+ };
+ 
++struct unixcall_mtldevice_newlibrarywithsourceoptions {
++  obj_handle_t device;
++  struct WMTConstMemoryPointer source;
++  uint64_t length;
++  uint32_t language_version;
++  uint32_t flags;
++  obj_handle_t ret_error;
++  obj_handle_t ret_library;
++};
++
+ struct unixcall_mtldevice_newcomputepso {
+   obj_handle_t device;
+   struct WMTConstMemoryPointer info;
+@@ -516,6 +526,7 @@ struct unixcall_mtl_as_build {
+ STATIC_ASSERT(sizeof(unixcall_mtl_as_sizes) == 32);
+ STATIC_ASSERT(sizeof(unixcall_mtl_as_new) == 32);
+ STATIC_ASSERT(sizeof(unixcall_mtl_as_build) == 56);
++STATIC_ASSERT(sizeof(unixcall_mtldevice_newlibrarywithsourceoptions) == 48);
+ 
+ #pragma pack(pop)
+ 

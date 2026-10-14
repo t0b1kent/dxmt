@@ -1,0 +1,511 @@
+diff --git a/src/d3d12/d3d12_pipeline_graphics.cpp b/src/d3d12/d3d12_pipeline_graphics.cpp
+index 65fbfca..aa4c4e6 100644
+--- a/src/d3d12/d3d12_pipeline_graphics.cpp
++++ b/src/d3d12/d3d12_pipeline_graphics.cpp
+@@ -1547,6 +1547,11 @@ public:
+     const shader_source::Provider *source = nullptr; // null: the legacy translator makes the stages
+     shader_source::Shader vs, ps;
+     bool pixel = false; // the pipeline has a pixel stage
++    // tess-gs 14.10.2026: a tessellation pipeline takes an object function (VS+HS pair) and a mesh function
++    // (HS+DS pair) instead of a vertex function; both carry the tessellation reflection (format 4).
++    bool tess = false;
++    bool geometry = false;   // tess-gs: a geometry pipeline takes an object (VS+GS, batching) and a mesh (GS replay) function
++    shader_source::Shader object, mesh;
+   };
+ 
+   // Class of a colour target format as the legacy translator sees it: 'f', 'i' or 'u'.
+@@ -1584,10 +1589,15 @@ public:
+   HRESULT
+   SelectTranslated(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const shader_source::Provider &source,
+                    TranslatedStages &stages) {
+-    // Stages no source serves: tessellation and geometry pipelines stay on the legacy path.
+-    if (pDesc->GS.pShaderBytecode || pDesc->GS.BytecodeLength || pDesc->HS.pShaderBytecode ||
+-        pDesc->HS.BytecodeLength || pDesc->DS.pShaderBytecode || pDesc->DS.BytecodeLength)
+-      return shader_source::Legacy(source, "graphics", this, "stage_not_served", "stages=gs|hs|ds");
++    // Stages no source serves: geometry pipelines stay on the legacy path. Tessellation (tess-gs 14.10.2026)
++    // is served as a pair of pair-translations: object (VS+HS) and mesh (HS+DS).
++    const bool has_gs = pDesc->GS.pShaderBytecode && pDesc->GS.BytecodeLength;
++    const bool has_hs = pDesc->HS.pShaderBytecode && pDesc->HS.BytecodeLength;
++    const bool has_ds = pDesc->DS.pShaderBytecode && pDesc->DS.BytecodeLength;
++    if (has_gs && (has_hs || has_ds))
++      return shader_source::Legacy(source, "graphics", this, "stage_not_served", "stages=gs+tessellation");
++    if (has_hs != has_ds || (has_hs && pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH))
++      return E_INVALIDARG;
+     if (!pDesc->VS.pShaderBytecode || !pDesc->VS.BytecodeLength)
+       return shader_source::Legacy(source, "graphics", this, "stage_not_served", "stages=no_vs");
+     // Bounds the code below indexes by.
+@@ -1604,9 +1614,29 @@ public:
+     shader_source::PixelVariant(dual_source_blending, pDesc->SampleMask, variant);
+     stages.pixel = pDesc->PS.pShaderBytecode != nullptr;
+     auto root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+-    // Both stages are asked before giving up, so one pass names (and requests) every missing translation.
+-    const HRESULT vs_hr = shader_source::Fetch(source, "graphics", this, pDesc->VS,
+-                                               microsoft::D3D10_SB_VERTEX_SHADER, root, stages.vs);
++    // Every stage is asked before giving up, so one pass names (and requests) every missing translation.
++    stages.tess = has_hs;
++    stages.geometry = has_gs;
++    HRESULT vs_hr = S_OK;
++    if (stages.geometry) {
++      const HRESULT object_hr = shader_source::FetchPair(source, "graphics", this, pDesc->VS, pDesc->GS,
++                                                         shader_source::kVertexGeometry, root, stages.object);
++      const HRESULT mesh_hr = shader_source::FetchPair(source, "graphics", this, pDesc->VS, pDesc->GS,
++                                                       shader_source::kGeometryMesh, root, stages.mesh);
++      if (FAILED(object_hr)) return object_hr;
++      if (FAILED(mesh_hr)) return mesh_hr;
++      vs_hr = (object_hr == S_OK && mesh_hr == S_OK) ? S_OK : S_FALSE;
++    } else if (stages.tess) {
++      const HRESULT object_hr = shader_source::FetchPair(source, "graphics", this, pDesc->VS, pDesc->HS,
++                                                         shader_source::kVertexHull, root, stages.object);
++      const HRESULT mesh_hr = shader_source::FetchPair(source, "graphics", this, pDesc->HS, pDesc->DS,
++                                                       shader_source::kHullDomain, root, stages.mesh);
++      if (FAILED(object_hr)) return object_hr;
++      if (FAILED(mesh_hr)) return mesh_hr;
++      vs_hr = (object_hr == S_OK && mesh_hr == S_OK) ? S_OK : S_FALSE;
++    } else {
++      vs_hr = shader_source::Fetch(source, "graphics", this, pDesc->VS, microsoft::D3D10_SB_VERTEX_SHADER, root, stages.vs);
++    }
+     const HRESULT ps_hr = stages.pixel ? shader_source::Fetch(source, "graphics", this, pDesc->PS,
+                                                               microsoft::D3D10_SB_PIXEL_SHADER, root, stages.ps, variant)
+                                        : S_OK;
+@@ -1658,6 +1688,49 @@ public:
+     return S_OK;
+   }
+ 
++  // tess-gs 14.10.2026: the object function (VS+HS) of a translated tessellation pipeline in its three index
++  // variants (none, uint16, uint32: function constant 130, as the legacy path compiles vshs_main_uint16/32),
++  // and the mesh function (HS+DS). The vertex input layout reaches the object function as the same function
++  // constants the vertex function takes. Declarations and reflections come from the pair descriptions.
++  static constexpr uint16_t kIndexKindConstant = 130;
++  HRESULT
++  TranslatedTessellationFunctions(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const TranslatedStages &stages,
++                                  WMT::Reference<WMT::Function> &object, WMT::Reference<WMT::Function> indexed[2],
++                                  WMT::Reference<WMT::Function> &mesh) {
++    const auto &obj = stages.object.response;
++    const auto &msh = stages.mesh.response;
++    WMT::Error error;
++    uint32_t vertex_slots = 0;
++    std::vector<uint32_t> vertex_values;
++    HRESULT hr = TranslatedVertexInputs(pDesc, obj, vertex_slots, vertex_values);
++    if (FAILED(hr)) return TranslatedFailure(stages, "object_vertex_inputs", error, hr);
++    auto library = device_->GetMTLDevice().newLibrary(obj.library.data(), obj.library.size(), error);
++    if (!library) return TranslatedFailure(stages, "object_library", error);
++    std::vector<WMTFunctionConstant> constants(vertex_values.size() + 1);
++    for (size_t i = 0; i < vertex_values.size(); i++) {
++      constants[i] = {};
++      constants[i].data.set(&vertex_values[i]);
++      constants[i].type = WMTDataTypeUInt;
++      constants[i].index = uint16_t(obj.inputs[i / 4].location * 4 + i % 4);
++    }
++    const uint32_t kinds[3] = {0, 1, 2};
++    WMT::Reference<WMT::Function> *targets[3] = {&object, &indexed[0], &indexed[1]};
++    for (unsigned k = 0; k < 3; ++k) {
++      constants.back() = {};
++      constants.back().data.set(&kinds[k]);
++      constants.back().type = WMTDataTypeUInt;
++      constants.back().index = kIndexKindConstant;
++      *targets[k] = library.newFunctionWithConstants(obj.entry, constants.data(), uint32_t(constants.size()), error);
++      if (!*targets[k]) return TranslatedFailure(stages, k == 0 ? "object_entry" : k == 1 ? "object_entry_uint16" : "object_entry_uint32", error);
++    }
++    slot_mask = vertex_slots;
++    auto mesh_library = device_->GetMTLDevice().newLibrary(msh.library.data(), msh.library.size(), error);
++    if (!mesh_library) return TranslatedFailure(stages, "mesh_library", error);
++    mesh = mesh_library.newFunction(msh.entry);
++    if (!mesh) return TranslatedFailure(stages, "mesh_entry", error);
++    return S_OK;
++  }
++
+   // The pixel function of a translated pipeline. What the legacy path compiles into its pixel
+   // function (SM50_SHADER_PSO_PIXEL_SHADER) is covered by the variant chosen in SelectTranslated,
+   // the sample mask constant and the target type check.
+@@ -1737,7 +1810,10 @@ public:
+       if (FAILED(result)) return result;
+       if (gs_point::input_vertices(geometry_contract.primitive) != uint32_t(pDesc->PrimitiveTopologyType)) return E_INVALIDARG;
+     }
+-    const bool native_list_geometry = gs_artifact == S_FALSE && pDesc->GS.pShaderBytecode &&
++    // tess-gs: a pipeline served by the own geometry pair takes nothing from the legacy list contract reader
++    // (it would parse the DXIL container as DXBC and fail); the own branch below validates the pair instead.
++    const bool own_geometry_selected = translated.source && translated.geometry;
++    const bool native_list_geometry = gs_artifact == S_FALSE && !own_geometry_selected && pDesc->GS.pShaderBytecode &&
+         pDesc->GS.BytecodeLength && (pDesc->PrimitiveTopologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT ||
+                                     pDesc->PrimitiveTopologyType == D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE);
+     if (native_list_geometry) {
+@@ -1748,7 +1824,14 @@ public:
+       if (gs_point::input_vertices(geometry_contract.primitive) != uint32_t(pDesc->PrimitiveTopologyType))
+         return E_INVALIDARG;
+     }
+-    const bool contracted_geometry = translated_geometry || native_list_geometry;
++    const bool own_geometry = own_geometry_selected;
++    if (own_geometry) {
++      // tess-gs: the pair reflection names the input primitive; the draw path (geometry_input_vertices,
++      // vertices_per_group) and the mesh grid follow gs_point's list contract exactly as for the legacy list GS.
++      geometry_contract.primitive = translated.object.response.gs.primitive;
++      geometry_contract.max_vertices = translated.object.response.gs.max_vertices;
++    }
++    const bool contracted_geometry = translated_geometry || native_list_geometry || own_geometry;
+     const bool translated_tessellation = hs_artifact == S_OK || ds_artifact == S_OK;
+     if (translated_tessellation) {
+       // No mixed converted/unconverted HS/DS pair and no unbound metadata defaults.
+@@ -1844,23 +1927,46 @@ public:
+              element.InputSlotClass != D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA))
+           return E_INVALIDARG;
+       }
+-      TessellationStageDeclarations unused;
+-      if (FAILED(hr = ReadTessellationStage(pDesc->VS, microsoft::D3D10_SB_VERTEX_SHADER, unused)) ||
+-          FAILED(hr = ReadTessellationStage(pDesc->HS, microsoft::D3D11_SB_HULL_SHADER, hs_declarations)) ||
+-          FAILED(hr = ReadTessellationStage(pDesc->DS, microsoft::D3D11_SB_DOMAIN_SHADER, ds_declarations)))
+-        return hr;
+-      if (pDesc->PS.pShaderBytecode || pDesc->PS.BytecodeLength) {
+-        if (FAILED(hr = ReadTessellationStage(pDesc->PS, microsoft::D3D10_SB_PIXEL_SHADER, unused)))
++      if (translated.source && translated.tess) {
++        // tess-gs: declarations and reflections of the own pair come from their descriptions (format 4);
++        // the containers are DXIL, which the DXBC readers below reject. The two descriptions must agree.
++        const auto &to = translated.object.response.tess, &tm = translated.mesh.response.tess;
++        if (to.domain != tm.domain || to.out_cp != tm.out_cp || to.payload_bytes != tm.payload_bytes ||
++            to.in_cp != tm.in_cp || to.threads_per_patch != tm.threads_per_patch || to.split != tm.split) {
++          shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s failed=tess_pair_mismatch object=%s mesh=%s\n",
++                               static_cast<void *>(this), translated.source->name, translated.object.request.key,
++                               translated.mesh.request.key);
++          return E_FAIL;
++        }
++        hs_declarations = {to.in_cp, to.out_cp, to.domain, to.partition, to.output, to.max_factor, to.patch_scalars, to.patch_regs};
++        ds_declarations = {to.out_cp, 0, to.domain, 0, 0, 0, 0, 0};
++        ref_hs.Tessellator.Partition = to.partition;
++        ref_hs.Tessellator.MaxFactor = to.max_factor;
++        ref_hs.Tessellator.OutputPrimitive = MTL_TESSELLATOR_OUTPUT_PRIMITIVE(to.output);
++        ref_hs.ThreadsPerPatch = to.threads_per_patch;
++        ref_hs.NumOutputElement = to.hs_out_regs;
++        ref_ds.PostTessellator.MaxPotentialTessFactor = tm.max_potential_factor;
++        ref_ds.PostTessellator.MaxPotentialSplitTessFactor = tm.max_split_factor;   // как у прежнего конвертера (max_split_factor)
++        ref_ds.NumOutputElement = tm.ds_out_regs;
++      } else {
++        TessellationStageDeclarations unused;
++        if (FAILED(hr = ReadTessellationStage(pDesc->VS, microsoft::D3D10_SB_VERTEX_SHADER, unused)) ||
++            FAILED(hr = ReadTessellationStage(pDesc->HS, microsoft::D3D11_SB_HULL_SHADER, hs_declarations)) ||
++            FAILED(hr = ReadTessellationStage(pDesc->DS, microsoft::D3D11_SB_DOMAIN_SHADER, ds_declarations)))
++          return hr;
++        if (pDesc->PS.pShaderBytecode || pDesc->PS.BytecodeLength) {
++          if (FAILED(hr = ReadTessellationStage(pDesc->PS, microsoft::D3D10_SB_PIXEL_SHADER, unused)))
++            return hr;
++        }
++        if (hs_declarations.domain != ds_declarations.domain ||
++            hs_declarations.output_control_points != ds_declarations.input_control_points)
++          return E_INVALIDARG;
++        if (FAILED(hr = ValidateTessellationSignatures(*pDesc)))
++          return hr;
++        if (FAILED(hr = initialize_stage("HS", pDesc->HS, &shader_hs, &ref_hs)) ||
++            FAILED(hr = initialize_stage("DS", pDesc->DS, &shader_ds, &ref_ds)))
+           return hr;
+       }
+-      if (hs_declarations.domain != ds_declarations.domain ||
+-          hs_declarations.output_control_points != ds_declarations.input_control_points)
+-        return E_INVALIDARG;
+-      if (FAILED(hr = ValidateTessellationSignatures(*pDesc)))
+-        return hr;
+-      if (FAILED(hr = initialize_stage("HS", pDesc->HS, &shader_hs, &ref_hs)) ||
+-          FAILED(hr = initialize_stage("DS", pDesc->DS, &shader_ds, &ref_ds)))
+-        return hr;
+     }
+ 
+     SM50_SHADER_COMMON_DATA common;
+@@ -1873,7 +1979,25 @@ public:
+     gs_passthrough.type = SM50_SHADER_GS_PASS_THROUGH;
+     gs_passthrough.DataEncoded = ~0u;
+     gs_passthrough.next = &common;
+-    if (pDesc->GS.pShaderBytecode || pDesc->GS.BytecodeLength) {
++    if (own_geometry) {
++      const auto &go = translated.object.response.gs, &gm = translated.mesh.response.gs;
++      if (go.primitive != gm.primitive || go.vertices_per_group != gm.vertices_per_group || go.payload_bytes != gm.payload_bytes ||
++          go.vs_out_regs != gm.vs_out_regs || go.max_vertices != gm.max_vertices || go.output_topology != gm.output_topology) {
++        shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s failed=gs_pair_mismatch object=%s mesh=%s\n",
++                             static_cast<void *>(this), translated.source->name, translated.object.request.key,
++                             translated.mesh.request.key);
++        return E_FAIL;
++      }
++      if (gs_point::input_vertices(go.primitive) != uint32_t(pDesc->PrimitiveTopologyType)) return E_INVALIDARG;
++      if (!pDesc->pRootSignature || !metal.supportsFamily(WMTGPUFamilyApple7) ||
++          pDesc->IBStripCutValue != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED ||
++          pDesc->RasterizerState.ConservativeRaster != D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF ||
++          pDesc->RasterizerState.ForcedSampleCount || pDesc->StreamOutput.NumEntries ||
++          go.vertices_per_group != gs_point::vertices_per_group(go.primitive) ||
++          16ull + uint64_t(go.vertices_per_group) * go.vs_out_regs * 16ull > 16256ull)
++        return TraceUnsupportedPipeline(__func__, __LINE__);
++      geometry = true;
++    } else if (pDesc->GS.pShaderBytecode || pDesc->GS.BytecodeLength) {
+       using namespace microsoft;
+       CDXBCParser parser;
+       if (!pDesc->GS.pShaderBytecode || !pDesc->GS.BytecodeLength)
+@@ -1927,7 +2051,40 @@ public:
+     }
+     const bool mesh_pipeline = tessellation || geometry;
+ 
+-    if (translated.source) {
++    if (translated.source && translated.tess) {
++      // tess-gs: object (×3 index variants) and mesh functions; then the same allocation preflight as the
++      // legacy path, fed by the pair reflection. The own object function was composed for exactly the
++      // validator's payload size and has no split variant.
++      if (FAILED(hr = TranslatedTessellationFunctions(pDesc, translated, vs_func, indexed_vs_func, ds_func)))
++        return hr;
++      MTL_SHADER_REFLECTION own_ref_vs = {};
++      own_ref_vs.NumOutputElement = translated.object.response.tess.vs_out_regs;
++      if (FAILED(hr = ValidateTessellationReflection(hs_declarations, ref_hs, ref_ds, own_ref_vs, tess_allocation, 0)))
++        return hr;
++      // Раздельный режим допустим, если переводчик собрал пару именно так (object удваивает сетку mesh,
++      // mesh берёт split-входы тесселятора); несовпадение решения — отказ с именем.
++      if (tess_allocation.payload_bytes != translated.object.response.tess.payload_bytes ||
++          tess_allocation.split_workload != (translated.mesh.response.tess.split != 0)) {
++        shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s failed=%s payload=%u translated=%u split=%u translated_split=%u\n",
++                             static_cast<void *>(this), translated.source->name,
++                             tess_allocation.payload_bytes != translated.object.response.tess.payload_bytes ? "tess_payload_mismatch" : "tess_split_mismatch",
++                             tess_allocation.payload_bytes, translated.object.response.tess.payload_bytes,
++                             unsigned(tess_allocation.split_workload), translated.mesh.response.tess.split);
++        return E_FAIL;
++      }
++      TracePipelineCapture(capture_id, this, "tessellation.allocation",
++          "max=%g factor=%u payload=%u mesh_bytes=%u slots=%u mesh_groups=%u shared=%u threads_per_patch=%u source=own",
++          double(hs_declarations.max_factor), tess_allocation.factor, tess_allocation.payload_bytes,
++          tess_allocation.mesh_bytes, tess_allocation.mesh_slots, tess_allocation.mesh_groups,
++          tess_allocation.threadgroup_bytes, ref_hs.ThreadsPerPatch);
++    } else if (translated.source && translated.geometry) {
++      // tess-gs: object (×3 index variants, VS batching) and mesh (GS replay) functions from the pair libraries.
++      if (FAILED(hr = TranslatedTessellationFunctions(pDesc, translated, vs_func, indexed_vs_func, gs_func)))
++        return hr;
++      TracePipelineCapture(capture_id, this, "geometry.allocation", "primitive=%u vertices_per_group=%u payload=%u max_vertices=%u source=own",
++                           geometry_contract.primitive, translated.object.response.gs.vertices_per_group,
++                           translated.object.response.gs.payload_bytes, translated.object.response.gs.max_vertices);
++    } else if (translated.source) {
+       if (FAILED(hr = TranslatedVertexFunction(pDesc, translated, vs_func)))
+         return hr;
+     } else if (pDesc->VS.pShaderBytecode) {
+diff --git a/src/d3d12/d3d12_shader_source.hpp b/src/d3d12/d3d12_shader_source.hpp
+index e8e6ad0..7277b2b 100644
+--- a/src/d3d12/d3d12_shader_source.hpp
++++ b/src/d3d12/d3d12_shader_source.hpp
+@@ -67,6 +67,13 @@
+ 
+ namespace dxmt::shader_source {
+ 
++// tess-gs 14.10.2026: a translation of a PAIR of stages. The object function of a tessellation pipeline
++// fuses VS and HS (kind 1, "vshs"), the mesh function fuses the tessellator and DS (kind 2, "hsds"); the
++// pair is keyed by both container digests.
++enum PairKind : uint32_t { kSingleStage = 0, kVertexHull = 1, kHullDomain = 2, kVertexGeometry = 3, kGeometryMesh = 4 };
++// tess-gs: geometry pairs (format 5): kVertexGeometry "vsgs" = object function (VS batching), kGeometryMesh "gsm" =
++// mesh function (GS replay); both are keyed by VS+GS+root because the payload layout depends on the VS registers.
++
+ struct Request {
+   D3D12_SHADER_BYTECODE shader; // container exactly as the application passed it
+   const void *root;             // RTS0 part of the pipeline's root signature; null without one
+@@ -75,6 +82,31 @@ struct Request {
+   char key[41];                 // SHA-1 of the container, lower-case hex
+   char root_key[41];            // SHA-1 of the RTS0 part; empty without a root signature
+   char variant[8];              // pixel stage: "", "sm", "ds" or "ds.sm" (PixelVariant); empty for other stages
++  uint32_t kind = kSingleStage; // PairKind
++  D3D12_SHADER_BYTECODE second = {}; // the second container of a pair (HS for vshs, DS for hsds)
++  char second_key[41] = {};     // its SHA-1
++};
++
++inline const char *
++KindName(uint32_t kind) {
++  return kind == kVertexHull ? "vshs" : kind == kHullDomain ? "hsds" : kind == kVertexGeometry ? "vsgs" : kind == kGeometryMesh ? "gsm" : "";
++}
++
++// Reflection of a tessellation pair the layer's allocation (ValidateTessellationReflection) consumes.
++struct TessellationResponse {
++  char kind[8] = {};
++  uint32_t domain = 0, partition = 0, output = 0;  // D3D11_SB_TESSELLATOR_* values
++  float max_factor = 0;
++  uint32_t in_cp = 0, out_cp = 0, threads_per_patch = 0, hs_out_regs = 0, patch_scalars = 0, patch_regs = 0,
++           vs_out_regs = 0, payload_bytes = 0, ds_out_regs = 0, max_potential_factor = 0, mesh_vertices = 0,
++           mesh_primitives = 0, split = 0, max_split_factor = 0;   // split: раздельный режим mesh (две группы на workload)
++};
++
++// tess-gs: reflection of a geometry pair (gs_compose.py description(), format 5).
++struct GeometryResponse {
++  char kind[8] = {};
++  uint32_t primitive = 0, output_topology = 0, max_vertices = 0, vertices_per_group = 0, primitives_per_group = 0,
++           vs_out_regs = 0, gs_out_regs = 0, payload_bytes = 0, instances = 0;
+ };
+ 
+ // Function constant of the pixel variant "sm": the pipeline's sample mask.
+@@ -107,6 +139,8 @@ struct Response {
+   char variant[8] = {};         // format 3: the variant the function was translated as
+   uint32_t coverage_output = 0; // format 3, pixel: the shader itself writes coverage (SV_Coverage)
+   char colors[9] = {};          // format 3, pixel: per SV_Target 'f', 'i', 'u' (declared type) or '-' (not written)
++  TessellationResponse tess;    // format 4: a tessellation pair (object or mesh function)
++  GeometryResponse gs;          // format 5: a geometry pair (object or mesh function)
+ };
+ 
+ struct Provider {
+@@ -203,6 +237,20 @@ inline void
+ LeaveRequest(const Request &request) {
+   static const std::string directory = Environment("MACRUNNER_DX12_OWN_SHADER_REQUEST_DIR");
+   if (directory.empty()) return;
++  if (request.kind != kSingleStage) {
++    // A pair: both containers under their own stage names and one line naming the pair.
++    const char *first = request.kind == kHullDomain ? "hs" : "vs",
++               *second = request.kind == kVertexHull ? "hs" : request.kind == kHullDomain ? "ds" : "gs";
++    Write(directory + "\\" + request.key + "." + first + ".dxbc", request.shader.pShaderBytecode,
++          request.shader.BytecodeLength, false);
++    Write(directory + "\\" + request.second_key + "." + second + ".dxbc", request.second.pShaderBytecode,
++          request.second.BytecodeLength, false);
++    if (request.root) Write(directory + "\\" + request.root_key + ".rts0", request.root, request.root_size, false);
++    const std::string line = std::string("stage=") + KindName(request.kind) + " shader=" + request.key + " second=" +
++                             request.second_key + " root=" + (request.root ? request.root_key : "none") + "\r\n";
++    Write(directory + "\\requests.txt", line.data(), line.size(), true);
++    return;
++  }
+   const std::string stage = StageName(request.stage);
+   Write(directory + "\\" + request.key + "." + stage + ".dxbc", request.shader.pShaderBytecode,
+         request.shader.BytecodeLength, false);
+@@ -279,9 +327,63 @@ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+     } else if (name == "colors") {
+       if (value.size() != 8 || value.find_first_not_of("fiu-") != std::string::npos) return false;
+       std::memcpy(response.colors, value.c_str(), 9);
++    } else if (name == "kind") {
++      if (value.empty() || value.size() >= sizeof(response.tess.kind)) return false;
++      std::memcpy(response.tess.kind, value.c_str(), value.size() + 1);
++      std::memcpy(response.gs.kind, value.c_str(), value.size() + 1);
++      seen |= 32;
++    } else if (name.compare(0, 5, "tess_") == 0) {
++      // format=4: the tessellation reflection of a pair (tess_compose.py description())
++      auto &t = response.tess;
++      const std::string field = name.substr(5);
++      const uint32_t number = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++      if (field == "domain") t.domain = value == "tri" ? 2 : value == "quad" ? 3 : value == "isoline" ? 1 : 0;
++      else if (field == "partition") t.partition = value == "integer" ? 1 : value == "pow2" ? 2 : value == "odd" ? 3 : value == "even" ? 4 : 0;
++      else if (field == "output") t.output = value == "point" ? 1 : value == "line" ? 2 : value == "tri_cw" ? 3 : value == "tri_ccw" ? 4 : 0;
++      else if (field == "max_factor") t.max_factor = float(std::strtod(value.c_str(), nullptr));
++      else if (field == "in_cp") t.in_cp = number;
++      else if (field == "out_cp") t.out_cp = number;
++      else if (field == "threads_per_patch") t.threads_per_patch = number;
++      else if (field == "hs_out_regs") t.hs_out_regs = number;
++      else if (field == "patch_scalars") t.patch_scalars = number;
++      else if (field == "patch_regs") t.patch_regs = number;
++      else if (field == "vs_out_regs") t.vs_out_regs = number;
++      else if (field == "payload_bytes") t.payload_bytes = number;
++      else if (field == "ds_out_regs") t.ds_out_regs = number;
++      else if (field == "max_potential_factor") t.max_potential_factor = number;
++      else if (field == "mesh_vertices") t.mesh_vertices = number;
++      else if (field == "mesh_primitives") t.mesh_primitives = number;
++      else if (field == "split") t.split = number;
++      else if (field == "max_split_factor") t.max_split_factor = number;
++    } else if (name.compare(0, 3, "gs_") == 0) {
++      // format=5: the geometry reflection of a pair (gs_compose.py description())
++      auto &g = response.gs;
++      const std::string field = name.substr(3);
++      const uint32_t number = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++      if (field == "primitive") g.primitive = number;
++      else if (field == "output_topology") g.output_topology = number;
++      else if (field == "max_vertices") g.max_vertices = number;
++      else if (field == "vertices_per_group") g.vertices_per_group = number;
++      else if (field == "primitives_per_group") g.primitives_per_group = number;
++      else if (field == "vs_out_regs") g.vs_out_regs = number;
++      else if (field == "out_regs") g.gs_out_regs = number;
++      else if (field == "payload_bytes") g.payload_bytes = number;
++      else if (field == "instances") g.instances = number;
+     }
+   }
+   if (response.format == 1) return seen == 7;
++  if (response.format == 5) {
++    const auto &g = response.gs;
++    return seen == 63 && response.inputs.size() == response.vertex_inputs && (response.root[0] || !response.resources) &&
++           g.primitive && g.output_topology && g.max_vertices && g.max_vertices <= 256 && g.vertices_per_group &&
++           g.primitives_per_group && g.vs_out_regs && g.payload_bytes && g.payload_bytes <= 16256 && g.instances == 1;
++  }
++  if (response.format == 4) {
++    const auto &t = response.tess;
++    return seen == 63 && response.inputs.size() == response.vertex_inputs && (response.root[0] || !response.resources) &&
++           t.domain && t.partition && t.output && t.in_cp && t.out_cp && t.threads_per_patch && t.payload_bytes &&
++           t.mesh_vertices && t.mesh_primitives;
++  }
+   return (response.format == 2 ? seen == 15 : response.format == 3 && seen == 31) &&
+          response.inputs.size() == response.vertex_inputs && (response.root[0] || !response.resources);
+ }
+@@ -294,13 +396,17 @@ Fetch(const Request &request, Response &response, std::string &missing) {
+     return S_FALSE;
+   }
+   // The translation made for this root signature first, then the one that reads no root arguments.
+-  const std::string stage =
+-      std::string(StageName(request.stage)) + (request.variant[0] ? std::string(".") + request.variant : std::string());
+-  std::string name = std::string(request.key) + "." + request.root_key + "." + stage;
++  // A pair is named by both digests: <first>.<second>.<root>.<vshs|hsds>.
++  const std::string stage = request.kind != kSingleStage
++      ? std::string(KindName(request.kind))
++      : std::string(StageName(request.stage)) + (request.variant[0] ? std::string(".") + request.variant : std::string());
++  const std::string key = request.kind != kSingleStage ? std::string(request.key) + "." + request.second_key
++                                                       : std::string(request.key);
++  std::string name = key + "." + request.root_key + "." + stage;
+   int read = request.root ? Read(directory + "\\" + name + ".metallib", 64u << 20, response.library) : 1;
+   if (read == 1) {
+     missing = request.root ? name + ".metallib" : std::string();
+-    name = std::string(request.key) + "." + stage;
++    name = key + "." + stage;
+     read = Read(directory + "\\" + name + ".metallib", 64u << 20, response.library);
+     if (read == 1) {
+       missing = missing.empty() ? name + ".metallib" : missing + "|" + name + ".metallib";
+@@ -402,4 +508,66 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+   return S_OK;
+ }
+ 
++// tess-gs 14.10.2026: a pair of stages through the provider (kVertexHull: VS+HS object function; kHullDomain:
++// HS+DS mesh function). Same contract as Fetch; a pair is format 4 and carries the tessellation reflection.
++inline HRESULT
++FetchPair(const Provider &provider, const char *pipeline, const void *owner, D3D12_SHADER_BYTECODE first,
++          D3D12_SHADER_BYTECODE second, uint32_t kind, MTLD3D12RootSignature *root, Shader &shader) {
++  struct PreserveLastError {
++    DWORD value = GetLastError();
++    ~PreserveLastError() { SetLastError(value); }
++  } preserve_last_error;
++  if (!first.pShaderBytecode || !first.BytecodeLength || !second.pShaderBytecode || !second.BytecodeLength ||
++      (kind != kVertexHull && kind != kHullDomain && kind != kVertexGeometry && kind != kGeometryMesh))
++    return E_INVALIDARG;
++  const bool geometry_pair = kind == kVertexGeometry || kind == kGeometryMesh;
++  shader.request = {first, nullptr, 0, kind == kHullDomain ? 3u : 1u, {}, {}, {}};
++  shader.request.kind = kind;
++  shader.request.second = second;
++  if (root) {
++    const void *blob = nullptr;
++    UINT size = 0;
++    if (root->GetBlob(&blob) && SUCCEEDED(microsoft::DXBCGetRootSignature(blob, &shader.request.root, &size)) &&
++        shader.request.root && size) {
++      shader.request.root_size = size;
++      Sha1Hex(shader.request.root, size, shader.request.root_key);
++    } else {
++      shader.request.root = nullptr;
++    }
++  }
++  Sha1Hex(first.pShaderBytecode, first.BytecodeLength, shader.request.key);
++  Sha1Hex(second.pShaderBytecode, second.BytecodeLength, shader.request.second_key);
++  std::string missing;
++  const HRESULT hr = provider.fetch(shader.request, shader.response, missing);
++  char detail[400];
++  if (hr == S_FALSE) {
++    std::snprintf(detail, sizeof(detail), "stage=%s shader=%s second=%s root=%s missing=%s", KindName(kind),
++                  shader.request.key, shader.request.second_key, shader.request.root ? shader.request.root_key : "none",
++                  missing.c_str());
++    return Legacy(provider, pipeline, owner, "no_translation", detail);
++  }
++  const auto &response = shader.response;
++  if (FAILED(hr) || response.library.size() < 16 || std::memcmp(response.library.data(), "MTLB", 4) ||
++      !response.entry[0] || !std::memchr(response.entry, 0, sizeof(response.entry)) ||
++      response.format != (geometry_pair ? 5u : 4u) ||
++      std::strcmp(geometry_pair ? response.gs.kind : response.tess.kind, KindName(kind))) {
++    Trace("dx12_shader_source pipeline=%s owner=%p source=%s failed=unusable_translation stage=%s shader=%s second=%s hr=%08x\n",
++          pipeline, owner, provider.name, KindName(kind), shader.request.key, shader.request.second_key, unsigned(hr));
++    return FAILED(hr) ? hr : E_FAIL;
++  }
++  std::snprintf(detail, sizeof(detail), "stage=%s shader=%s second=%s format=%u resources=%u vertex_inputs=%u root=%s",
++                KindName(kind), shader.request.key, shader.request.second_key, response.format, response.resources,
++                response.vertex_inputs, response.root[0] ? response.root : "none");
++  if (response.root[0] && (!shader.request.root || std::strcmp(response.root, shader.request.root_key) ||
++                           !root || response.root_qwords != root->UploadQwords)) {
++    Trace("dx12_shader_source pipeline=%s owner=%p source=%s failed=root_signature_mismatch %s pipeline_root=%s "
++          "pipeline_qwords=%u translation_qwords=%u\n",
++          pipeline, owner, provider.name, detail, shader.request.root ? shader.request.root_key : "none",
++          root ? unsigned(root->UploadQwords) : 0u, response.root_qwords);
++    return E_FAIL;
++  }
++  if (response.vertex_inputs && kind != kVertexHull && kind != kVertexGeometry) return Legacy(provider, pipeline, owner, "translation_not_admitted", detail);
++  return S_OK;
++}
++
+ } // namespace dxmt::shader_source

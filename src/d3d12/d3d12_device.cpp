@@ -22,6 +22,7 @@
 #include "d3d12_device_child.hpp"
 #include "d3d12_lifetime.hpp"
 #include "d3d12_frame_trace.hpp"
+#include "d3d12_shader_source_stats.hpp"
 #include "d3d12_command_failure_trace.hpp"
 #include "d3d12_state_object_libraries.hpp"
 #include "d3d12_state_object_associations.hpp"
@@ -129,7 +130,7 @@ public:
     TraceFrame(trace_enabled, "enabled", this, "MACRUNNER_DX12_FRAME_TRACE=1 type=device");
   }
 
-  ~MTLD3D12DeviceImpl() { RemoveDevice(); }
+  ~MTLD3D12DeviceImpl() { RemoveDevice(); shader_source::stats::Final(); }
 
   ULONG STDMETHODCALLTYPE
   Release() override {

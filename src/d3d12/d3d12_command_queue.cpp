@@ -25,6 +25,7 @@
 #include "d3d12_fine_locks.hpp"
 #include "d3d12_gpu_timing.hpp"
 #include "d3d12_pipeline_timing.hpp"
+#include "d3d12_shader_source_stats.hpp"
 #include "d3d12_command_capture.hpp"
 #include "d3d12_submission_capture.hpp"
 #include "d3d12_pageable.hpp"
@@ -1919,6 +1920,7 @@ public:
       cmdbuf.presentDrawableAfterMinimumDuration(drawable, after);
     else
       cmdbuf.presentDrawable(drawable);
+    shader_source::stats::Tick(); // MACRUNNER_DX12_OWN_STATS: the counters line is due on a frame as well
     // Commit occurs in scope's destructor; Present1 logs the result after that return.
     TraceFrame(trace_encoded, "queue_present.encoded", this, "seq=%llu hr=%08x",
                static_cast<unsigned long long>(scope.seq), unsigned(S_OK));

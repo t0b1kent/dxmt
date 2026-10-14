@@ -1315,6 +1315,25 @@ MTLDevice_newLibraryWithSource(obj_handle_t device, const char *source, uint64_t
   return params.ret_library;
 }
 
+WINEMETAL_API obj_handle_t
+MTLDevice_newLibraryWithSourceOptions(
+    obj_handle_t device, const char *source, uint64_t length, uint32_t language_version, uint32_t flags,
+    obj_handle_t *err_out
+) {
+  struct unixcall_mtldevice_newlibrarywithsourceoptions params;
+  params.device = device;
+  WMT_MEMPTR_SET(params.source, source);
+  params.length = length;
+  params.language_version = language_version;
+  params.flags = flags;
+  params.ret_error = 0;
+  params.ret_library = 0;
+  UNIX_CALL(163, &params);
+  if (err_out)
+    *err_out = params.ret_error;
+  return params.ret_library;
+}
+
 WINEMETAL_API void
 MTLTexture_getBytes(
     obj_handle_t texture, struct WMTOrigin origin, struct WMTSize size, uint64_t level, uint64_t slice,

@@ -1,0 +1,537 @@
+diff --git a/CHANGES-MACRUNNER.md b/CHANGES-MACRUNNER.md
+index f5c1f55..f4c0188 100644
+--- a/CHANGES-MACRUNNER.md
++++ b/CHANGES-MACRUNNER.md
+@@ -182,7 +182,34 @@ SHA-1 of each library; a pipeline left to the regular path prints
+ that had no translation. A translation that is present but rejected fails the
+ pipeline (`failed=...`) and is not replaced by the regular path.
+ 
+-DIAGNOSTIC_ONLY. Admitted so far: VS+PS, triangles, one RGBA8 target, no input
+-layout, depth, MSAA, sample mask, alpha-to-coverage or dual-source blending,
+-and only functions that bind no resources and read no vertex attributes;
+-everything else, and every compute pipeline, takes the regular path.
++DIAGNOSTIC_ONLY. Admitted by the first milestone: VS+PS, triangles, one RGBA8
++target, no input layout, depth, MSAA, sample mask, alpha-to-coverage or
++dual-source blending, and only functions that bind no resources and read no
++vertex attributes; everything else, and every compute pipeline, took the
++regular path.
++
++### 2026-10-14: provider `own` serves resources, vertex inputs and compute
++
++A translated function now follows the binding convention of the regular path,
++so the draw side does not change and does not know which path built a
++pipeline: root arguments in buffer slot 0, static samplers in slot 1, the
++vertex buffer table in slot 2, 32-byte descriptors in the tables. Description
++format 2 (`format=2` in `.desc`) names the root signature the function was
++translated for (SHA-1 of the RTS0 part), its vertex inputs by semantic and the
++compute thread group size; a function that reads root arguments is stored as
++`<container SHA-1>.<root SHA-1>.<stage>.metallib`. A translation made for
++another root signature fails the pipeline (`failed=root_signature_mismatch`).
++
++Vertex functions pull their inputs from the vertex buffer table themselves.
++Slot entry, byte offset, format and step of every input come from the
++pipeline's input layout as four Metal function constants per input location
++(`newFunctionWithConstants`); the pipeline's `slot_mask` is set from the same
++layout. Compute pipelines are served by the same provider.
++
++`MACRUNNER_DX12_OWN_SHADER_REQUEST_DIR=<dir>` (optional): every missing
++translation leaves `<container SHA-1>.<stage>.dxbc`, `<root SHA-1>.rts0` and a
++line in `requests.txt` there, which is the input of the offline translator.
++
++DIAGNOSTIC_ONLY. Admitted: VS+PS with any input layout, triangles, 1..8 colour
++targets, no depth target, MSAA, sample mask, alpha-to-coverage or dual-source
++blending; compute. Everything else takes the regular path with a reason line.
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 55b7813..399c012 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -172,6 +172,48 @@ public:
+     return S_OK;
+   }
+ 
++  // Builds the pipeline from a ready Metal library of the selected shader source.
++  // S_FALSE leaves it to the legacy path (the reason is already on stderr).
++  HRESULT
++  InitializeTranslated(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, const shader_source::Provider &source) {
++    auto root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
++    shader_source::Shader cs;
++    const HRESULT hr = shader_source::Fetch(source, "compute", this, pDesc->CS, 5 /* D3D11_SB_COMPUTE_SHADER */, root, cs);
++    if (hr != S_OK) return hr;
++    auto metal = device_->GetMTLDevice();
++    WMT::Error error; // NSError results are borrowed, not owned References.
++    const auto failed = [&](const char *step) {
++      shader_source::Trace("dx12_shader_source pipeline=compute owner=%p source=%s failed=%s cs=%s error=%.300s\n",
++                           static_cast<void *>(this), source.name, step, cs.request.key,
++                           error.handle ? error.description().getUTF8String().c_str() : "none");
++      return E_FAIL;
++    };
++    const auto &threads = cs.response.threads;
++    if (cs.response.format != 2 || !threads[0] || !threads[1] || !threads[2]) return failed("thread_group_size");
++    auto library = metal.newLibrary(cs.response.library.data(), cs.response.library.size(), error);
++    if (!library) return failed("cs_library");
++    auto cs_function = library.newFunction(cs.response.entry);
++    if (!cs_function) return failed("cs_entry");
++    WMTComputePipelineInfo info;
++    WMT::InitializeComputePipelineInfo(info);
++    info.compute_function = cs_function;
++    info.support_indirect_command_buffers = true;
++    pso = metal.newComputePipelineState(info, error);
++    if (!pso) return failed("compute_pipeline");
++    function = cs_function;
++    threadgroup_size = {threads[0], threads[1], threads[2]};
++    translated_by = &source;
++    char library_sha1[41];
++    shader_source::Sha1Hex(cs.response.library.data(), cs.response.library.size(), library_sha1);
++    shader_source::Trace("dx12_shader_source pipeline=compute owner=%p source=%s cs=%s cs_entry=%s cs_library_sha1=%s "
++                         "cs_library_bytes=%llu native=%llx root=%s cs_resources=%u threads=%u,%u,%u\n",
++                         static_cast<void *>(this), source.name, cs.request.key, cs.response.entry, library_sha1,
++                         (unsigned long long)cs.response.library.size(), (unsigned long long)pso.handle,
++                         cs.request.root ? cs.request.root_key : "none", cs.response.resources, threads[0],
++                         threads[1], threads[2]);
++    return S_OK;
++  }
++
+   HRESULT
+   Initialize(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc) {
+ 
+@@ -179,9 +221,8 @@ public:
+     if (pDesc->pRootSignature && static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->IsLocal)
+       return E_INVALIDARG;
+     if (const auto *source = shader_source::Selected()) {
+-      // No provider serves compute stages yet: say so once per process, then the legacy path as before.
+-      static const HRESULT said = shader_source::Legacy(*source, "compute", this, "stage_not_served");
+-      (void)said;
++      const HRESULT translated = InitializeTranslated(pDesc, *source);
++      if (translated != S_FALSE) return translated;
+     }
+     const HRESULT native_wave_result = InitializeNativeWave(pDesc);
+     if (native_wave_result != S_FALSE) return native_wave_result;
+diff --git a/src/d3d12/d3d12_pipeline_graphics.cpp b/src/d3d12/d3d12_pipeline_graphics.cpp
+index b01c898..56965f9 100644
+--- a/src/d3d12/d3d12_pipeline_graphics.cpp
++++ b/src/d3d12/d3d12_pipeline_graphics.cpp
+@@ -1493,24 +1493,78 @@ public:
+     forced_sample_count = pDesc->RasterizerState.ForcedSampleCount;
+   }
+ 
++  // What the input layout feeds every vertex input the translated function pulls: four
++  // function constants per input (d3d12_shader_source.hpp), computed by the rules of
++  // ExtractMTLInputLayoutElements. `slots` is the slot mask the vertex buffer table is built from.
++  HRESULT
++  TranslatedVertexInputs(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const shader_source::Response &vs,
++                         uint32_t &slots, std::vector<uint32_t> &values) {
++    struct Element {
++      uint32_t slot = 0, offset = 0, format = 0, step = 0;
++      bool present = false;
++    };
++    std::vector<Element> elements(vs.inputs.size());
++    uint16_t append_offset[32] = {0};
++    slots = 0;
++    for (UINT j = 0; j < pDesc->InputLayout.NumElements; j++) {
++      const auto &desc = pDesc->InputLayout.pInputElementDescs[j];
++      if (!desc.SemanticName || desc.InputSlot >= 32) return E_INVALIDARG;
++      MTL_DXGI_FORMAT_DESC format;
++      if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc.Format, format))) return E_FAIL;
++      if (!format.AttributeFormat || !format.BytesPerTexel) return E_INVALIDARG;
++      const uint32_t offset = desc.AlignedByteOffset == D3D12_APPEND_ALIGNED_ELEMENT
++                                  ? align(append_offset[desc.InputSlot], std::min(4u, format.BytesPerTexel))
++                                  : desc.AlignedByteOffset;
++      append_offset[desc.InputSlot] = offset + format.BytesPerTexel;
++      for (size_t i = 0; i < vs.inputs.size(); i++) {
++        if (vs.inputs[i].semantic_index != desc.SemanticIndex || strcasecmp(vs.inputs[i].semantic, desc.SemanticName))
++          continue;
++        elements[i] = {desc.InputSlot, offset, uint32_t(format.AttributeFormat),
++                       desc.InputSlotClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? desc.InstanceDataStepRate
++                                                                                           : 0xffffffffu,
++                       true};
++        slots |= 1u << desc.InputSlot;
++        break; // the shader has no such input: the element is skipped, as on the legacy path
++      }
++    }
++    values.clear();
++    for (const auto &element : elements) {
++      // The function reads an input the layout does not feed.
++      if (!element.present) return E_INVALIDARG;
++      values.push_back(uint32_t(__builtin_popcount(slots & ((1u << element.slot) - 1u)))); // entry of the table
++      values.push_back(element.offset);
++      values.push_back(element.format);
++      values.push_back(element.step);
++    }
++    return S_OK;
++  }
++
+   // Builds the pipeline from ready Metal libraries of the selected shader source.
+   // S_FALSE leaves it to the legacy path (the reason is already on stderr).
+   HRESULT
+   InitializeTranslated(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const shader_source::Provider &source) {
+-    // First milestone: the pipeline state of the triangle probe and nothing wider.
++    // Second milestone: vertex + pixel stage, triangles, colour targets only. Resources and
++    // vertex inputs are served; depth, MSAA, sample masks and other topologies are not yet.
+     if (!pDesc->VS.BytecodeLength || !pDesc->PS.BytecodeLength || pDesc->GS.BytecodeLength ||
+-        pDesc->HS.BytecodeLength || pDesc->DS.BytecodeLength || pDesc->InputLayout.NumElements ||
++        pDesc->HS.BytecodeLength || pDesc->DS.BytecodeLength ||
+         pDesc->StreamOutput.NumEntries || pDesc->StreamOutput.NumStrides ||
+-        pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE || pDesc->NumRenderTargets != 1 ||
+-        pDesc->RTVFormats[0] != DXGI_FORMAT_R8G8B8A8_UNORM || pDesc->DSVFormat != DXGI_FORMAT_UNKNOWN ||
+-        pDesc->SampleMask != 0xffffffffu || pDesc->SampleDesc.Count != 1 || pDesc->BlendState.AlphaToCoverageEnable)
++        pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE || !pDesc->NumRenderTargets ||
++        pDesc->NumRenderTargets > 8 || pDesc->DSVFormat != DXGI_FORMAT_UNKNOWN ||
++        pDesc->SampleMask != 0xffffffffu || pDesc->SampleDesc.Count != 1 || pDesc->BlendState.AlphaToCoverageEnable ||
++        pDesc->InputLayout.NumElements > 32 ||
++        (pDesc->InputLayout.NumElements && !pDesc->InputLayout.pInputElementDescs))
+       return shader_source::Legacy(source, "graphics", this, "pipeline_state_not_admitted");
+     auto root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+     shader_source::Shader vs, ps;
+-    HRESULT hr = shader_source::Fetch(source, "graphics", this, pDesc->VS, microsoft::D3D10_SB_VERTEX_SHADER, root, vs);
+-    if (hr != S_OK) return hr;
+-    hr = shader_source::Fetch(source, "graphics", this, pDesc->PS, microsoft::D3D10_SB_PIXEL_SHADER, root, ps);
+-    if (hr != S_OK) return hr;
++    // Both stages are asked before giving up, so one pass names (and requests) every missing translation.
++    const HRESULT vs_hr =
++        shader_source::Fetch(source, "graphics", this, pDesc->VS, microsoft::D3D10_SB_VERTEX_SHADER, root, vs);
++    const HRESULT ps_hr =
++        shader_source::Fetch(source, "graphics", this, pDesc->PS, microsoft::D3D10_SB_PIXEL_SHADER, root, ps);
++    if (FAILED(vs_hr)) return vs_hr;
++    if (FAILED(ps_hr)) return ps_hr;
++    if (vs_hr != S_OK || ps_hr != S_OK) return S_FALSE;
++    HRESULT hr = S_OK;
+     WMTRenderPipelineInfo info;
+     WMT::InitializeRenderPipelineInfo(info);
+     bool dual_source_blending = false;
+@@ -1526,11 +1580,32 @@ public:
+                            error.handle ? error.description().getUTF8String().c_str() : "none");
+       return E_FAIL;
+     };
++    uint32_t vertex_slots = 0;
++    std::vector<uint32_t> vertex_values;
++    if (FAILED(hr = TranslatedVertexInputs(pDesc, vs.response, vertex_slots, vertex_values))) {
++      failed("vertex_inputs");
++      return hr;
++    }
+     auto vs_library = metal.newLibrary(vs.response.library.data(), vs.response.library.size(), error);
+     if (!vs_library) return failed("vs_library");
+     auto ps_library = metal.newLibrary(ps.response.library.data(), ps.response.library.size(), error);
+     if (!ps_library) return failed("ps_library");
+-    auto vs_function = vs_library.newFunction(vs.response.entry);
++    WMT::Reference<WMT::Function> vs_function;
++    if (vertex_values.empty()) {
++      vs_function = vs_library.newFunction(vs.response.entry);
++    } else {
++      // The input layout reaches the function as Metal function constants: Metal
++      // specializes the ready library, the translator never sees the layout.
++      std::vector<WMTFunctionConstant> constants(vertex_values.size());
++      for (size_t i = 0; i < vertex_values.size(); i++) {
++        constants[i] = {};
++        constants[i].data.set(&vertex_values[i]);
++        constants[i].type = WMTDataTypeUInt;
++        constants[i].index = uint16_t(vs.response.inputs[i / 4].location * 4 + i % 4);
++      }
++      vs_function = vs_library.newFunctionWithConstants(vs.response.entry, constants.data(),
++                                                        uint32_t(constants.size()), error);
++    }
+     auto ps_function = ps_library.newFunction(ps.response.entry);
+     if (!vs_function || !ps_function) return failed(vs_function ? "ps_entry" : "vs_entry");
+     info.vertex_function = vs_function.handle;
+@@ -1539,16 +1614,19 @@ public:
+     if (!pso) return failed("render_pipeline");
+     InitializeDSSO(pDesc);
+     InitializeRasterizerState(pDesc);
++    slot_mask = vertex_slots; // the draw side builds the vertex buffer table from it
+     translated_by = &source;
+     char vs_library_sha1[41], ps_library_sha1[41];
+     shader_source::Sha1Hex(vs.response.library.data(), vs.response.library.size(), vs_library_sha1);
+     shader_source::Sha1Hex(ps.response.library.data(), ps.response.library.size(), ps_library_sha1);
+     shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s vs=%s vs_entry=%s vs_library_sha1=%s "
+-                         "vs_library_bytes=%llu ps=%s ps_entry=%s ps_library_sha1=%s ps_library_bytes=%llu native=%llx\n",
++                         "vs_library_bytes=%llu ps=%s ps_entry=%s ps_library_sha1=%s ps_library_bytes=%llu native=%llx "
++                         "root=%s vs_resources=%u ps_resources=%u vertex_inputs=%u vertex_slots=%08x\n",
+                          static_cast<void *>(this), source.name, vs.request.key, vs.response.entry, vs_library_sha1,
+                          (unsigned long long)vs.response.library.size(), ps.request.key, ps.response.entry,
+                          ps_library_sha1, (unsigned long long)ps.response.library.size(),
+-                         (unsigned long long)pso.handle);
++                         (unsigned long long)pso.handle, vs.request.root ? vs.request.root_key : "none",
++                         vs.response.resources, ps.response.resources, vs.response.vertex_inputs, vertex_slots);
+     return S_OK;
+   }
+ 
+diff --git a/src/d3d12/d3d12_shader_source.hpp b/src/d3d12/d3d12_shader_source.hpp
+index 0afbbeb..2d33cce 100644
+--- a/src/d3d12/d3d12_shader_source.hpp
++++ b/src/d3d12/d3d12_shader_source.hpp
+@@ -19,13 +19,29 @@
+ // the pipeline: an error of our own shader is never hidden behind the legacy
+ // path.
+ //
++// A translated function follows the binding convention of the legacy path, so
++// the draw side does not know which path built the pipeline: root arguments in
++// buffer slot 0, static samplers in slot 1, the vertex buffer table in slot 2,
++// 32-byte descriptors in the tables. Vertex functions pull their inputs
++// themselves; which table entry, offset, format and step an input uses comes
++// from the pipeline's input layout through four Metal function constants per
++// input location (4 * location + 0..3: entry, byte offset, MTLAttributeFormat,
++// step rate with 0xffffffff for per-vertex data).
++//
+ // Providers:
+-//   own   ready libraries of our DXIL -> Metal translator, found by the SHA-1
+-//         of the shader container in MACRUNNER_DX12_OWN_SHADER_DIR:
+-//           <sha1>.<ps|vs|gs|hs|ds|cs>.metallib   Metal library
+-//           <sha1>.<stage>.desc                   text: format=1, entry=, resources=, vertex_inputs=
++//   own   ready libraries of our DXIL -> Metal translator in
++//         MACRUNNER_DX12_OWN_SHADER_DIR, found by the SHA-1 of the shader
++//         container and, when the function reads root arguments, the SHA-1 of
++//         the RTS0 part of the pipeline's root signature:
++//           <shader>.<root>.<ps|vs|gs|hs|ds|cs>.metallib   reads root arguments
++//           <shader>.<stage>.metallib                      reads none
++//           the same name with .desc                       text, see ParseDescription
++//         MACRUNNER_DX12_OWN_SHADER_REQUEST_DIR (optional): every missing
++//         translation leaves its inputs there for the offline translator:
++//           <shader>.<stage>.dxbc, <root>.rts0, and a line in requests.txt
+ 
+ #include "d3d12_device.hpp"
++#include "DXBCParser/DXBCUtils.h"
+ #include "sha1/sha1_util.hpp"
+ #include <cstdio>
+ #include <cstdlib>
+@@ -37,17 +53,30 @@ namespace dxmt::shader_source {
+ 
+ struct Request {
+   D3D12_SHADER_BYTECODE shader; // container exactly as the application passed it
+-  const void *root;             // serialized root signature of the pipeline; null without one
++  const void *root;             // RTS0 part of the pipeline's root signature; null without one
+   size_t root_size;
+   uint32_t stage;               // D3D10_SB_TOKENIZED_PROGRAM_TYPE: ps 0, vs 1, gs 2, hs 3, ds 4, cs 5
+   char key[41];                 // SHA-1 of the container, lower-case hex
++  char root_key[41];            // SHA-1 of the RTS0 part; empty without a root signature
++};
++
++// One input of a vertex function: what the input layout must feed, by semantic.
++struct VertexInput {
++  uint32_t location = 0;       // function constants 4 * location + 0..3
++  uint32_t semantic_index = 0;
++  char semantic[64] = {};
+ };
+ 
+ struct Response {
+   std::vector<uint8_t> library; // Metal library, "MTLB"
+   char entry[128] = {};         // function name inside the library
+-  uint32_t resources = 0;       // resource bindings the function reads
+-  uint32_t vertex_inputs = 0;   // attributes the function expects from a vertex descriptor
++  uint32_t format = 0;          // description format: 1 binds nothing, 2 follows the legacy convention
++  uint32_t resources = 0;       // resources the function reads through the root arguments
++  uint32_t vertex_inputs = 0;   // inputs the function pulls from the vertex buffer table
++  char root[41] = {};           // format 2: SHA-1 of the RTS0 part the function was translated for; empty = none
++  uint32_t root_qwords = 0;     // format 2: 64-bit words of the root argument buffer the function assumes
++  std::vector<VertexInput> inputs;
++  uint32_t threads[3] = {};     // format 2, compute: thread group size
+ };
+ 
+ struct Provider {
+@@ -102,6 +131,13 @@ Legacy(const Provider &provider, const char *pipeline, const void *owner, const
+ 
+ namespace own {
+ 
++inline std::string
++Environment(const char *name) {
++  char value[1024];
++  const DWORD length = GetEnvironmentVariableA(name, value, sizeof(value));
++  return length && length < sizeof(value) ? std::string(value, length) : std::string();
++}
++
+ // 0: read. 1: no such file. 2: unreadable, empty or larger than `limit`.
+ inline int
+ Read(const std::string &path, size_t limit, std::vector<uint8_t> &bytes) {
+@@ -122,10 +158,40 @@ Read(const std::string &path, size_t limit, std::vector<uint8_t> &bytes) {
+   return complete ? 0 : 2;
+ }
+ 
++inline void
++Write(const std::string &path, const void *data, size_t size, bool append) {
++  HANDLE file = CreateFileA(path.c_str(), append ? FILE_APPEND_DATA : GENERIC_WRITE, FILE_SHARE_READ, nullptr,
++                            append ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
++  if (file == INVALID_HANDLE_VALUE) return;
++  DWORD written;
++  WriteFile(file, data, DWORD(size), &written, nullptr);
++  CloseHandle(file);
++}
++
++// Leaves what the offline translator needs to produce the missing translation.
++inline void
++LeaveRequest(const Request &request) {
++  static const std::string directory = Environment("MACRUNNER_DX12_OWN_SHADER_REQUEST_DIR");
++  if (directory.empty()) return;
++  const std::string stage = StageName(request.stage);
++  Write(directory + "\\" + request.key + "." + stage + ".dxbc", request.shader.pShaderBytecode,
++        request.shader.BytecodeLength, false);
++  if (request.root) Write(directory + "\\" + request.root_key + ".rts0", request.root, request.root_size, false);
++  const std::string line = "stage=" + stage + " shader=" + request.key + " root=" +
++                           (request.root ? request.root_key : "none") + "\r\n";
++  Write(directory + "\\requests.txt", line.data(), line.size(), true);
++}
++
++// format=1 (first milestone, binds nothing):
++//   entry=<name>  resources=<n>  vertex_inputs=<n>
++// format=2 (legacy binding convention):
++//   entry=<name>
++//   root=<sha1 of the RTS0 part | none>   root_qwords=<n>   resources=<n>
++//   vertex_inputs=<n>   then n lines   vin=<location> <semantic index> <semantic>
++//   threads=<x> <y> <z>                   compute only
+ inline bool
+ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+   const std::string text(bytes.begin(), bytes.end());
+-  unsigned long format = 0;
+   unsigned seen = 0;
+   for (size_t at = 0; at < text.size();) {
+     size_t end = text.find('\n', at);
+@@ -137,7 +203,7 @@ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+     if (equals == std::string::npos) continue;
+     const std::string name = line.substr(0, equals), value = line.substr(equals + 1);
+     if (name == "format") {
+-      format = std::strtoul(value.c_str(), nullptr, 10);
++      response.format = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
+     } else if (name == "entry") {
+       if (value.empty() || value.size() >= sizeof(response.entry)) return false;
+       std::memcpy(response.entry, value.c_str(), value.size() + 1);
+@@ -148,35 +214,57 @@ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+     } else if (name == "vertex_inputs") {
+       response.vertex_inputs = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
+       seen |= 4;
++    } else if (name == "root") {
++      if (value != "none") {
++        if (value.size() != 40) return false;
++        std::memcpy(response.root, value.c_str(), 41);
++      }
++      seen |= 8;
++    } else if (name == "root_qwords") {
++      response.root_qwords = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++    } else if (name == "vin") {
++      VertexInput input;
++      char semantic[64] = {};
++      if (std::sscanf(value.c_str(), "%u %u %63s", &input.location, &input.semantic_index, semantic) != 3 ||
++          input.location >= 32)
++        return false;
++      std::memcpy(input.semantic, semantic, sizeof(semantic));
++      response.inputs.push_back(input);
++    } else if (name == "threads") {
++      if (std::sscanf(value.c_str(), "%u %u %u", &response.threads[0], &response.threads[1], &response.threads[2]) != 3)
++        return false;
+     }
+   }
+-  return format == 1 && seen == 7;
++  if (response.format == 1) return seen == 7;
++  return response.format == 2 && seen == 15 && response.inputs.size() == response.vertex_inputs &&
++         (response.root[0] || !response.resources);
+ }
+ 
+ inline HRESULT
+ Fetch(const Request &request, Response &response, std::string &missing) {
+-  static const std::string directory = [] {
+-    char value[1024];
+-    const DWORD length = GetEnvironmentVariableA("MACRUNNER_DX12_OWN_SHADER_DIR", value, sizeof(value));
+-    return length && length < sizeof(value) ? std::string(value, length) : std::string();
+-  }();
++  static const std::string directory = Environment("MACRUNNER_DX12_OWN_SHADER_DIR");
+   if (directory.empty()) {
+     missing = "MACRUNNER_DX12_OWN_SHADER_DIR";
+     return S_FALSE;
+   }
+-  const std::string name = std::string(request.key) + "." + StageName(request.stage);
+-  switch (Read(directory + "\\" + name + ".metallib", 64u << 20, response.library)) {
+-  case 0:
+-    break;
+-  case 1:
+-    missing = name + ".metallib";
+-    return S_FALSE;
+-  default:
+-    return E_FAIL;
++  // The translation made for this root signature first, then the one that reads no root arguments.
++  const std::string stage = StageName(request.stage);
++  std::string name = std::string(request.key) + "." + request.root_key + "." + stage;
++  int read = request.root ? Read(directory + "\\" + name + ".metallib", 64u << 20, response.library) : 1;
++  if (read == 1) {
++    missing = request.root ? name + ".metallib" : std::string();
++    name = std::string(request.key) + "." + stage;
++    read = Read(directory + "\\" + name + ".metallib", 64u << 20, response.library);
++    if (read == 1) {
++      missing = missing.empty() ? name + ".metallib" : missing + "|" + name + ".metallib";
++      LeaveRequest(request);
++      return S_FALSE;
++    }
+   }
++  if (read) return E_FAIL;
+   // A library without its description is a broken translation, not a missing one.
+   std::vector<uint8_t> description;
+-  if (Read(directory + "\\" + name + ".desc", 4096, description) || !ParseDescription(description, response))
++  if (Read(directory + "\\" + name + ".desc", 16384, description) || !ParseDescription(description, response))
+     return E_FAIL;
+   return S_OK;
+ }
+@@ -205,9 +293,9 @@ Selected() {
+   return selected;
+ }
+ 
+-// One stage through the provider. S_OK: `shader` holds a translation admitted
+-// by the first milestone, which binds no resources and feeds no vertex
+-// attributes. S_FALSE: the legacy path builds the pipeline (reason on stderr).
++// One stage through the provider. S_OK: `shader` holds a translation this
++// pipeline can use. S_FALSE: the legacy path builds the pipeline (reason on
++// stderr). Failure: the translation exists and is broken.
+ inline HRESULT
+ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_SHADER_BYTECODE bytecode,
+       uint32_t stage, MTLD3D12RootSignature *root, Shader &shader) {
+@@ -216,15 +304,25 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+     ~PreserveLastError() { SetLastError(value); }
+   } preserve_last_error;
+   if (!bytecode.pShaderBytecode || !bytecode.BytecodeLength) return E_INVALIDARG;
+-  shader.request = {bytecode, nullptr, 0, stage, {}};
+-  if (root) shader.request.root_size = root->GetBlob(&shader.request.root);
++  shader.request = {bytecode, nullptr, 0, stage, {}, {}};
++  if (root) {
++    const void *blob = nullptr;
++    UINT size = 0;
++    if (root->GetBlob(&blob) && SUCCEEDED(microsoft::DXBCGetRootSignature(blob, &shader.request.root, &size)) &&
++        shader.request.root && size) {
++      shader.request.root_size = size;
++      Sha1Hex(shader.request.root, size, shader.request.root_key);
++    } else {
++      shader.request.root = nullptr;
++    }
++  }
+   Sha1Hex(bytecode.pShaderBytecode, bytecode.BytecodeLength, shader.request.key);
+   std::string missing;
+   const HRESULT hr = provider.fetch(shader.request, shader.response, missing);
+-  char detail[256];
++  char detail[320];
+   if (hr == S_FALSE) {
+-    std::snprintf(detail, sizeof(detail), "stage=%s shader=%s missing=%s", StageName(stage), shader.request.key,
+-                  missing.c_str());
++    std::snprintf(detail, sizeof(detail), "stage=%s shader=%s root=%s missing=%s", StageName(stage),
++                  shader.request.key, shader.request.root ? shader.request.root_key : "none", missing.c_str());
+     return Legacy(provider, pipeline, owner, "no_translation", detail);
+   }
+   const auto &response = shader.response;
+@@ -234,11 +332,22 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+           pipeline, owner, provider.name, StageName(stage), shader.request.key, unsigned(hr));
+     return FAILED(hr) ? hr : E_FAIL;
+   }
+-  if (response.resources || response.vertex_inputs) {
+-    std::snprintf(detail, sizeof(detail), "stage=%s shader=%s resources=%u vertex_inputs=%u", StageName(stage),
+-                  shader.request.key, response.resources, response.vertex_inputs);
++  std::snprintf(detail, sizeof(detail), "stage=%s shader=%s format=%u resources=%u vertex_inputs=%u root=%s",
++                StageName(stage), shader.request.key, response.format, response.resources, response.vertex_inputs,
++                response.root[0] ? response.root : "none");
++  // Format 1 knows no binding convention: it is admitted only when it binds nothing.
++  if (response.format == 1 && (response.resources || response.vertex_inputs))
+     return Legacy(provider, pipeline, owner, "translation_not_admitted", detail);
++  // A function translated for one root signature reads garbage under another.
++  if (response.root[0] && (!shader.request.root || std::strcmp(response.root, shader.request.root_key) ||
++                           !root || response.root_qwords != root->UploadQwords)) {
++    Trace("dx12_shader_source pipeline=%s owner=%p source=%s failed=root_signature_mismatch %s pipeline_root=%s "
++          "pipeline_qwords=%u translation_qwords=%u\n",
++          pipeline, owner, provider.name, detail, shader.request.root ? shader.request.root_key : "none",
++          root ? unsigned(root->UploadQwords) : 0u, response.root_qwords);
++    return E_FAIL;
+   }
++  if (response.vertex_inputs && stage != 1) return Legacy(provider, pipeline, owner, "translation_not_admitted", detail);
+   return S_OK;
+ }
+ 

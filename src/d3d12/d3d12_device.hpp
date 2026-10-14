@@ -542,9 +542,15 @@ public:
   WMT::Reference<WMT::ComputePipelineState> binary_resolve;
 };
 
+namespace shader_source {
+struct Provider;
+}
+
 class MTLD3D12PipelineState : public ID3D12PipelineState {
 public:
   UINT IsComputePipelineState;
+  // Shader source that built this pipeline (d3d12_shader_source.hpp); null = legacy path.
+  const shader_source::Provider *translated_by = nullptr;
 
   static HRESULT
   InitializeShader(D3D12_SHADER_BYTECODE Bytecode, sm50_shader_t *ppShader, struct MTL_SHADER_REFLECTION *pRefl);

@@ -23,6 +23,7 @@
 #include "d3d12_pageable.hpp"
 #include "d3d12_pipeline.hpp"
 #include "d3d12_shader_capture.hpp"
+#include "d3d12_shader_source.hpp"
 #include "d3d12_gs_passthrough.hpp"
 #include "dxmt_format.hpp"
 #include "com/com_object.hpp"
@@ -1293,6 +1294,10 @@ protected:
 
 public:
   uint32_t capture_id = 0;
+  // What the shader source did with this object, for CreateGraphicsPipelineState.
+  bool force_legacy = false;             // the source is not asked: rebuild after its failure
+  uint8_t provider_state = 0;            // 0 not asked, 1 declined (the legacy path builds), 2 in charge
+  const char *provider_reason = nullptr; // why it declined or failed (a name of stats::kReasons)
 
   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
       MTLD3D12Pageable<MTLD3D12GraphicsPipelineState>(pDevice) {
@@ -1492,16 +1497,243 @@ public:
     forced_sample_count = pDesc->RasterizerState.ForcedSampleCount;
   }
 
+  // What the input layout feeds every vertex input the translated function pulls: four
+  // function constants per input (d3d12_shader_source.hpp), computed by the rules of
+  // ExtractMTLInputLayoutElements. `slots` is the slot mask the vertex buffer table is built from.
+  HRESULT
+  TranslatedVertexInputs(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const shader_source::Response &vs,
+                         uint32_t &slots, std::vector<uint32_t> &values) {
+    struct Element {
+      uint32_t slot = 0, offset = 0, format = 0, step = 0;
+      bool present = false;
+    };
+    std::vector<Element> elements(vs.inputs.size());
+    uint16_t append_offset[32] = {0};
+    slots = 0;
+    for (UINT j = 0; j < pDesc->InputLayout.NumElements; j++) {
+      const auto &desc = pDesc->InputLayout.pInputElementDescs[j];
+      if (!desc.SemanticName || desc.InputSlot >= 32) return E_INVALIDARG;
+      MTL_DXGI_FORMAT_DESC format;
+      if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), desc.Format, format))) return E_FAIL;
+      if (!format.AttributeFormat || !format.BytesPerTexel) return E_INVALIDARG;
+      const uint32_t offset = desc.AlignedByteOffset == D3D12_APPEND_ALIGNED_ELEMENT
+                                  ? align(append_offset[desc.InputSlot], std::min(4u, format.BytesPerTexel))
+                                  : desc.AlignedByteOffset;
+      append_offset[desc.InputSlot] = offset + format.BytesPerTexel;
+      for (size_t i = 0; i < vs.inputs.size(); i++) {
+        if (vs.inputs[i].semantic_index != desc.SemanticIndex || strcasecmp(vs.inputs[i].semantic, desc.SemanticName))
+          continue;
+        elements[i] = {desc.InputSlot, offset, uint32_t(format.AttributeFormat),
+                       desc.InputSlotClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? desc.InstanceDataStepRate
+                                                                                           : 0xffffffffu,
+                       true};
+        slots |= 1u << desc.InputSlot;
+        break; // the shader has no such input: the element is skipped, as on the legacy path
+      }
+    }
+    values.clear();
+    for (const auto &element : elements) {
+      // The function reads an input the layout does not feed.
+      if (!element.present) return E_INVALIDARG;
+      values.push_back(uint32_t(__builtin_popcount(slots & ((1u << element.slot) - 1u)))); // entry of the table
+      values.push_back(element.offset);
+      values.push_back(element.format);
+      values.push_back(element.step);
+    }
+    return S_OK;
+  }
+
+  // Stage functions of a pipeline built from ready translations of the selected shader source
+  // (d3d12_shader_source.hpp). The pipeline itself is described by the same code as on the
+  // legacy path (Initialize): only where the stage functions come from and what pipeline state
+  // is handed to them differs.
+  struct TranslatedStages {
+    const shader_source::Provider *source = nullptr; // null: the legacy translator makes the stages
+    shader_source::Shader vs, ps;
+    bool pixel = false; // the pipeline has a pixel stage
+  };
+
+  // Class of a colour target format as the legacy translator sees it: 'f', 'i' or 'u'.
+  static char
+  ColorClass(WMTPixelFormat format) {
+    switch (format) {
+    case WMTPixelFormatR8Uint:
+    case WMTPixelFormatR16Uint:
+    case WMTPixelFormatRG8Uint:
+    case WMTPixelFormatR32Uint:
+    case WMTPixelFormatRG16Uint:
+    case WMTPixelFormatRGBA8Uint:
+    case WMTPixelFormatRGB10A2Uint:
+    case WMTPixelFormatRG32Uint:
+    case WMTPixelFormatRGBA16Uint:
+    case WMTPixelFormatRGBA32Uint:
+      return 'u';
+    case WMTPixelFormatR8Sint:
+    case WMTPixelFormatR16Sint:
+    case WMTPixelFormatRG8Sint:
+    case WMTPixelFormatR32Sint:
+    case WMTPixelFormatRG16Sint:
+    case WMTPixelFormatRGBA8Sint:
+    case WMTPixelFormatRG32Sint:
+    case WMTPixelFormatRGBA16Sint:
+    case WMTPixelFormatRGBA32Sint:
+      return 'i';
+    default:
+      return 'f';
+    }
+  }
+
+  // Asks the selected source for the stages of this pipeline. S_OK: `stages` holds them.
+  // S_FALSE: the legacy path builds the pipeline (the reason is already on stderr).
+  HRESULT
+  SelectTranslated(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const shader_source::Provider &source,
+                   TranslatedStages &stages) {
+    // Stages no source serves: tessellation and geometry pipelines stay on the legacy path.
+    if (pDesc->GS.pShaderBytecode || pDesc->GS.BytecodeLength || pDesc->HS.pShaderBytecode ||
+        pDesc->HS.BytecodeLength || pDesc->DS.pShaderBytecode || pDesc->DS.BytecodeLength) {
+      provider_reason = pDesc->GS.pShaderBytecode || pDesc->GS.BytecodeLength ? "stage_not_served_geometry"
+                                                                              : "stage_not_served_tessellation";
+      return shader_source::Legacy(source, "graphics", this, "stage_not_served", "stages=gs|hs|ds");
+    }
+    if (!pDesc->VS.pShaderBytecode || !pDesc->VS.BytecodeLength) {
+      provider_reason = "stage_not_served_no_vs";
+      return shader_source::Legacy(source, "graphics", this, "stage_not_served", "stages=no_vs");
+    }
+    provider_reason = "invalid_state";
+    // Bounds the code below indexes by.
+    if (pDesc->NumRenderTargets > 8 || pDesc->InputLayout.NumElements > 32 ||
+        (pDesc->InputLayout.NumElements && !pDesc->InputLayout.pInputElementDescs))
+      return E_INVALIDARG;
+    // Which pixel function is needed depends on blend state exactly as InitializePSO reads it.
+    WMTRenderPipelineInfo state;
+    WMT::InitializeRenderPipelineInfo(state);
+    bool dual_source_blending = false;
+    const HRESULT state_hr = InitializePSO(pDesc, state, dual_source_blending);
+    if (FAILED(state_hr)) return state_hr;
+    char variant[8];
+    shader_source::PixelVariant(dual_source_blending, pDesc->SampleMask, variant);
+    stages.pixel = pDesc->PS.pShaderBytecode != nullptr;
+    auto root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+    // Both stages are asked before giving up, so one pass names (and requests) every missing translation.
+    const HRESULT vs_hr = shader_source::Fetch(source, "graphics", this, pDesc->VS,
+                                               microsoft::D3D10_SB_VERTEX_SHADER, root, stages.vs);
+    const HRESULT ps_hr = stages.pixel ? shader_source::Fetch(source, "graphics", this, pDesc->PS,
+                                                              microsoft::D3D10_SB_PIXEL_SHADER, root, stages.ps, variant)
+                                       : S_OK;
+    provider_reason = FAILED(vs_hr) || (vs_hr != S_OK && SUCCEEDED(ps_hr)) ? stages.vs.reason : stages.ps.reason;
+    if (FAILED(vs_hr)) return vs_hr;
+    if (FAILED(ps_hr)) return ps_hr;
+    // One stage from the source and the other from the legacy translator would not link.
+    if (vs_hr != S_OK || ps_hr != S_OK) return S_FALSE;
+    provider_reason = nullptr;
+    stages.source = &source;
+    return S_OK;
+  }
+
+  HRESULT
+  TranslatedFailure(const TranslatedStages &stages, const char *step, WMT::Object error, HRESULT hr = E_FAIL) {
+    provider_reason = step;
+    shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s failed=%s vs=%s ps=%s error=%.300s\n",
+                         static_cast<void *>(this), stages.source->name, step, stages.vs.request.key,
+                         stages.pixel ? stages.ps.request.key : "none",
+                         error.handle ? error.description().getUTF8String().c_str() : "none");
+    return hr;
+  }
+
+  // The vertex function of a translated pipeline. What the legacy path compiles into its vertex
+  // function (SM50_SHADER_IA_INPUT_LAYOUT) reaches the ready function as Metal function constants.
+  HRESULT
+  TranslatedVertexFunction(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const TranslatedStages &stages,
+                           WMT::Reference<WMT::Function> &function) {
+    const auto &vs = stages.vs.response;
+    WMT::Error error; // NSError results are borrowed, not owned References.
+    uint32_t vertex_slots = 0;
+    std::vector<uint32_t> vertex_values;
+    const HRESULT hr = TranslatedVertexInputs(pDesc, vs, vertex_slots, vertex_values);
+    if (FAILED(hr)) return TranslatedFailure(stages, "vertex_inputs", error, hr);
+    auto library = shader_source::MakeLibrary(device_->GetMTLDevice(), vs, error);
+    if (!library) return TranslatedFailure(stages, "vs_library", error);
+    if (vertex_values.empty()) {
+      function = library.newFunction(vs.entry);
+    } else {
+      // Metal specializes the ready library; the translator never sees the layout.
+      std::vector<WMTFunctionConstant> constants(vertex_values.size());
+      for (size_t i = 0; i < vertex_values.size(); i++) {
+        constants[i] = {};
+        constants[i].data.set(&vertex_values[i]);
+        constants[i].type = WMTDataTypeUInt;
+        constants[i].index = uint16_t(vs.inputs[i / 4].location * 4 + i % 4);
+      }
+      function = library.newFunctionWithConstants(vs.entry, constants.data(), uint32_t(constants.size()), error);
+    }
+    if (!function) return TranslatedFailure(stages, "vs_entry", error);
+    slot_mask = vertex_slots; // the draw side builds the vertex buffer table from it
+    return S_OK;
+  }
+
+  // The pixel function of a translated pipeline. What the legacy path compiles into its pixel
+  // function (SM50_SHADER_PSO_PIXEL_SHADER) is covered by the variant chosen in SelectTranslated,
+  // the sample mask constant and the target type check.
+  template <typename RenderPipelineInfo>
+  HRESULT
+  TranslatedPixelFunction(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const TranslatedStages &stages,
+                          const RenderPipelineInfo &info, bool dual_source_blending,
+                          WMT::Reference<WMT::Function> &function) {
+    const auto &ps = stages.ps.response;
+    WMT::Error error; // NSError results are borrowed, not owned References.
+    // The legacy translator retypes every output to the class of its target format (and keeps the
+    // declared type under dual-source blending). A ready function keeps the declared type.
+    if (!dual_source_blending && ps.colors[0]) {
+      for (unsigned i = 0; i < 8; i++) {
+        const auto format = WMTPixelFormat(ORIGINAL_FORMAT(info.colors[i].pixel_format));
+        if (format == WMTPixelFormatInvalid || ps.colors[i] == '-' || ps.colors[i] == ColorClass(format)) continue;
+        shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s failed=target_type_mismatch "
+                             "ps=%s target=%u declared=%c target_class=%c\n",
+                             static_cast<void *>(this), stages.source->name, stages.ps.request.key, i, ps.colors[i],
+                             ColorClass(format));
+        provider_reason = "target_type_mismatch";
+        return E_FAIL;
+      }
+    }
+    auto library = shader_source::MakeLibrary(device_->GetMTLDevice(), ps, error);
+    if (!library) return TranslatedFailure(stages, "ps_library", error);
+    if (pDesc->SampleMask != 0xffffffffu) {
+      // The variant "sm" has a coverage output and takes the mask as a function constant.
+      const uint32_t sample_mask = pDesc->SampleMask;
+      WMTFunctionConstant constant = {};
+      constant.data.set(&sample_mask);
+      constant.type = WMTDataTypeUInt;
+      constant.index = shader_source::kSampleMaskConstant;
+      function = library.newFunctionWithConstants(ps.entry, &constant, 1, error);
+    } else {
+      function = library.newFunction(ps.entry);
+    }
+    if (!function) return TranslatedFailure(stages, "ps_entry", error);
+    return S_OK;
+  }
+
   virtual HRESULT
   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
     if (!pDesc || (pDesc->pRootSignature && static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->IsLocal))
       return E_INVALIDARG;
+    // Where the stage functions come from. Everything else below is the same for both sources.
+    TranslatedStages translated;
+    if (const auto *source = force_legacy ? nullptr : shader_source::Selected()) {
+      const HRESULT selected = SelectTranslated(pDesc, *source, translated);
+      provider_state = selected == S_FALSE ? 1 : 2;
+      if (FAILED(selected)) return selected;
+    }
     D3D12_GRAPHICS_PIPELINE_STATE_DESC compiled_desc = *pDesc;
     std::vector<uint8_t> compiled_vs, compiled_ps, compiled_hs, compiled_ds, compiled_gs;
-    const HRESULT vs_artifact = LoadDiagnosticDXILArtifact(pDesc->VS, 1, compiled_vs, compiled_desc.VS);
-    const HRESULT ps_artifact = LoadDiagnosticDXILArtifact(pDesc->PS, 0, compiled_ps, compiled_desc.PS);
-    const HRESULT hs_artifact = LoadDiagnosticDXILArtifact(pDesc->HS, 3, compiled_hs, compiled_desc.HS);
-    const HRESULT ds_artifact = LoadDiagnosticDXILArtifact(pDesc->DS, 4, compiled_ds, compiled_desc.DS);
+    // A pipeline built from translated stages takes nothing from the diagnostic artifact directory.
+    const auto artifact = [&](D3D12_SHADER_BYTECODE original, unsigned stage, std::vector<uint8_t> &storage,
+                              D3D12_SHADER_BYTECODE &result) -> HRESULT {
+      return translated.source ? S_FALSE : LoadDiagnosticDXILArtifact(original, stage, storage, result);
+    };
+    const HRESULT vs_artifact = artifact(pDesc->VS, 1, compiled_vs, compiled_desc.VS);
+    const HRESULT ps_artifact = artifact(pDesc->PS, 0, compiled_ps, compiled_desc.PS);
+    const HRESULT hs_artifact = artifact(pDesc->HS, 3, compiled_hs, compiled_desc.HS);
+    const HRESULT ds_artifact = artifact(pDesc->DS, 4, compiled_ds, compiled_desc.DS);
     if (vs_artifact != S_FALSE || ps_artifact != S_FALSE)
       TracePipelineCapture(capture_id, this, "dxil_artifact", "vs_hr=%08x ps_hr=%08x vs_bytes=%llu ps_bytes=%llu",
                            unsigned(vs_artifact), unsigned(ps_artifact),
@@ -1510,7 +1742,7 @@ public:
     if (FAILED(ps_artifact)) return ps_artifact;
     if (FAILED(hs_artifact)) return hs_artifact;
     if (FAILED(ds_artifact)) return ds_artifact;
-    const HRESULT gs_artifact = LoadDiagnosticDXILArtifact(pDesc->GS, 2, compiled_gs, compiled_desc.GS);
+    const HRESULT gs_artifact = artifact(pDesc->GS, 2, compiled_gs, compiled_desc.GS);
     if (FAILED(gs_artifact)) return gs_artifact;
     const bool translated_geometry = gs_artifact == S_OK;
     gs_point::Contract geometry_contract;
@@ -1710,7 +1942,10 @@ public:
     }
     const bool mesh_pipeline = tessellation || geometry;
 
-    if (pDesc->VS.pShaderBytecode) {
+    if (translated.source) {
+      if (FAILED(hr = TranslatedVertexFunction(pDesc, translated, vs_func)))
+        return hr;
+    } else if (pDesc->VS.pShaderBytecode) {
       if (FAILED(hr = initialize_stage("VS", pDesc->VS, &shader_vs, &ref_vs)))
         return hr;
       stage_linkage::VertexHullPlan vertex_link;
@@ -1929,14 +2164,20 @@ public:
     bool dual_source_blending = false;
 
     // InitializePSO consumes HasCoverageOutput, including when no PS is present.
-    if (pDesc->PS.pShaderBytecode && FAILED(hr = initialize_stage("PS", pDesc->PS, &shader_ps, &ref_ps)))
+    if (translated.source)
+      ref_ps.PixelShader.HasCoverageOutput = translated.pixel && translated.ps.response.coverage_output;
+    else if (pDesc->PS.pShaderBytecode && FAILED(hr = initialize_stage("PS", pDesc->PS, &shader_ps, &ref_ps)))
       return hr;
     hr = mesh_pipeline ? InitializePSO(pDesc, mesh_info, dual_source_blending)
                        : InitializePSO(pDesc, info, dual_source_blending);
     if (FAILED(hr))
       return hr;
 
-    if (pDesc->PS.pShaderBytecode) {
+    if (translated.source) {
+      if (translated.pixel &&
+          FAILED(hr = TranslatedPixelFunction(pDesc, translated, info, dual_source_blending, ps_func)))
+        return hr;
+    } else if (pDesc->PS.pShaderBytecode) {
       auto sha1 = Sha1HashState::compute(pDesc->PS.pShaderBytecode, pDesc->PS.BytecodeLength);
 
       std::string ps_name = "ps_main" + sha1.string().substr(0, 8);
@@ -2057,6 +2298,8 @@ public:
       }
 
       if (!pso) {
+        if (translated.source)
+          return TranslatedFailure(translated, "render_pipeline", WMT::Object(err.handle));
         ERR("Failed to create PSO: ", err.description().getUTF8String());
         return E_FAIL;
       }
@@ -2074,6 +2317,29 @@ public:
       // Draw topology counts input control points, not reflected output registers.
       tess_control_points = hs_declarations.input_control_points;
       tess_threads_per_patch = ref_hs.ThreadsPerPatch;
+    }
+
+    if (translated.source) {
+      const auto &vs = translated.vs, &ps = translated.ps;
+      translated_by = translated.source;
+      char vs_library_sha1[41], ps_library_sha1[41] = "none";
+      shader_source::Sha1Hex(vs.response.library.data(), vs.response.library.size(), vs_library_sha1);
+      if (translated.pixel)
+        shader_source::Sha1Hex(ps.response.library.data(), ps.response.library.size(), ps_library_sha1);
+      shader_source::Trace(
+          "dx12_shader_source pipeline=graphics owner=%p source=%s vs=%s vs_entry=%s vs_library_sha1=%s "
+          "vs_library_bytes=%llu ps=%s ps_entry=%s ps_library_sha1=%s ps_library_bytes=%llu native=%llx "
+          "root=%s vs_resources=%u ps_resources=%u vertex_inputs=%u vertex_slots=%08x ps_variant=%s "
+          "topology=%u targets=%u dsv=%u samples=%u sample_mask=%08x alpha_to_coverage=%u\n",
+          static_cast<void *>(this), translated.source->name, vs.request.key, vs.response.entry, vs_library_sha1,
+          (unsigned long long)vs.response.library.size(), translated.pixel ? ps.request.key : "none",
+          translated.pixel ? ps.response.entry : "none", ps_library_sha1,
+          (unsigned long long)(translated.pixel ? ps.response.library.size() : 0), (unsigned long long)pso.handle,
+          vs.request.root ? vs.request.root_key : "none", vs.response.resources,
+          translated.pixel ? ps.response.resources : 0u, vs.response.vertex_inputs, unsigned(slot_mask),
+          translated.pixel && ps.request.variant[0] ? ps.request.variant : "none",
+          unsigned(pDesc->PrimitiveTopologyType), unsigned(pDesc->NumRenderTargets), unsigned(pDesc->DSVFormat),
+          unsigned(pDesc->SampleDesc.Count), unsigned(pDesc->SampleMask), unsigned(info.alpha_to_coverage_enabled));
     }
 
     return S_OK;
@@ -2154,6 +2420,27 @@ CreateGraphicsPipelineState(
         (unsigned long long)pDesc->PS.BytecodeLength);
   }
   HRESULT hr = pso->Initialize(pDesc);
+  if (shader_source::Selected()) {
+    namespace stats = shader_source::stats;
+    const char *reason = pso->provider_reason ? pso->provider_reason : "pipeline_state";
+    if (pso->provider_state == 2 && FAILED(hr) && shader_source::FallbackEnabled()) {
+      // The source took the pipeline and could not build it: the legacy path builds it on a fresh object.
+      const HRESULT own_hr = hr;
+      auto legacy = Com(new MTLD3D12GraphicsPipelineStateImpl(pDevice));
+      legacy->capture_id = pso->capture_id;
+      legacy->force_legacy = true;
+      hr = legacy->Initialize(pDesc);
+      pso = std::move(legacy);
+      shader_source::FallbackLine("graphics", pso.ptr(), "failed", reason, own_hr, hr);
+      stats::Count(stats::Graphics, FAILED(hr) ? stats::LegacyFailed : stats::Fallback, reason);
+    } else if (pso->provider_state == 2) {
+      stats::Count(stats::Graphics, FAILED(hr) ? stats::Failed : stats::Own, reason);
+    } else if (pso->provider_state == 1) {
+      shader_source::FallbackLine("graphics", pso.ptr(), "declined", reason, S_FALSE, hr);
+      stats::Count(stats::Graphics, FAILED(hr) ? stats::LegacyFailed : stats::Declined, reason);
+    }
+    stats::Tick();
+  }
   if (FAILED(hr) && pso->capture_id) {
     TraceRejectedPipelineBytecode(pso->capture_id, pso.ptr(), "VS", pDesc->VS);
     TraceRejectedPipelineBytecode(pso->capture_id, pso.ptr(), "PS", pDesc->PS);

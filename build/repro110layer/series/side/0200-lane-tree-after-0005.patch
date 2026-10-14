@@ -1,0 +1,291 @@
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 951a86a..bfbb129 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -214,11 +214,11 @@ public:
+     threadgroup_size = {threads[0], threads[1], threads[2]};
+     translated_by = &source;
+     char library_sha1[41];
+-    shader_source::Sha1Hex(cs.response.library.data(), cs.response.library.size(), library_sha1);
++    const uint64_t library_bytes = shader_source::LibraryId(cs.response, library_sha1);
+     shader_source::Trace("dx12_shader_source pipeline=compute owner=%p source=%s cs=%s cs_entry=%s cs_library_sha1=%s "
+                          "cs_library_bytes=%llu native=%llx root=%s cs_resources=%u threads=%u,%u,%u\n",
+                          static_cast<void *>(this), source.name, cs.request.key, cs.response.entry, library_sha1,
+-                         (unsigned long long)cs.response.library.size(), (unsigned long long)pso.handle,
++                         (unsigned long long)library_bytes, (unsigned long long)pso.handle,
+                          cs.request.root ? cs.request.root_key : "none", cs.response.resources, threads[0],
+                          threads[1], threads[2]);
+     return S_OK;
+diff --git a/src/d3d12/d3d12_pipeline_graphics.cpp b/src/d3d12/d3d12_pipeline_graphics.cpp
+index d0d1478..dcad35e 100644
+--- a/src/d3d12/d3d12_pipeline_graphics.cpp
++++ b/src/d3d12/d3d12_pipeline_graphics.cpp
+@@ -2350,18 +2350,17 @@ public:
+       const auto &vs = translated.vs, &ps = translated.ps;
+       translated_by = translated.source;
+       char vs_library_sha1[41], ps_library_sha1[41] = "none";
+-      shader_source::Sha1Hex(vs.response.library.data(), vs.response.library.size(), vs_library_sha1);
+-      if (translated.pixel)
+-        shader_source::Sha1Hex(ps.response.library.data(), ps.response.library.size(), ps_library_sha1);
++      const uint64_t vs_library_bytes = shader_source::LibraryId(vs.response, vs_library_sha1);
++      const uint64_t ps_library_bytes = translated.pixel ? shader_source::LibraryId(ps.response, ps_library_sha1) : 0;
+       shader_source::Trace(
+           "dx12_shader_source pipeline=graphics owner=%p source=%s vs=%s vs_entry=%s vs_library_sha1=%s "
+           "vs_library_bytes=%llu ps=%s ps_entry=%s ps_library_sha1=%s ps_library_bytes=%llu native=%llx "
+           "root=%s vs_resources=%u ps_resources=%u vertex_inputs=%u vertex_slots=%08x ps_variant=%s "
+           "topology=%u targets=%u dsv=%u samples=%u sample_mask=%08x alpha_to_coverage=%u\n",
+           static_cast<void *>(this), translated.source->name, vs.request.key, vs.response.entry, vs_library_sha1,
+-          (unsigned long long)vs.response.library.size(), translated.pixel ? ps.request.key : "none",
++          (unsigned long long)vs_library_bytes, translated.pixel ? ps.request.key : "none",
+           translated.pixel ? ps.response.entry : "none", ps_library_sha1,
+-          (unsigned long long)(translated.pixel ? ps.response.library.size() : 0), (unsigned long long)pso.handle,
++          (unsigned long long)ps_library_bytes, (unsigned long long)pso.handle,
+           vs.request.root ? vs.request.root_key : "none", vs.response.resources,
+           translated.pixel ? ps.response.resources : 0u, vs.response.vertex_inputs, unsigned(slot_mask),
+           translated.pixel && ps.request.variant[0] ? ps.request.variant : "none",
+diff --git a/src/d3d12/d3d12_shader_source.hpp b/src/d3d12/d3d12_shader_source.hpp
+index 9e84784..4103d48 100644
+--- a/src/d3d12/d3d12_shader_source.hpp
++++ b/src/d3d12/d3d12_shader_source.hpp
+@@ -59,10 +59,16 @@
+ //
+ // Kind of the answer (MACRUNNER_DX12_OWN_SHADER_KIND, read once per process):
+ //   library   (default, also when unset) the ready Metal library files above, as always
+-//   source    MSL text: <shader>.<root>.<stage>[.<variant>].msl (or without root) next to the same
+-//             .desc, which then carries
++//   source    MSL text. The description (<shader>.<root>.<stage>[.<variant>].desc, or without root) marks the
++//             translation and carries
+ //                 kind=source          the answer is text; a .desc without it is a broken translation
+ //                 language=<M>.<m>     MSL language version the text is built with (3.1)
++//                 text=<sha1>          (optional) SHA-1 of the text, which is then <sha1>.msl in the same directory:
++//                                      one file per different text, however many descriptions name it. The layer
++//                                      does not read the text when the library for (text, language) already exists
++//                                      in the process, and refuses a text whose SHA-1 differs.
++//             Without text= the text is <shader>.<root>.<stage>[.<variant>].msl next to the description (as in the
++//             first revision of this answer).
+ //             The layer builds the library itself with that language version and every other compile
+ //             option at its default (the translator's text is written for it; the system default moves with
+ //             the OS), once per process for the same text and language. A build error fails the stage with
+@@ -126,7 +132,10 @@ constexpr uint32_t kLanguage31 = (3u << 16) | 1u;
+ struct Response {
+   Kind kind = Kind::Library;    // library: Metal library, "MTLB"; source: MSL text the layer builds a library from
+   uint32_t language = 0;        // source: MTLLanguageVersion (major << 16 | minor)
+-  std::vector<uint8_t> library; // Metal library, "MTLB" (kind library) or MSL text (kind source)
++  std::vector<uint8_t> library; // Metal library, "MTLB" (kind library) or MSL text (kind source; empty when text_ready)
++  char text[41] = {};           // source: SHA-1 of the text (description key `text`); empty = the text sits next to the description
++  uint64_t text_bytes = 0;      // source: length of the text
++  bool text_ready = false;      // source: the library for this text and language exists in the process; `library` is not read
+   char entry[128] = {};         // function name inside the library
+   uint32_t format = 0;          // description format: 1 binds nothing, 2 and 3 follow the legacy convention
+   uint32_t resources = 0;       // resources the function reads through the root arguments
+@@ -209,6 +218,38 @@ Legacy(const Provider &provider, const char *pipeline, const void *owner, const
+   return S_FALSE;
+ }
+ 
++// Libraries built from MSL text in this process, by SHA-1 of the text and the language version. Entries are never removed.
++namespace source_libraries {
++struct Built {
++  WMT::Reference<WMT::Library> library;
++  uint64_t bytes = 0; // length of the text
++};
++inline dxmt::mutex &
++Mutex() {
++  static dxmt::mutex mutex;
++  return mutex;
++}
++inline std::unordered_map<std::string, Built> &
++Map() {
++  static std::unordered_map<std::string, Built> built;
++  return built;
++}
++inline std::string
++Key(const char *sha1, uint32_t language) {
++  char key[41 + 9];
++  std::snprintf(key, sizeof(key), "%.40s:%x", sha1, unsigned(language));
++  return key;
++}
++inline bool
++Find(const std::string &key, Built &found) {
++  std::lock_guard<dxmt::mutex> lock(Mutex());
++  const auto it = Map().find(key);
++  if (it == Map().end()) return false;
++  found = it->second;
++  return true;
++}
++} // namespace source_libraries
++
+ namespace own {
+ 
+ inline std::string
+@@ -284,8 +325,8 @@ LeaveRequest(const Request &request) {
+ //   variant=<none|sm|ds|ds.sm>            what the function was translated as
+ //   coverage_output=<0|1>                 pixel only
+ //   colors=<8 characters f i u ->         pixel only
+-// kind=<library|source>, language=<M.m>  (any format) what the answer is and, for text, the language version;
+-//                                        read only when MACRUNNER_DX12_OWN_SHADER_KIND=source asks for text
++// kind=<library|source>, language=<M.m>, text=<sha1>  (any format) what the answer is and, for text, the language version
++//                                        and the SHA-1 of the text; read only when MACRUNNER_DX12_OWN_SHADER_KIND=source asks for text
+ inline bool
+ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+   const std::string text(bytes.begin(), bytes.end());
+@@ -340,6 +381,9 @@ ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
+       if (value == "source") response.kind = Kind::Source;
+       else if (value == "library") response.kind = Kind::Library;
+       else return false;
++    } else if (name == "text") {
++      if (value.size() != 40 || value.find_first_not_of("0123456789abcdef") != std::string::npos) return false;
++      std::memcpy(response.text, value.c_str(), 41);
+     } else if (name == "language") {
+       unsigned major = 0, minor = 0;
+       if (std::sscanf(value.c_str(), "%u.%u", &major, &minor) != 2 || !major || major > 255 || minor > 255) return false;
+@@ -369,6 +413,53 @@ SelectedKind() {
+   return kind;
+ }
+ 
++// Kind source. The description marks the translation (the text without it is not looked for); the text is then found by
++// the description's `text` key, or next to the description when it has none.
++inline HRESULT
++FetchText(const Request &request, Response &response, std::string &missing, const std::string &directory) {
++  const std::string stage =
++      std::string(StageName(request.stage)) + (request.variant[0] ? std::string(".") + request.variant : std::string());
++  std::vector<uint8_t> description;
++  std::string name = std::string(request.key) + "." + request.root_key + "." + stage;
++  int read = request.root ? Read(directory + "\\" + name + ".desc", 16384, description) : 1;
++  if (read == 1) {
++    missing = request.root ? name + ".desc" : std::string();
++    name = std::string(request.key) + "." + stage;
++    read = Read(directory + "\\" + name + ".desc", 16384, description);
++    if (read == 1) {
++      missing = missing.empty() ? name + ".desc" : missing + "|" + name + ".desc";
++      LeaveRequest(request);
++      return S_FALSE;
++    }
++  }
++  if (read || !ParseDescription(description, response)) return E_FAIL;
++  // The text needs its description to say so, and the language it is built with.
++  if (response.kind != Kind::Source || !response.language) return E_FAIL;
++  if (!response.text[0]) {
++    // The first revision's layout: the text of this translation only, next to its description.
++    if (Read(directory + "\\" + name + ".msl", 64u << 20, response.library)) return E_FAIL;
++    response.text_bytes = response.library.size();
++    return S_OK;
++  }
++  source_libraries::Built built;
++  if (source_libraries::Find(source_libraries::Key(response.text, response.language), built)) {
++    response.text_ready = true; // the library exists in this process: the text is not read again
++    response.text_bytes = built.bytes;
++    return S_OK;
++  }
++  // A description that names a text which is not there, or is another one, is a broken translation.
++  if (Read(directory + "\\" + response.text + ".msl", 64u << 20, response.library)) return E_FAIL;
++  char actual[41];
++  Sha1Hex(response.library.data(), response.library.size(), actual);
++  if (std::strcmp(actual, response.text)) {
++    Trace("dx12_shader_source failed=text_mismatch shader=%s description_text=%.40s actual=%.40s\n", request.key,
++          response.text, actual);
++    return E_FAIL;
++  }
++  response.text_bytes = response.library.size();
++  return S_OK;
++}
++
+ inline HRESULT
+ Fetch(const Request &request, Response &response, std::string &missing) {
+   static const std::string directory = Environment("MACRUNNER_DX12_OWN_SHADER_DIR");
+@@ -377,7 +468,8 @@ Fetch(const Request &request, Response &response, std::string &missing) {
+     return S_FALSE;
+   }
+   const bool text = SelectedKind() == Kind::Source;
+-  const char *const extension = text ? ".msl" : ".metallib";
++  if (text) return FetchText(request, response, missing, directory);
++  const char *const extension = ".metallib";
+   // The translation made for this root signature first, then the one that reads no root arguments.
+   const std::string stage =
+       std::string(StageName(request.stage)) + (request.variant[0] ? std::string(".") + request.variant : std::string());
+@@ -398,13 +490,9 @@ Fetch(const Request &request, Response &response, std::string &missing) {
+   std::vector<uint8_t> description;
+   if (Read(directory + "\\" + name + ".desc", 16384, description) || !ParseDescription(description, response))
+     return E_FAIL;
+-  if (text) {
+-    // The text needs its description to say so, and the language it is built with.
+-    if (response.kind != Kind::Source || !response.language) return E_FAIL;
+-  } else {
+-    response.kind = Kind::Library; // kind and language of a description are for the text answer only
+-    response.language = 0;
+-  }
++  response.kind = Kind::Library; // kind, language and text of a description are for the text answer only
++  response.language = 0;
++  response.text[0] = 0;
+   return S_OK;
+ }
+ 
+@@ -479,7 +567,7 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+   const auto &response = shader.response;
+   // A function translated as one variant under the name of another is a broken translation.
+   const bool text = response.kind == Kind::Source;
+-  if (FAILED(hr) || response.library.size() < 16 || (!text && std::memcmp(response.library.data(), "MTLB", 4)) ||
++  if (FAILED(hr) || (response.library.size() < 16 && !response.text_ready) || (!text && std::memcmp(response.library.data(), "MTLB", 4)) ||
+       (text && !response.language) || !response.entry[0] || !std::memchr(response.entry, 0, sizeof(response.entry)) ||
+       std::strcmp(response.variant, variant) || (*variant && response.format != 3)) {
+     Trace("dx12_shader_source pipeline=%s owner=%p source=%s failed=unusable_translation stage=%s shader=%s hr=%08x\n",
+@@ -519,18 +607,19 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+ inline WMT::Reference<WMT::Library>
+ MakeLibrary(WMT::Device device, const Response &response, WMT::Error &error) {
+   if (response.kind != Kind::Source) return device.newLibrary(response.library.data(), response.library.size(), error);
+-  char key[41 + 9];
+-  Sha1Hex(response.library.data(), response.library.size(), key);
+-  std::snprintf(key + 40, 9, ":%x", unsigned(response.language));
+-  static dxmt::mutex mutex;
+-  static std::unordered_map<std::string, WMT::Reference<WMT::Library>> built;
+-  {
+-    std::lock_guard<dxmt::mutex> lock(mutex);
+-    const auto found = built.find(key);
+-    if (found != built.end()) {
+-      stats::CountSourceLibrary(false, 0);
+-      return found->second;
+-    }
++  char sha1[41];
++  if (response.text[0]) std::memcpy(sha1, response.text, 41);
++  else Sha1Hex(response.library.data(), response.library.size(), sha1);
++  const std::string key = source_libraries::Key(sha1, response.language);
++  source_libraries::Built found;
++  if (source_libraries::Find(key, found)) {
++    stats::CountSourceLibrary(false, 0);
++    return found.library;
++  }
++  if (response.text_ready) { // the library was there when the translation was fetched and entries are never removed
++    Trace("dx12_shader_source_compile_failed key=%.40s language=%x bytes=0 error=text_ready_without_library\n", sha1,
++          unsigned(response.language));
++    return WMT::Reference<WMT::Library>();
+   }
+   LARGE_INTEGER frequency, begin, end;
+   QueryPerformanceFrequency(&frequency);
+@@ -543,14 +632,25 @@ MakeLibrary(WMT::Device device, const Response &response, WMT::Error &error) {
+     std::string text = error.handle ? error.description().getUTF8String() : std::string("none");
+     for (auto &c : text)
+       if (c == '\n' || c == '\r') c = '|';
+-    Trace("dx12_shader_source_compile_failed key=%.40s language=%x bytes=%llu error=%.600s\n", key,
++    Trace("dx12_shader_source_compile_failed key=%.40s language=%x bytes=%llu error=%.600s\n", sha1,
+           unsigned(response.language), (unsigned long long)response.library.size(), text.c_str());
+     return library;
+   }
+   stats::CountSourceLibrary(true, uint64_t((end.QuadPart - begin.QuadPart) * 1000000 / frequency.QuadPart));
+-  std::lock_guard<dxmt::mutex> lock(mutex);
+-  built.emplace(key, library);
++  std::lock_guard<dxmt::mutex> lock(source_libraries::Mutex());
++  source_libraries::Map().emplace(key, source_libraries::Built{library, uint64_t(response.library.size())});
+   return library;
+ }
+ 
++// What the trace lines name as the response's library: its SHA-1 and length (for text kept by content, the text's own).
++inline uint64_t
++LibraryId(const Response &response, char sha1[41]) {
++  if (response.kind == Kind::Source && response.text[0]) {
++    std::memcpy(sha1, response.text, 41);
++    return response.text_bytes;
++  }
++  Sha1Hex(response.library.data(), response.library.size(), sha1);
++  return response.library.size();
++}
++
+ } // namespace dxmt::shader_source

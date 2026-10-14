@@ -1,0 +1,8 @@
+Application order of the shader-source seam patches on top of the baseline commit (git apply, no fuzz, one after the other):
+0001-OWN-SEAM-1A.patch        shader-source seam, provider own, triangles without resources (default off)
+0002-OWN-RESOURCES-2.patch    resources, vertex inputs, compute
+0003-OWN-ADMISSION-3.patch    wider admission
+0004-OWN-FALLBACK-4.patch     fall back to the regular path on provider failure; counters
+0005-OWN-SOURCE-5.patch       translated MSL source text, winemetal calls (macOS side: rebuild winemetal.dll and winemetal.so)
+The tessellation/geometry patch (layer-tess-gs) applies without fuzz on top of 0003 only; it conflicts with 0004 and 0005
+(1 region in d3d12_pipeline_graphics.cpp, 2 in d3d12_shader_source.hpp) and is therefore not part of this series.

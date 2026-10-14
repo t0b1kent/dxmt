@@ -1,0 +1,634 @@
+diff --git a/CHANGES-MACRUNNER.md b/CHANGES-MACRUNNER.md
+index 6236c89..d820b2e 100644
+--- a/CHANGES-MACRUNNER.md
++++ b/CHANGES-MACRUNNER.md
+@@ -251,3 +251,37 @@ only (depth target, MSAA 4x, sample mask, lines and points, vertex-only
+ pipeline, two targets, dual-source blending, 43 vertex input formats, typed
+ buffer views, UAV counters, unbounded resource arrays): pixels and words equal
+ to the regular path. No application has been run on it.
++
++### 2026-10-14: provider failures can fall back to the regular path; counters
++
++Two opt-in keys for running an application on provider `own`
++(`src/d3d12/d3d12_shader_source_stats.hpp`). Both are read once per process;
++with both unset nothing changes, except that the same translation request is
++now left once per process instead of once per pipeline creation.
++
++- `MACRUNNER_DX12_OWN_FALLBACK=1`: a pipeline the provider took and could not
++  build (unusable translation, root signature mismatch, target type mismatch,
++  input layout not feeding an input, Metal refusing a library, a function or
++  the pipeline state) is rebuilt by the regular path instead of failing. A
++  graphics pipeline is rebuilt on a fresh object; a compute pipeline continues
++  in the same object (nothing of the failed attempt is kept). Every pipeline
++  that ends on the regular path while a provider is selected leaves one line:
++  `dx12_shader_source_fallback pipeline=.. owner=.. cause=<declined|failed>
++  reason=<name> own_hr=.. legacy_hr=..`. With this key an SM5.0 container is
++  declined as `not_dxil` without leaving a request.
++- `MACRUNNER_DX12_OWN_STATS=<seconds>`: cumulative counters
++  `dx12_shader_source_stats ... graphics=<own>/<declined>/<fallback>/<failed>/
++  <legacy_failed> compute=... requests=<n> reasons=<name>:<graphics>/<compute>`
++  at most once per period (checked at pipeline creation and at Present, no
++  thread of its own), at device destruction and at module unload.
++
++Touched: `d3d12_shader_source.hpp`, `d3d12_shader_source_stats.hpp` (new),
++`d3d12_pipeline_graphics.cpp`, `d3d12_pipeline_compute.cpp`,
++`d3d12_command_queue.cpp` (one include, one line at Present),
++`d3d12_device.cpp` (one include, one call in the destructor).
++`d3d12_command_list.cpp` and the macOS side are unchanged.
++
++DIAGNOSTIC_ONLY. Checked by small D3D12 probes under Wine with injected
++provider failures (key off: the pipeline fails as before; key on: the regular
++path builds it from ready SM5.0 bytecode and the pixels equal the regular
++path). No application has been run on it.
+diff --git a/src/d3d12/d3d12_command_queue.cpp b/src/d3d12/d3d12_command_queue.cpp
+index 8ba8645..38005f0 100644
+--- a/src/d3d12/d3d12_command_queue.cpp
++++ b/src/d3d12/d3d12_command_queue.cpp
+@@ -25,6 +25,7 @@
+ #include "d3d12_fine_locks.hpp"
+ #include "d3d12_gpu_timing.hpp"
+ #include "d3d12_pipeline_timing.hpp"
++#include "d3d12_shader_source_stats.hpp"
+ #include "d3d12_command_capture.hpp"
+ #include "d3d12_submission_capture.hpp"
+ #include "d3d12_pageable.hpp"
+@@ -1919,6 +1920,7 @@ public:
+       cmdbuf.presentDrawableAfterMinimumDuration(drawable, after);
+     else
+       cmdbuf.presentDrawable(drawable);
++    shader_source::stats::Tick(); // MACRUNNER_DX12_OWN_STATS: the counters line is due on a frame as well
+     // Commit occurs in scope's destructor; Present1 logs the result after that return.
+     TraceFrame(trace_encoded, "queue_present.encoded", this, "seq=%llu hr=%08x",
+                static_cast<unsigned long long>(scope.seq), unsigned(S_OK));
+diff --git a/src/d3d12/d3d12_device.cpp b/src/d3d12/d3d12_device.cpp
+index d6be763..4bfb6b0 100644
+--- a/src/d3d12/d3d12_device.cpp
++++ b/src/d3d12/d3d12_device.cpp
+@@ -22,6 +22,7 @@
+ #include "d3d12_device_child.hpp"
+ #include "d3d12_lifetime.hpp"
+ #include "d3d12_frame_trace.hpp"
++#include "d3d12_shader_source_stats.hpp"
+ #include "d3d12_command_failure_trace.hpp"
+ #include "d3d12_state_object_libraries.hpp"
+ #include "d3d12_state_object_associations.hpp"
+@@ -129,7 +130,7 @@ public:
+     TraceFrame(trace_enabled, "enabled", this, "MACRUNNER_DX12_FRAME_TRACE=1 type=device");
+   }
+ 
+-  ~MTLD3D12DeviceImpl() { RemoveDevice(); }
++  ~MTLD3D12DeviceImpl() { RemoveDevice(); shader_source::stats::Final(); }
+ 
+   ULONG STDMETHODCALLTYPE
+   Release() override {
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 84f8243..91d43e0 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -140,6 +140,12 @@ class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Compute
+   MTL_SHADER_REFLECTION ref_cs;
+ 
+ public:
++  // What the shader source did with this object, for CreateComputePipelineState.
++  uint8_t provider_state = 0;            // 0 not asked, 1 declined (the legacy path builds), 2 in charge
++  const char *provider_reason = nullptr; // why it declined or failed (a name of stats::kReasons)
++  bool provider_fell_back = false;       // it failed and the legacy path was taken (fallback key)
++  HRESULT provider_hr = S_OK;            // its own result
++
+   MTLD3D12ComputePipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12ComputePipelineState>(pDevice) {
+     IsComputePipelineState = 1;
+   }
+@@ -179,10 +185,12 @@ public:
+     auto root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+     shader_source::Shader cs;
+     const HRESULT hr = shader_source::Fetch(source, "compute", this, pDesc->CS, 5 /* D3D11_SB_COMPUTE_SHADER */, root, cs);
++    provider_reason = cs.reason;
+     if (hr != S_OK) return hr;
+     auto metal = device_->GetMTLDevice();
+     WMT::Error error; // NSError results are borrowed, not owned References.
+     const auto failed = [&](const char *step) {
++      provider_reason = step;
+       shader_source::Trace("dx12_shader_source pipeline=compute owner=%p source=%s failed=%s cs=%s error=%.300s\n",
+                            static_cast<void *>(this), source.name, step, cs.request.key,
+                            error.handle ? error.description().getUTF8String().c_str() : "none");
+@@ -223,7 +231,15 @@ public:
+       return E_INVALIDARG;
+     if (const auto *source = shader_source::Selected()) {
+       const HRESULT translated = InitializeTranslated(pDesc, *source);
+-      if (translated != S_FALSE) return translated;
++      provider_state = translated == S_FALSE ? 1 : 2;
++      provider_hr = translated;
++      if (translated == S_OK) return S_OK;
++      if (FAILED(translated)) {
++        if (!shader_source::FallbackEnabled()) return translated;
++        // Nothing of the failed attempt is kept (the pipeline state is assigned last): the legacy path goes on.
++        provider_fell_back = true;
++        pso = {};
++      }
+     }
+     const HRESULT native_wave_result = InitializeNativeWave(pDesc);
+     if (native_wave_result != S_FALSE) return native_wave_result;
+@@ -333,6 +349,20 @@ CreateComputePipelineState(
+   shader_capture::Scope originals("compute", pDevice, pDesc);
+   auto pso = Com(new MTLD3D12ComputePipelineStateImpl(pDevice));
+   HRESULT hr = pso->Initialize(pDesc);
++  if (shader_source::Selected() && pso->provider_state) {
++    namespace stats = shader_source::stats;
++    const char *reason = pso->provider_reason ? pso->provider_reason : "pipeline_state";
++    if (pso->provider_fell_back) {
++      shader_source::FallbackLine("compute", pso.ptr(), "failed", reason, pso->provider_hr, hr);
++      stats::Count(stats::Compute, FAILED(hr) ? stats::LegacyFailed : stats::Fallback, reason);
++    } else if (pso->provider_state == 2) {
++      stats::Count(stats::Compute, FAILED(hr) ? stats::Failed : stats::Own, reason);
++    } else {
++      shader_source::FallbackLine("compute", pso.ptr(), "declined", reason, S_FALSE, hr);
++      stats::Count(stats::Compute, FAILED(hr) ? stats::LegacyFailed : stats::Declined, reason);
++    }
++    stats::Tick();
++  }
+   if (FAILED(hr)) {
+     if (pDesc) TraceRejectedComputeBytecode(pso.ptr(), pDesc->CS, hr);
+     return originals.finish(hr);
+diff --git a/src/d3d12/d3d12_pipeline_graphics.cpp b/src/d3d12/d3d12_pipeline_graphics.cpp
+index 65fbfca..054848b 100644
+--- a/src/d3d12/d3d12_pipeline_graphics.cpp
++++ b/src/d3d12/d3d12_pipeline_graphics.cpp
+@@ -1294,6 +1294,10 @@ protected:
+ 
+ public:
+   uint32_t capture_id = 0;
++  // What the shader source did with this object, for CreateGraphicsPipelineState.
++  bool force_legacy = false;             // the source is not asked: rebuild after its failure
++  uint8_t provider_state = 0;            // 0 not asked, 1 declined (the legacy path builds), 2 in charge
++  const char *provider_reason = nullptr; // why it declined or failed (a name of stats::kReasons)
+ 
+   MTLD3D12GraphicsPipelineStateImpl(MTLD3D12Device *pDevice) :
+       MTLD3D12Pageable<MTLD3D12GraphicsPipelineState>(pDevice) {
+@@ -1586,10 +1590,16 @@ public:
+                    TranslatedStages &stages) {
+     // Stages no source serves: tessellation and geometry pipelines stay on the legacy path.
+     if (pDesc->GS.pShaderBytecode || pDesc->GS.BytecodeLength || pDesc->HS.pShaderBytecode ||
+-        pDesc->HS.BytecodeLength || pDesc->DS.pShaderBytecode || pDesc->DS.BytecodeLength)
++        pDesc->HS.BytecodeLength || pDesc->DS.pShaderBytecode || pDesc->DS.BytecodeLength) {
++      provider_reason = pDesc->GS.pShaderBytecode || pDesc->GS.BytecodeLength ? "stage_not_served_geometry"
++                                                                              : "stage_not_served_tessellation";
+       return shader_source::Legacy(source, "graphics", this, "stage_not_served", "stages=gs|hs|ds");
+-    if (!pDesc->VS.pShaderBytecode || !pDesc->VS.BytecodeLength)
++    }
++    if (!pDesc->VS.pShaderBytecode || !pDesc->VS.BytecodeLength) {
++      provider_reason = "stage_not_served_no_vs";
+       return shader_source::Legacy(source, "graphics", this, "stage_not_served", "stages=no_vs");
++    }
++    provider_reason = "invalid_state";
+     // Bounds the code below indexes by.
+     if (pDesc->NumRenderTargets > 8 || pDesc->InputLayout.NumElements > 32 ||
+         (pDesc->InputLayout.NumElements && !pDesc->InputLayout.pInputElementDescs))
+@@ -1610,16 +1620,19 @@ public:
+     const HRESULT ps_hr = stages.pixel ? shader_source::Fetch(source, "graphics", this, pDesc->PS,
+                                                               microsoft::D3D10_SB_PIXEL_SHADER, root, stages.ps, variant)
+                                        : S_OK;
++    provider_reason = FAILED(vs_hr) || (vs_hr != S_OK && SUCCEEDED(ps_hr)) ? stages.vs.reason : stages.ps.reason;
+     if (FAILED(vs_hr)) return vs_hr;
+     if (FAILED(ps_hr)) return ps_hr;
+     // One stage from the source and the other from the legacy translator would not link.
+     if (vs_hr != S_OK || ps_hr != S_OK) return S_FALSE;
++    provider_reason = nullptr;
+     stages.source = &source;
+     return S_OK;
+   }
+ 
+   HRESULT
+   TranslatedFailure(const TranslatedStages &stages, const char *step, WMT::Object error, HRESULT hr = E_FAIL) {
++    provider_reason = step;
+     shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s failed=%s vs=%s ps=%s error=%.300s\n",
+                          static_cast<void *>(this), stages.source->name, step, stages.vs.request.key,
+                          stages.pixel ? stages.ps.request.key : "none",
+@@ -1678,6 +1691,7 @@ public:
+                              "ps=%s target=%u declared=%c target_class=%c\n",
+                              static_cast<void *>(this), stages.source->name, stages.ps.request.key, i, ps.colors[i],
+                              ColorClass(format));
++        provider_reason = "target_type_mismatch";
+         return E_FAIL;
+       }
+     }
+@@ -1704,8 +1718,9 @@ public:
+       return E_INVALIDARG;
+     // Where the stage functions come from. Everything else below is the same for both sources.
+     TranslatedStages translated;
+-    if (const auto *source = shader_source::Selected()) {
++    if (const auto *source = force_legacy ? nullptr : shader_source::Selected()) {
+       const HRESULT selected = SelectTranslated(pDesc, *source, translated);
++      provider_state = selected == S_FALSE ? 1 : 2;
+       if (FAILED(selected)) return selected;
+     }
+     D3D12_GRAPHICS_PIPELINE_STATE_DESC compiled_desc = *pDesc;
+@@ -2405,6 +2420,27 @@ CreateGraphicsPipelineState(
+         (unsigned long long)pDesc->PS.BytecodeLength);
+   }
+   HRESULT hr = pso->Initialize(pDesc);
++  if (shader_source::Selected()) {
++    namespace stats = shader_source::stats;
++    const char *reason = pso->provider_reason ? pso->provider_reason : "pipeline_state";
++    if (pso->provider_state == 2 && FAILED(hr) && shader_source::FallbackEnabled()) {
++      // The source took the pipeline and could not build it: the legacy path builds it on a fresh object.
++      const HRESULT own_hr = hr;
++      auto legacy = Com(new MTLD3D12GraphicsPipelineStateImpl(pDevice));
++      legacy->capture_id = pso->capture_id;
++      legacy->force_legacy = true;
++      hr = legacy->Initialize(pDesc);
++      pso = std::move(legacy);
++      shader_source::FallbackLine("graphics", pso.ptr(), "failed", reason, own_hr, hr);
++      stats::Count(stats::Graphics, FAILED(hr) ? stats::LegacyFailed : stats::Fallback, reason);
++    } else if (pso->provider_state == 2) {
++      stats::Count(stats::Graphics, FAILED(hr) ? stats::Failed : stats::Own, reason);
++    } else if (pso->provider_state == 1) {
++      shader_source::FallbackLine("graphics", pso.ptr(), "declined", reason, S_FALSE, hr);
++      stats::Count(stats::Graphics, FAILED(hr) ? stats::LegacyFailed : stats::Declined, reason);
++    }
++    stats::Tick();
++  }
+   if (FAILED(hr) && pso->capture_id) {
+     TraceRejectedPipelineBytecode(pso->capture_id, pso.ptr(), "VS", pDesc->VS);
+     TraceRejectedPipelineBytecode(pso->capture_id, pso.ptr(), "PS", pDesc->PS);
+diff --git a/src/d3d12/d3d12_shader_source.hpp b/src/d3d12/d3d12_shader_source.hpp
+index e8e6ad0..8fc4318 100644
+--- a/src/d3d12/d3d12_shader_source.hpp
++++ b/src/d3d12/d3d12_shader_source.hpp
+@@ -54,15 +54,25 @@
+ //         MACRUNNER_DX12_OWN_SHADER_REQUEST_DIR (optional): every missing
+ //         translation leaves its inputs there for the offline translator:
+ //           <shader>.<stage>.dxbc, <root>.rts0, and a line in requests.txt
+-//           (stage, shader, root and, for a pixel variant, variant)
++//           (stage, shader, root and, for a pixel variant, variant); one request
++//           per process for the same stage, shader, root and variant
++//
++// Two opt-in keys for running an application (d3d12_shader_source_stats.hpp):
++//   MACRUNNER_DX12_OWN_FALLBACK=1        a provider failure rebuilds the pipeline by the
++//                                        legacy path, with one reason line, instead of failing it
++//   MACRUNNER_DX12_OWN_STATS=<seconds>   cumulative counters by path and reason
+ 
+ #include "d3d12_device.hpp"
++#include "d3d12_shader_source_stats.hpp"
+ #include "DXBCParser/DXBCUtils.h"
+ #include "sha1/sha1_util.hpp"
++#include "thread.hpp"
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
++#include <mutex>
+ #include <string>
++#include <unordered_set>
+ #include <vector>
+ 
+ namespace dxmt::shader_source {
+@@ -120,8 +130,27 @@ struct Provider {
+ struct Shader {
+   Request request;
+   Response response;
++  const char *reason = nullptr; // why the stage is not served (a name of stats::kReasons); null when it is
+ };
+ 
++// True when the container carries a DXIL part. An SM5.0 container has nothing to translate.
++inline bool
++HasDXIL(D3D12_SHADER_BYTECODE bytecode) {
++  const auto *bytes = static_cast<const uint8_t *>(bytecode.pShaderBytecode);
++  const size_t size = bytecode.BytecodeLength;
++  if (!bytes || size < 32 || std::memcmp(bytes, "DXBC", 4)) return false;
++  uint32_t count;
++  std::memcpy(&count, bytes + 28, 4);
++  if (count > 64 || 32 + size_t(count) * 4 > size) return false;
++  for (uint32_t i = 0; i < count; i++) {
++    uint32_t offset;
++    std::memcpy(&offset, bytes + 32 + 4 * i, 4);
++    if (size_t(offset) + 8 > size) return false;
++    if (!std::memcmp(bytes + offset, "DXIL", 4)) return true;
++  }
++  return false;
++}
++
+ inline const char *
+ StageName(uint32_t stage) {
+   static constexpr const char *names[] = {"ps", "vs", "gs", "hs", "ds", "cs"};
+@@ -204,6 +233,16 @@ LeaveRequest(const Request &request) {
+   static const std::string directory = Environment("MACRUNNER_DX12_OWN_SHADER_REQUEST_DIR");
+   if (directory.empty()) return;
+   const std::string stage = StageName(request.stage);
++  {
++    // An application creates the same pipeline many times: one request per process is enough.
++    static dxmt::mutex mutex;
++    static std::unordered_set<std::string> left;
++    std::lock_guard<dxmt::mutex> lock(mutex);
++    if (!left.insert(stage + "." + request.key + "." + (request.root ? request.root_key : "none") + "." + request.variant)
++             .second)
++      return;
++  }
++  stats::CountRequest();
+   Write(directory + "\\" + request.key + "." + stage + ".dxbc", request.shader.pShaderBytecode,
+         request.shader.BytecodeLength, false);
+   if (request.root) Write(directory + "\\" + request.root_key + ".rts0", request.root, request.root_size, false);
+@@ -332,7 +371,10 @@ Selected() {
+     if (!length) return nullptr;
+     if (length < sizeof(value))
+       for (const auto &provider : providers)
+-        if (!std::strcmp(value, provider.name)) return &provider;
++        if (!std::strcmp(value, provider.name)) {
++          if (stats::Period()) stats::Arm();
++          return &provider;
++        }
+     Trace("dx12_shader_source source=legacy requested=%s reason=unknown_provider\n",
+           length < sizeof(value) ? value : "(too long)");
+     return nullptr;
+@@ -365,13 +407,20 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+     }
+   }
+   Sha1Hex(bytecode.pShaderBytecode, bytecode.BytecodeLength, shader.request.key);
++  char detail[320];
++  // Running an application (fallback key): an SM5.0 container is the legacy translator's, and no request is left for it.
++  if (FallbackEnabled() && !HasDXIL(bytecode)) {
++    std::snprintf(detail, sizeof(detail), "stage=%s shader=%s", StageName(stage), shader.request.key);
++    shader.reason = "not_dxil";
++    return Legacy(provider, pipeline, owner, "not_dxil", detail);
++  }
+   std::string missing;
+   const HRESULT hr = provider.fetch(shader.request, shader.response, missing);
+-  char detail[320];
+   if (hr == S_FALSE) {
+     std::snprintf(detail, sizeof(detail), "stage=%s shader=%s root=%s variant=%s missing=%s", StageName(stage),
+                   shader.request.key, shader.request.root ? shader.request.root_key : "none",
+                   *variant ? variant : "none", missing.c_str());
++    shader.reason = *variant ? "no_translation_variant" : "no_translation";
+     return Legacy(provider, pipeline, owner, "no_translation", detail);
+   }
+   const auto &response = shader.response;
+@@ -381,14 +430,17 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+       std::strcmp(response.variant, variant) || (*variant && response.format != 3)) {
+     Trace("dx12_shader_source pipeline=%s owner=%p source=%s failed=unusable_translation stage=%s shader=%s hr=%08x\n",
+           pipeline, owner, provider.name, StageName(stage), shader.request.key, unsigned(hr));
++    shader.reason = "unusable_translation";
+     return FAILED(hr) ? hr : E_FAIL;
+   }
+   std::snprintf(detail, sizeof(detail), "stage=%s shader=%s format=%u resources=%u vertex_inputs=%u root=%s",
+                 StageName(stage), shader.request.key, response.format, response.resources, response.vertex_inputs,
+                 response.root[0] ? response.root : "none");
+   // Format 1 knows no binding convention: it is admitted only when it binds nothing.
+-  if (response.format == 1 && (response.resources || response.vertex_inputs))
++  if (response.format == 1 && (response.resources || response.vertex_inputs)) {
++    shader.reason = "translation_not_admitted";
+     return Legacy(provider, pipeline, owner, "translation_not_admitted", detail);
++  }
+   // A function translated for one root signature reads garbage under another.
+   if (response.root[0] && (!shader.request.root || std::strcmp(response.root, shader.request.root_key) ||
+                            !root || response.root_qwords != root->UploadQwords)) {
+@@ -396,9 +448,13 @@ Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_S
+           "pipeline_qwords=%u translation_qwords=%u\n",
+           pipeline, owner, provider.name, detail, shader.request.root ? shader.request.root_key : "none",
+           root ? unsigned(root->UploadQwords) : 0u, response.root_qwords);
++    shader.reason = "root_signature_mismatch";
+     return E_FAIL;
+   }
+-  if (response.vertex_inputs && stage != 1) return Legacy(provider, pipeline, owner, "translation_not_admitted", detail);
++  if (response.vertex_inputs && stage != 1) {
++    shader.reason = "translation_not_admitted";
++    return Legacy(provider, pipeline, owner, "translation_not_admitted", detail);
++  }
+   return S_OK;
+ }
+ 
+diff --git a/src/d3d12/d3d12_shader_source_stats.hpp b/src/d3d12/d3d12_shader_source_stats.hpp
+new file mode 100644
+index 0000000..1513581
+--- /dev/null
++++ b/src/d3d12/d3d12_shader_source_stats.hpp
+@@ -0,0 +1,232 @@
++// SPDX-License-Identifier: LGPL-2.1-or-later
++// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
++#pragma once
++
++// Two opt-in keys of the shader-source seam (d3d12_shader_source.hpp), both read
++// once per process and both off when unset:
++//
++//   MACRUNNER_DX12_OWN_FALLBACK=1
++//       A pipeline the provider was in charge of and could not build (missing or
++//       unusable translation, another root signature, target type mismatch,
++//       Metal refusing a library, a function or the pipeline) is rebuilt by the
++//       legacy path instead of failing. Every pipeline that ends on the legacy
++//       path while a provider is selected leaves ONE stderr line:
++//         dx12_shader_source_fallback pipeline=<graphics|compute> owner=<p>
++//             cause=<declined|failed> reason=<name> own_hr=<hex> legacy_hr=<hex>
++//       declined: the provider never took the pipeline (no translation, stage
++//       not served, SM5.0 container); failed: it took it and failed.
++//       Unset: a provider failure fails the pipeline, exactly as before.
++//
++//   MACRUNNER_DX12_OWN_STATS=<seconds, 1..3600>
++//       Cumulative counters on stderr, at most once per <seconds> (checked at
++//       every pipeline creation and every Present; no thread of its own), when
++//       the device is destroyed and when the module unloads:
++//         dx12_shader_source_stats seq=<n> final=<0|1> uptime_ms=<n> fallback=<0|1>
++//             graphics=<own>/<declined>/<fallback>/<failed>/<legacy_failed>
++//             compute=<own>/<declined>/<fallback>/<failed>/<legacy_failed>
++//             requests=<n> reasons=<name>:<graphics>/<compute>,...
++//       own            built from provider libraries
++//       declined       provider did not take it, legacy path built it
++//       fallback       provider failed, legacy path built it (fallback key)
++//       failed         provider failed, pipeline creation failed (no fallback key)
++//       legacy_failed  the legacy path was taken and failed as well
++//       requests       distinct translation requests left for the offline translator
++//       reasons        every pipeline not counted as `own`, by reason
++
++#include <windows.h>
++#include <atomic>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++
++namespace dxmt::shader_source {
++
++inline bool
++FallbackEnabled() {
++  static const bool enabled = [] {
++    const DWORD error = GetLastError();
++    char value[4] = {};
++    const bool on = GetEnvironmentVariableA("MACRUNNER_DX12_OWN_FALLBACK", value, sizeof(value)) == 1 && value[0] == '1';
++    SetLastError(error);
++    return on;
++  }();
++  return enabled;
++}
++
++namespace stats {
++
++enum Kind : unsigned { Graphics, Compute, KindCount };
++enum Outcome : unsigned { Own, Declined, Fallback, Failed, LegacyFailed, OutcomeCount };
++
++// Reasons a pipeline is not built from provider libraries. Fixed table: no allocation on the creation path.
++inline constexpr const char *kReasons[] = {
++    "stage_not_served_tessellation", // hull or domain stage: legacy path only
++    "stage_not_served_geometry",     // geometry stage: legacy path only
++    "stage_not_served_no_vs",
++    "not_dxil",                 // SM5.0 container: nothing to translate, the legacy translator takes it
++    "no_translation",           // no library for this shader under this root signature
++    "no_translation_variant",   // the base pixel function may exist, the variant (sm, ds, ds.sm) does not
++    "translation_not_admitted", // description the seam does not admit
++    "unusable_translation",     // library or description broken, or translated as another variant
++    "root_signature_mismatch",  // translated for another root argument layout
++    "target_type_mismatch",     // target format class differs from the declared output type
++    "vertex_inputs",            // the input layout does not feed an input the function pulls
++    "invalid_state",            // pipeline description the seam refuses (bounds, formats)
++    "vs_library", "vs_entry", "ps_library", "ps_entry", "render_pipeline",
++    "thread_group_size", "cs_library", "cs_entry", "compute_pipeline",
++    "pipeline_state",           // failed after the stage functions were made
++    "other",
++};
++constexpr unsigned kReasonCount = sizeof(kReasons) / sizeof(kReasons[0]);
++
++struct Data {
++  std::atomic<uint64_t> outcomes[KindCount][OutcomeCount] = {};
++  std::atomic<uint64_t> reasons[kReasonCount][KindCount] = {};
++  std::atomic<uint64_t> requests{0};
++  std::atomic<uint64_t> changes{0}, printed_changes{0};
++  std::atomic<uint64_t> last_print_ms{0};
++  std::atomic<uint32_t> seq{0};
++  uint64_t start_ms = GetTickCount64();
++};
++
++inline Data &
++Get() {
++  static Data data;
++  return data;
++}
++
++// Seconds between lines; 0 = no counters line at all.
++inline uint32_t
++Period() {
++  static const uint32_t period = [] {
++    const DWORD error = GetLastError();
++    char value[8] = {};
++    const DWORD length = GetEnvironmentVariableA("MACRUNNER_DX12_OWN_STATS", value, sizeof(value));
++    SetLastError(error);
++    uint32_t parsed = 0;
++    if (!length || length >= sizeof(value)) return 0u;
++    for (DWORD i = 0; i < length; i++) {
++      if (value[i] < '0' || value[i] > '9') return 0u;
++      parsed = parsed * 10 + uint32_t(value[i] - '0');
++    }
++    return parsed <= 3600 ? parsed : 0u;
++  }();
++  return period;
++}
++
++inline unsigned
++ReasonIndex(const char *reason) {
++  if (reason)
++    for (unsigned i = 0; i < kReasonCount; i++)
++      if (!std::strcmp(reason, kReasons[i])) return i;
++  return kReasonCount - 1;
++}
++
++inline void
++Count(Kind kind, Outcome outcome, const char *reason = nullptr) {
++  auto &data = Get();
++  data.outcomes[kind][outcome].fetch_add(1, std::memory_order_relaxed);
++  if (outcome != Own) data.reasons[ReasonIndex(reason)][kind].fetch_add(1, std::memory_order_relaxed);
++  data.changes.fetch_add(1, std::memory_order_relaxed);
++}
++
++inline void
++CountRequest() {
++  auto &data = Get();
++  data.requests.fetch_add(1, std::memory_order_relaxed);
++  data.changes.fetch_add(1, std::memory_order_relaxed);
++}
++
++inline void
++Print(bool final) {
++  auto &data = Get();
++  const DWORD error = GetLastError();
++  char line[2048];
++  const auto get = [](const std::atomic<uint64_t> &value) { return (unsigned long long)value.load(std::memory_order_relaxed); };
++  const uint64_t changes = data.changes.load(std::memory_order_relaxed);
++  int length = std::snprintf(
++      line, sizeof(line),
++      "dx12_shader_source_stats seq=%u final=%u uptime_ms=%llu fallback=%u graphics=%llu/%llu/%llu/%llu/%llu "
++      "compute=%llu/%llu/%llu/%llu/%llu requests=%llu reasons=",
++      data.seq.fetch_add(1, std::memory_order_relaxed) + 1, unsigned(final),
++      (unsigned long long)(GetTickCount64() - data.start_ms), unsigned(FallbackEnabled()),
++      get(data.outcomes[Graphics][Own]), get(data.outcomes[Graphics][Declined]), get(data.outcomes[Graphics][Fallback]),
++      get(data.outcomes[Graphics][Failed]), get(data.outcomes[Graphics][LegacyFailed]),
++      get(data.outcomes[Compute][Own]), get(data.outcomes[Compute][Declined]), get(data.outcomes[Compute][Fallback]),
++      get(data.outcomes[Compute][Failed]), get(data.outcomes[Compute][LegacyFailed]), get(data.requests));
++  bool any = false;
++  for (unsigned i = 0; i < kReasonCount && length > 0 && size_t(length) < sizeof(line) - 96; i++) {
++    const unsigned long long graphics = get(data.reasons[i][Graphics]), compute = get(data.reasons[i][Compute]);
++    if (!graphics && !compute) continue;
++    length += std::snprintf(line + length, sizeof(line) - size_t(length), "%s%s:%llu/%llu", any ? "," : "", kReasons[i],
++                            graphics, compute);
++    any = true;
++  }
++  if (length > 0 && size_t(length) < sizeof(line) - 8) {
++    length += std::snprintf(line + length, sizeof(line) - size_t(length), "%s\n", any ? "" : "none");
++    DWORD written;
++    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, DWORD(length), &written, nullptr);
++  }
++  data.printed_changes.store(changes, std::memory_order_relaxed);
++  SetLastError(error);
++}
++
++// Prints the counters when they changed and the period has passed. Called at every
++// pipeline creation and every Present: two relaxed loads when there is nothing to do.
++inline void
++Tick() {
++  const uint32_t period = Period();
++  if (!period) return;
++  auto &data = Get();
++  if (data.changes.load(std::memory_order_relaxed) == data.printed_changes.load(std::memory_order_relaxed)) return;
++  const uint64_t now = GetTickCount64();
++  uint64_t last = data.last_print_ms.load(std::memory_order_relaxed);
++  if (last && now - last < uint64_t(period) * 1000) return;
++  // One thread prints; a racing one sees the new time and leaves.
++  if (!data.last_print_ms.compare_exchange_strong(last, now ? now : 1, std::memory_order_relaxed)) return;
++  Print(false);
++}
++
++// The last line: device destruction and module unload (a killed process prints neither —
++// the periodic line is what remains then).
++inline void
++Final() {
++  if (!Period()) return;
++  auto &data = Get();
++  static std::atomic<uint64_t> final_changes{~0ull};
++  const uint64_t changes = data.changes.load(std::memory_order_relaxed);
++  if (final_changes.exchange(changes, std::memory_order_relaxed) == changes) return; // nothing new since the last final line
++  Print(true);
++}
++
++struct AtUnload {
++  ~AtUnload() { Final(); }
++};
++
++// Arms the module-unload line; called once a provider is selected.
++inline void
++Arm() {
++  static AtUnload at_unload;
++  (void)at_unload;
++}
++
++} // namespace stats
++
++// The one line of a pipeline that ended on the legacy path while a provider is selected.
++inline void
++FallbackLine(const char *pipeline, const void *owner, const char *cause, const char *reason, HRESULT own_hr,
++             HRESULT legacy_hr) {
++  if (!FallbackEnabled()) return;
++  const DWORD error = GetLastError();
++  char line[320];
++  const int length = std::snprintf(line, sizeof(line),
++                                   "dx12_shader_source_fallback pipeline=%s owner=%p cause=%s reason=%s own_hr=%08x "
++                                   "legacy_hr=%08x\n",
++                                   pipeline, owner, cause, reason ? reason : "other", unsigned(own_hr), unsigned(legacy_hr));
++  DWORD written;
++  if (length > 0 && size_t(length) < sizeof(line))
++    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, DWORD(length), &written, nullptr);
++  SetLastError(error);
++}
++
++} // namespace dxmt::shader_source

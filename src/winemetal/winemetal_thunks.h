@@ -126,6 +126,16 @@ struct unixcall_mtldevice_newlibrarywithsource {
   obj_handle_t ret_library;
 };
 
+struct unixcall_mtldevice_newlibrarywithsourceoptions {
+  obj_handle_t device;
+  struct WMTConstMemoryPointer source;
+  uint64_t length;
+  uint32_t language_version;
+  uint32_t flags;
+  obj_handle_t ret_error;
+  obj_handle_t ret_library;
+};
+
 struct unixcall_mtldevice_newcomputepso {
   obj_handle_t device;
   struct WMTConstMemoryPointer info;
@@ -516,6 +526,7 @@ struct unixcall_mtl_as_build {
 STATIC_ASSERT(sizeof(unixcall_mtl_as_sizes) == 32);
 STATIC_ASSERT(sizeof(unixcall_mtl_as_new) == 32);
 STATIC_ASSERT(sizeof(unixcall_mtl_as_build) == 56);
+STATIC_ASSERT(sizeof(unixcall_mtldevice_newlibrarywithsourceoptions) == 48);
 
 #pragma pack(pop)
 

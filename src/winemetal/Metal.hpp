@@ -950,6 +950,14 @@ public:
     return Reference<Library>(MTLDevice_newLibraryWithSource(handle, view.data(), view.length(), &error.handle));
   }
 
+  // MacRunner shader-source seam: MSL text with an explicit language version (MTLLanguageVersion value; 0 = system default).
+  Reference<Library>
+  newLibraryWithSource(std::string_view view, uint32_t language_version, Error &error) {
+    return Reference<Library>(
+        MTLDevice_newLibraryWithSourceOptions(handle, view.data(), view.length(), language_version, 0, &error.handle)
+    );
+  }
+
   Reference<ComputePipelineState>
   newComputePipelineState(const Function &compute_function, Error &error) {
     WMTComputePipelineInfo info;

@@ -3135,6 +3135,54 @@ _MTLDevice_newIndirectCommandBuffer(void *obj) {
   return STATUS_SUCCESS;
 }
 
+/* MacRunner shader-source seam: library from MSL text with explicit options (language version only; flags must be 0).
+ * MACRUNNER_WMT_SOURCE_TRACE=1: once per process, one stderr line naming the process identity that calls Metal. */
+static void
+_macrunner_source_trace_identity(void) {
+  static dispatch_once_t once;
+  dispatch_once(&once, ^{
+    const char *trace = getenv("MACRUNNER_WMT_SOURCE_TRACE");
+    if (!trace || trace[0] != '1')
+      return;
+    NSBundle *bundle = [NSBundle mainBundle];
+    fprintf(
+        stderr,
+        "wmt_source_identity pid=%d page_size=%d process=%s bundle_id=%s bundle_path=%s executable=%s\n", getpid(),
+        getpagesize(),
+        [[[NSProcessInfo processInfo] processName] UTF8String],
+        bundle.bundleIdentifier ? [bundle.bundleIdentifier UTF8String] : "(nil)",
+        bundle.bundlePath ? [bundle.bundlePath UTF8String] : "(nil)",
+        bundle.executablePath ? [bundle.executablePath UTF8String] : "(nil)"
+    );
+  });
+}
+
+static NTSTATUS
+_MTLDevice_newLibraryWithSourceOptions(void *obj) {
+  struct unixcall_mtldevice_newlibrarywithsourceoptions *params = obj;
+  id<MTLDevice> device = (id<MTLDevice>)params->device;
+  _macrunner_source_trace_identity();
+  params->ret_library = 0;
+  params->ret_error = 0;
+  if (params->flags) {
+    return STATUS_UNSUCCESSFUL;
+  }
+  NSString *source =
+      [[NSString alloc] initWithBytes:params->source.ptr length:params->length encoding:NSUTF8StringEncoding];
+  if (!source) {
+    return STATUS_UNSUCCESSFUL;
+  }
+  MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
+  if (params->language_version)
+    options.languageVersion = (MTLLanguageVersion)params->language_version;
+  NSError *err = NULL;
+  params->ret_library = (obj_handle_t)[device newLibraryWithSource:source options:options error:&err];
+  params->ret_error = (obj_handle_t)err;
+  [options release];
+  [source release];
+  return STATUS_SUCCESS;
+}
+
 static NTSTATUS
 _MTLDevice_newLibraryWithSource(void *obj) {
   struct unixcall_mtldevice_newlibrarywithsource *params = obj;
@@ -3611,6 +3659,7 @@ const void *__wine_unix_call_funcs[] = {
     &_MTLDevice_accelerationStructureSizes,
     &_MTLDevice_newAccelerationStructure,
     &_MTLCommandBuffer_buildAccelerationStructure,
+    &_MTLDevice_newLibraryWithSourceOptions,
 };
 
 #ifndef DXMT_NATIVE
@@ -3778,5 +3827,6 @@ const void *__wine_unix_call_wow64_funcs[] = {
     &_MTLDevice_accelerationStructureSizes,
     &_MTLDevice_newAccelerationStructure,
     &_MTLCommandBuffer_buildAccelerationStructure,
+    &_MTLDevice_newLibraryWithSourceOptions,
 };
 #endif

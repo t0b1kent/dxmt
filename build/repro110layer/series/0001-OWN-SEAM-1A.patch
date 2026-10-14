@@ -1,0 +1,413 @@
+diff --git a/CHANGES-MACRUNNER.md b/CHANGES-MACRUNNER.md
+index 7373018..f5c1f55 100644
+--- a/CHANGES-MACRUNNER.md
++++ b/CHANGES-MACRUNNER.md
+@@ -162,3 +162,27 @@ implementation code was imported.
+   tree used a local link to a checkout of that same commit).
+ - The private fork note `MACRUNNER-FORK.md` is replaced by `README-MACRUNNER.md`.
+ - No game files, shader caches, captures, logs or run data.
++
++### 2026-10-14: shader-source seam, provider `own`
++
++`MACRUNNER_DX12_SHADER_PATH=<provider>` selects where a graphics pipeline takes
++ready Metal code for its stages; unset, nothing changes. The seam is
++`src/d3d12/d3d12_shader_source.hpp`: one request (shader container, serialized
++root signature, stage), one response (Metal library, entry name, resource and
++vertex-input counts), a provider table. The only provider is `own`: libraries
++of our DXIL -> Metal translator, prepared offline and read from
++`MACRUNNER_DX12_OWN_SHADER_DIR` as `<container SHA-1>.<stage>.metallib` with
++`<container SHA-1>.<stage>.desc`. No translation happens inside the layer and
++nothing is cached.
++
++The choice is per pipeline and reported on stderr as `dx12_shader_source ...`:
++a pipeline built from provider libraries prints `source=<provider>` with the
++SHA-1 of each library; a pipeline left to the regular path prints
++`source=legacy requested=<provider> reason=...` naming the stage and shader
++that had no translation. A translation that is present but rejected fails the
++pipeline (`failed=...`) and is not replaced by the regular path.
++
++DIAGNOSTIC_ONLY. Admitted so far: VS+PS, triangles, one RGBA8 target, no input
++layout, depth, MSAA, sample mask, alpha-to-coverage or dual-source blending,
++and only functions that bind no resources and read no vertex attributes;
++everything else, and every compute pipeline, takes the regular path.
+diff --git a/src/d3d12/d3d12_device.hpp b/src/d3d12/d3d12_device.hpp
+index 731193a..a70dc78 100644
+--- a/src/d3d12/d3d12_device.hpp
++++ b/src/d3d12/d3d12_device.hpp
+@@ -542,9 +542,15 @@ public:
+   WMT::Reference<WMT::ComputePipelineState> binary_resolve;
+ };
+ 
++namespace shader_source {
++struct Provider;
++}
++
+ class MTLD3D12PipelineState : public ID3D12PipelineState {
+ public:
+   UINT IsComputePipelineState;
++  // Shader source that built this pipeline (d3d12_shader_source.hpp); null = legacy path.
++  const shader_source::Provider *translated_by = nullptr;
+ 
+   static HRESULT
+   InitializeShader(D3D12_SHADER_BYTECODE Bytecode, sm50_shader_t *ppShader, struct MTL_SHADER_REFLECTION *pRefl);
+diff --git a/src/d3d12/d3d12_pipeline_compute.cpp b/src/d3d12/d3d12_pipeline_compute.cpp
+index 1cc5869..55b7813 100644
+--- a/src/d3d12/d3d12_pipeline_compute.cpp
++++ b/src/d3d12/d3d12_pipeline_compute.cpp
+@@ -24,6 +24,7 @@
+ #include "d3d12_pipeline.hpp"
+ #include "wave_native_bundle.hpp"
+ #include "d3d12_shader_capture.hpp"
++#include "d3d12_shader_source.hpp"
+ #include "log/log.hpp"
+ 
+ namespace dxmt {
+@@ -177,6 +178,11 @@ public:
+     if (!pDesc) return E_INVALIDARG;
+     if (pDesc->pRootSignature && static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->IsLocal)
+       return E_INVALIDARG;
++    if (const auto *source = shader_source::Selected()) {
++      // No provider serves compute stages yet: say so once per process, then the legacy path as before.
++      static const HRESULT said = shader_source::Legacy(*source, "compute", this, "stage_not_served");
++      (void)said;
++    }
+     const HRESULT native_wave_result = InitializeNativeWave(pDesc);
+     if (native_wave_result != S_FALSE) return native_wave_result;
+     std::vector<uint8_t> compiled_cs;
+diff --git a/src/d3d12/d3d12_pipeline_graphics.cpp b/src/d3d12/d3d12_pipeline_graphics.cpp
+index 508f167..b01c898 100644
+--- a/src/d3d12/d3d12_pipeline_graphics.cpp
++++ b/src/d3d12/d3d12_pipeline_graphics.cpp
+@@ -23,6 +23,7 @@
+ #include "d3d12_pageable.hpp"
+ #include "d3d12_pipeline.hpp"
+ #include "d3d12_shader_capture.hpp"
++#include "d3d12_shader_source.hpp"
+ #include "d3d12_gs_passthrough.hpp"
+ #include "dxmt_format.hpp"
+ #include "com/com_object.hpp"
+@@ -1492,10 +1493,73 @@ public:
+     forced_sample_count = pDesc->RasterizerState.ForcedSampleCount;
+   }
+ 
++  // Builds the pipeline from ready Metal libraries of the selected shader source.
++  // S_FALSE leaves it to the legacy path (the reason is already on stderr).
++  HRESULT
++  InitializeTranslated(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc, const shader_source::Provider &source) {
++    // First milestone: the pipeline state of the triangle probe and nothing wider.
++    if (!pDesc->VS.BytecodeLength || !pDesc->PS.BytecodeLength || pDesc->GS.BytecodeLength ||
++        pDesc->HS.BytecodeLength || pDesc->DS.BytecodeLength || pDesc->InputLayout.NumElements ||
++        pDesc->StreamOutput.NumEntries || pDesc->StreamOutput.NumStrides ||
++        pDesc->PrimitiveTopologyType != D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE || pDesc->NumRenderTargets != 1 ||
++        pDesc->RTVFormats[0] != DXGI_FORMAT_R8G8B8A8_UNORM || pDesc->DSVFormat != DXGI_FORMAT_UNKNOWN ||
++        pDesc->SampleMask != 0xffffffffu || pDesc->SampleDesc.Count != 1 || pDesc->BlendState.AlphaToCoverageEnable)
++      return shader_source::Legacy(source, "graphics", this, "pipeline_state_not_admitted");
++    auto root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
++    shader_source::Shader vs, ps;
++    HRESULT hr = shader_source::Fetch(source, "graphics", this, pDesc->VS, microsoft::D3D10_SB_VERTEX_SHADER, root, vs);
++    if (hr != S_OK) return hr;
++    hr = shader_source::Fetch(source, "graphics", this, pDesc->PS, microsoft::D3D10_SB_PIXEL_SHADER, root, ps);
++    if (hr != S_OK) return hr;
++    WMTRenderPipelineInfo info;
++    WMT::InitializeRenderPipelineInfo(info);
++    bool dual_source_blending = false;
++    if (FAILED(hr = InitializePSO(pDesc, info, dual_source_blending))) return hr;
++    if (dual_source_blending)
++      return shader_source::Legacy(source, "graphics", this, "pipeline_state_not_admitted", "dual_source_blending=1");
++    // From here the translation is in use: Metal rejecting it is a failure, not a reason for the legacy path.
++    auto metal = device_->GetMTLDevice();
++    WMT::Error error; // NSError results are borrowed, not owned References.
++    const auto failed = [&](const char *step) {
++      shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s failed=%s vs=%s ps=%s error=%.300s\n",
++                           static_cast<void *>(this), source.name, step, vs.request.key, ps.request.key,
++                           error.handle ? error.description().getUTF8String().c_str() : "none");
++      return E_FAIL;
++    };
++    auto vs_library = metal.newLibrary(vs.response.library.data(), vs.response.library.size(), error);
++    if (!vs_library) return failed("vs_library");
++    auto ps_library = metal.newLibrary(ps.response.library.data(), ps.response.library.size(), error);
++    if (!ps_library) return failed("ps_library");
++    auto vs_function = vs_library.newFunction(vs.response.entry);
++    auto ps_function = ps_library.newFunction(ps.response.entry);
++    if (!vs_function || !ps_function) return failed(vs_function ? "ps_entry" : "vs_entry");
++    info.vertex_function = vs_function.handle;
++    info.fragment_function = ps_function.handle;
++    pso = metal.newRenderPipelineState(info, error);
++    if (!pso) return failed("render_pipeline");
++    InitializeDSSO(pDesc);
++    InitializeRasterizerState(pDesc);
++    translated_by = &source;
++    char vs_library_sha1[41], ps_library_sha1[41];
++    shader_source::Sha1Hex(vs.response.library.data(), vs.response.library.size(), vs_library_sha1);
++    shader_source::Sha1Hex(ps.response.library.data(), ps.response.library.size(), ps_library_sha1);
++    shader_source::Trace("dx12_shader_source pipeline=graphics owner=%p source=%s vs=%s vs_entry=%s vs_library_sha1=%s "
++                         "vs_library_bytes=%llu ps=%s ps_entry=%s ps_library_sha1=%s ps_library_bytes=%llu native=%llx\n",
++                         static_cast<void *>(this), source.name, vs.request.key, vs.response.entry, vs_library_sha1,
++                         (unsigned long long)vs.response.library.size(), ps.request.key, ps.response.entry,
++                         ps_library_sha1, (unsigned long long)ps.response.library.size(),
++                         (unsigned long long)pso.handle);
++    return S_OK;
++  }
++
+   virtual HRESULT
+   Initialize(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc) {
+     if (!pDesc || (pDesc->pRootSignature && static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->IsLocal))
+       return E_INVALIDARG;
++    if (const auto *source = shader_source::Selected()) {
++      const HRESULT translated = InitializeTranslated(pDesc, *source);
++      if (translated != S_FALSE) return translated;
++    }
+     D3D12_GRAPHICS_PIPELINE_STATE_DESC compiled_desc = *pDesc;
+     std::vector<uint8_t> compiled_vs, compiled_ps, compiled_hs, compiled_ds, compiled_gs;
+     const HRESULT vs_artifact = LoadDiagnosticDXILArtifact(pDesc->VS, 1, compiled_vs, compiled_desc.VS);
+diff --git a/src/d3d12/d3d12_shader_source.hpp b/src/d3d12/d3d12_shader_source.hpp
+new file mode 100644
+index 0000000..0afbbeb
+--- /dev/null
++++ b/src/d3d12/d3d12_shader_source.hpp
+@@ -0,0 +1,245 @@
++// SPDX-License-Identifier: LGPL-2.1-or-later
++// Added 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
++#pragma once
++
++// Shader-source seam. A pipeline can take ready Metal code for its stages from
++// a provider instead of translating SM5.0 bytecode through airconv (the legacy
++// path, which stays the default).
++//
++//   MACRUNNER_DX12_SHADER_PATH=<provider>   read once per process; unset = legacy path only
++//
++// Every provider answers one request (shader container, serialized root
++// signature, stage) with one response (Metal library, entry name, what the
++// function needs from the layer). A bridge that translates on demand is one
++// more row in the provider table; pipelines do not change.
++//
++// The choice is made per pipeline. When a provider has no translation of a
++// stage, the whole pipeline is built by the legacy path and one stderr line
++// names the missing shader. A translation that exists but cannot be used fails
++// the pipeline: an error of our own shader is never hidden behind the legacy
++// path.
++//
++// Providers:
++//   own   ready libraries of our DXIL -> Metal translator, found by the SHA-1
++//         of the shader container in MACRUNNER_DX12_OWN_SHADER_DIR:
++//           <sha1>.<ps|vs|gs|hs|ds|cs>.metallib   Metal library
++//           <sha1>.<stage>.desc                   text: format=1, entry=, resources=, vertex_inputs=
++
++#include "d3d12_device.hpp"
++#include "sha1/sha1_util.hpp"
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
++
++namespace dxmt::shader_source {
++
++struct Request {
++  D3D12_SHADER_BYTECODE shader; // container exactly as the application passed it
++  const void *root;             // serialized root signature of the pipeline; null without one
++  size_t root_size;
++  uint32_t stage;               // D3D10_SB_TOKENIZED_PROGRAM_TYPE: ps 0, vs 1, gs 2, hs 3, ds 4, cs 5
++  char key[41];                 // SHA-1 of the container, lower-case hex
++};
++
++struct Response {
++  std::vector<uint8_t> library; // Metal library, "MTLB"
++  char entry[128] = {};         // function name inside the library
++  uint32_t resources = 0;       // resource bindings the function reads
++  uint32_t vertex_inputs = 0;   // attributes the function expects from a vertex descriptor
++};
++
++struct Provider {
++  const char *name; // value of MACRUNNER_DX12_SHADER_PATH
++  // S_OK: response filled. S_FALSE: no translation of this shader; `missing`
++  // names what was looked for. Failure: a translation exists but is unusable.
++  HRESULT (*fetch)(const Request &request, Response &response, std::string &missing);
++};
++
++// One stage of one pipeline as its provider answered it.
++struct Shader {
++  Request request;
++  Response response;
++};
++
++inline const char *
++StageName(uint32_t stage) {
++  static constexpr const char *names[] = {"ps", "vs", "gs", "hs", "ds", "cs"};
++  return stage < 6 ? names[stage] : "unknown";
++}
++
++inline void
++Sha1Hex(const void *data, size_t size, char hex[41]) {
++  const auto digest = Sha1HashState::compute(data, size);
++  constexpr char digits[] = "0123456789abcdef";
++  for (unsigned i = 0; i < 20; ++i) {
++    hex[2 * i] = digits[digest.data[i] >> 4];
++    hex[2 * i + 1] = digits[digest.data[i] & 15];
++  }
++  hex[40] = 0;
++}
++
++template <typename... Args>
++inline void
++Trace(const char *format, Args... args) {
++  const DWORD error = GetLastError();
++  char line[768];
++  const int length = std::snprintf(line, sizeof(line), format, args...);
++  DWORD written;
++  if (length > 0 && size_t(length) < sizeof(line))
++    WriteFile(GetStdHandle(STD_ERROR_HANDLE), line, DWORD(length), &written, nullptr);
++  SetLastError(error);
++}
++
++// Says why the legacy path builds this pipeline and returns S_FALSE.
++inline HRESULT
++Legacy(const Provider &provider, const char *pipeline, const void *owner, const char *reason, const char *detail = "") {
++  Trace("dx12_shader_source pipeline=%s owner=%p source=legacy requested=%s reason=%s%s%s\n", pipeline, owner,
++        provider.name, reason, *detail ? " " : "", detail);
++  return S_FALSE;
++}
++
++namespace own {
++
++// 0: read. 1: no such file. 2: unreadable, empty or larger than `limit`.
++inline int
++Read(const std::string &path, size_t limit, std::vector<uint8_t> &bytes) {
++  HANDLE file = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
++                            FILE_ATTRIBUTE_NORMAL, nullptr);
++  if (file == INVALID_HANDLE_VALUE) {
++    const DWORD error = GetLastError();
++    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? 1 : 2;
++  }
++  LARGE_INTEGER size;
++  DWORD read = 0;
++  bool complete = GetFileSizeEx(file, &size) && size.QuadPart > 0 && uint64_t(size.QuadPart) <= limit;
++  if (complete) {
++    bytes.resize(size_t(size.QuadPart));
++    complete = ReadFile(file, bytes.data(), DWORD(bytes.size()), &read, nullptr) && read == bytes.size();
++  }
++  CloseHandle(file);
++  return complete ? 0 : 2;
++}
++
++inline bool
++ParseDescription(const std::vector<uint8_t> &bytes, Response &response) {
++  const std::string text(bytes.begin(), bytes.end());
++  unsigned long format = 0;
++  unsigned seen = 0;
++  for (size_t at = 0; at < text.size();) {
++    size_t end = text.find('\n', at);
++    if (end == std::string::npos) end = text.size();
++    std::string line = text.substr(at, end - at);
++    at = end + 1;
++    if (!line.empty() && line.back() == '\r') line.pop_back();
++    const size_t equals = line.find('=');
++    if (equals == std::string::npos) continue;
++    const std::string name = line.substr(0, equals), value = line.substr(equals + 1);
++    if (name == "format") {
++      format = std::strtoul(value.c_str(), nullptr, 10);
++    } else if (name == "entry") {
++      if (value.empty() || value.size() >= sizeof(response.entry)) return false;
++      std::memcpy(response.entry, value.c_str(), value.size() + 1);
++      seen |= 1;
++    } else if (name == "resources") {
++      response.resources = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++      seen |= 2;
++    } else if (name == "vertex_inputs") {
++      response.vertex_inputs = uint32_t(std::strtoul(value.c_str(), nullptr, 10));
++      seen |= 4;
++    }
++  }
++  return format == 1 && seen == 7;
++}
++
++inline HRESULT
++Fetch(const Request &request, Response &response, std::string &missing) {
++  static const std::string directory = [] {
++    char value[1024];
++    const DWORD length = GetEnvironmentVariableA("MACRUNNER_DX12_OWN_SHADER_DIR", value, sizeof(value));
++    return length && length < sizeof(value) ? std::string(value, length) : std::string();
++  }();
++  if (directory.empty()) {
++    missing = "MACRUNNER_DX12_OWN_SHADER_DIR";
++    return S_FALSE;
++  }
++  const std::string name = std::string(request.key) + "." + StageName(request.stage);
++  switch (Read(directory + "\\" + name + ".metallib", 64u << 20, response.library)) {
++  case 0:
++    break;
++  case 1:
++    missing = name + ".metallib";
++    return S_FALSE;
++  default:
++    return E_FAIL;
++  }
++  // A library without its description is a broken translation, not a missing one.
++  std::vector<uint8_t> description;
++  if (Read(directory + "\\" + name + ".desc", 4096, description) || !ParseDescription(description, response))
++    return E_FAIL;
++  return S_OK;
++}
++
++} // namespace own
++
++// The provider named by MACRUNNER_DX12_SHADER_PATH; null selects the legacy path for every pipeline.
++inline const Provider *
++Selected() {
++  static const Provider *const selected = []() -> const Provider * {
++    static constexpr Provider providers[] = {
++        {"own", own::Fetch},
++    };
++    const DWORD error = GetLastError();
++    char value[16] = {};
++    const DWORD length = GetEnvironmentVariableA("MACRUNNER_DX12_SHADER_PATH", value, sizeof(value));
++    SetLastError(error);
++    if (!length) return nullptr;
++    if (length < sizeof(value))
++      for (const auto &provider : providers)
++        if (!std::strcmp(value, provider.name)) return &provider;
++    Trace("dx12_shader_source source=legacy requested=%s reason=unknown_provider\n",
++          length < sizeof(value) ? value : "(too long)");
++    return nullptr;
++  }();
++  return selected;
++}
++
++// One stage through the provider. S_OK: `shader` holds a translation admitted
++// by the first milestone, which binds no resources and feeds no vertex
++// attributes. S_FALSE: the legacy path builds the pipeline (reason on stderr).
++inline HRESULT
++Fetch(const Provider &provider, const char *pipeline, const void *owner, D3D12_SHADER_BYTECODE bytecode,
++      uint32_t stage, MTLD3D12RootSignature *root, Shader &shader) {
++  struct PreserveLastError {
++    DWORD value = GetLastError();
++    ~PreserveLastError() { SetLastError(value); }
++  } preserve_last_error;
++  if (!bytecode.pShaderBytecode || !bytecode.BytecodeLength) return E_INVALIDARG;
++  shader.request = {bytecode, nullptr, 0, stage, {}};
++  if (root) shader.request.root_size = root->GetBlob(&shader.request.root);
++  Sha1Hex(bytecode.pShaderBytecode, bytecode.BytecodeLength, shader.request.key);
++  std::string missing;
++  const HRESULT hr = provider.fetch(shader.request, shader.response, missing);
++  char detail[256];
++  if (hr == S_FALSE) {
++    std::snprintf(detail, sizeof(detail), "stage=%s shader=%s missing=%s", StageName(stage), shader.request.key,
++                  missing.c_str());
++    return Legacy(provider, pipeline, owner, "no_translation", detail);
++  }
++  const auto &response = shader.response;
++  if (FAILED(hr) || response.library.size() < 16 || std::memcmp(response.library.data(), "MTLB", 4) ||
++      !response.entry[0] || !std::memchr(response.entry, 0, sizeof(response.entry))) {
++    Trace("dx12_shader_source pipeline=%s owner=%p source=%s failed=unusable_translation stage=%s shader=%s hr=%08x\n",
++          pipeline, owner, provider.name, StageName(stage), shader.request.key, unsigned(hr));
++    return FAILED(hr) ? hr : E_FAIL;
++  }
++  if (response.resources || response.vertex_inputs) {
++    std::snprintf(detail, sizeof(detail), "stage=%s shader=%s resources=%u vertex_inputs=%u", StageName(stage),
++                  shader.request.key, response.resources, response.vertex_inputs);
++    return Legacy(provider, pipeline, owner, "translation_not_admitted", detail);
++  }
++  return S_OK;
++}
++
++} // namespace dxmt::shader_source

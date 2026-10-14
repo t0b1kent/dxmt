@@ -24,6 +24,7 @@
 #include "d3d12_pipeline.hpp"
 #include "wave_native_bundle.hpp"
 #include "d3d12_shader_capture.hpp"
+#include "d3d12_shader_source.hpp"
 #include "log/log.hpp"
 
 namespace dxmt {
@@ -139,6 +140,12 @@ class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12Compute
   MTL_SHADER_REFLECTION ref_cs;
 
 public:
+  // What the shader source did with this object, for CreateComputePipelineState.
+  uint8_t provider_state = 0;            // 0 not asked, 1 declined (the legacy path builds), 2 in charge
+  const char *provider_reason = nullptr; // why it declined or failed (a name of stats::kReasons)
+  bool provider_fell_back = false;       // it failed and the legacy path was taken (fallback key)
+  HRESULT provider_hr = S_OK;            // its own result
+
   MTLD3D12ComputePipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12ComputePipelineState>(pDevice) {
     IsComputePipelineState = 1;
   }
@@ -171,12 +178,69 @@ public:
     return S_OK;
   }
 
+  // Builds the pipeline from a ready Metal library of the selected shader source.
+  // S_FALSE leaves it to the legacy path (the reason is already on stderr).
+  HRESULT
+  InitializeTranslated(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, const shader_source::Provider &source) {
+    auto root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+    shader_source::Shader cs;
+    const HRESULT hr = shader_source::Fetch(source, "compute", this, pDesc->CS, 5 /* D3D11_SB_COMPUTE_SHADER */, root, cs);
+    provider_reason = cs.reason;
+    if (hr != S_OK) return hr;
+    auto metal = device_->GetMTLDevice();
+    WMT::Error error; // NSError results are borrowed, not owned References.
+    const auto failed = [&](const char *step) {
+      provider_reason = step;
+      shader_source::Trace("dx12_shader_source pipeline=compute owner=%p source=%s failed=%s cs=%s error=%.300s\n",
+                           static_cast<void *>(this), source.name, step, cs.request.key,
+                           error.handle ? error.description().getUTF8String().c_str() : "none");
+      return E_FAIL;
+    };
+    const auto &threads = cs.response.threads;
+    // Description formats 2 and 3 carry the thread group size; format 1 binds nothing and has none.
+    if (cs.response.format < 2 || !threads[0] || !threads[1] || !threads[2]) return failed("thread_group_size");
+    auto library = shader_source::MakeLibrary(metal, cs.response, error);
+    if (!library) return failed("cs_library");
+    auto cs_function = library.newFunction(cs.response.entry);
+    if (!cs_function) return failed("cs_entry");
+    WMTComputePipelineInfo info;
+    WMT::InitializeComputePipelineInfo(info);
+    info.compute_function = cs_function;
+    info.support_indirect_command_buffers = true;
+    pso = metal.newComputePipelineState(info, error);
+    if (!pso) return failed("compute_pipeline");
+    function = cs_function;
+    threadgroup_size = {threads[0], threads[1], threads[2]};
+    translated_by = &source;
+    char library_sha1[41];
+    shader_source::Sha1Hex(cs.response.library.data(), cs.response.library.size(), library_sha1);
+    shader_source::Trace("dx12_shader_source pipeline=compute owner=%p source=%s cs=%s cs_entry=%s cs_library_sha1=%s "
+                         "cs_library_bytes=%llu native=%llx root=%s cs_resources=%u threads=%u,%u,%u\n",
+                         static_cast<void *>(this), source.name, cs.request.key, cs.response.entry, library_sha1,
+                         (unsigned long long)cs.response.library.size(), (unsigned long long)pso.handle,
+                         cs.request.root ? cs.request.root_key : "none", cs.response.resources, threads[0],
+                         threads[1], threads[2]);
+    return S_OK;
+  }
+
   HRESULT
   Initialize(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc) {
 
     if (!pDesc) return E_INVALIDARG;
     if (pDesc->pRootSignature && static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->IsLocal)
       return E_INVALIDARG;
+    if (const auto *source = shader_source::Selected()) {
+      const HRESULT translated = InitializeTranslated(pDesc, *source);
+      provider_state = translated == S_FALSE ? 1 : 2;
+      provider_hr = translated;
+      if (translated == S_OK) return S_OK;
+      if (FAILED(translated)) {
+        if (!shader_source::FallbackEnabled()) return translated;
+        // Nothing of the failed attempt is kept (the pipeline state is assigned last): the legacy path goes on.
+        provider_fell_back = true;
+        pso = {};
+      }
+    }
     const HRESULT native_wave_result = InitializeNativeWave(pDesc);
     if (native_wave_result != S_FALSE) return native_wave_result;
     std::vector<uint8_t> compiled_cs;
@@ -285,6 +349,20 @@ CreateComputePipelineState(
   shader_capture::Scope originals("compute", pDevice, pDesc);
   auto pso = Com(new MTLD3D12ComputePipelineStateImpl(pDevice));
   HRESULT hr = pso->Initialize(pDesc);
+  if (shader_source::Selected() && pso->provider_state) {
+    namespace stats = shader_source::stats;
+    const char *reason = pso->provider_reason ? pso->provider_reason : "pipeline_state";
+    if (pso->provider_fell_back) {
+      shader_source::FallbackLine("compute", pso.ptr(), "failed", reason, pso->provider_hr, hr);
+      stats::Count(stats::Compute, FAILED(hr) ? stats::LegacyFailed : stats::Fallback, reason);
+    } else if (pso->provider_state == 2) {
+      stats::Count(stats::Compute, FAILED(hr) ? stats::Failed : stats::Own, reason);
+    } else {
+      shader_source::FallbackLine("compute", pso.ptr(), "declined", reason, S_FALSE, hr);
+      stats::Count(stats::Compute, FAILED(hr) ? stats::LegacyFailed : stats::Declined, reason);
+    }
+    stats::Tick();
+  }
   if (FAILED(hr)) {
     if (pDesc) TraceRejectedComputeBytecode(pso.ptr(), pDesc->CS, hr);
     return originals.finish(hr);
