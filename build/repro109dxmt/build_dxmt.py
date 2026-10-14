@@ -22,6 +22,7 @@ import build_full as full
 sys.path.insert(0, str(HERE))
 import verify_sources
 import validate_llvm_prefix
+import native_metal_fix
 
 PE_TARGETS = ['src/winemetal/winemetal.dll.postproc', 'src/dxgi/dxgi.dll.postproc',
               'src/d3d11/d3d11.dll', 'src/d3d10/d3d10core.dll.postproc']
@@ -311,6 +312,12 @@ def build(args):
             if not cross.exists():
                 cross.write_text(machine_file(compiler, arch))
             selected = prepared / 'source'
+            if arch == 'aarch64':
+                # Only the scenarios that compile airconv need the shader fix; the x86_64 PE subset never compiles it.
+                fix = native_metal_fix.apply(selected)
+                if fix:
+                    (out / (name + '-source-fix.json')).write_text(json.dumps(fix, indent=2) + '\n')
+                    result.setdefault('source_fixes', []).append(dict(scenario=name, **fix))
             before = verify_sources.snapshot(selected)
             phase = name + ':CONFIGURE'
             run(name + '-configure', configure_argv(meson, builddir, selected, cross, native, args, scenario))

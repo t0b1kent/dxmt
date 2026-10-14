@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import struct
 import sys
 import tempfile
@@ -12,6 +13,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_dxmt as builder
+
+HERE = Path(__file__).resolve().parent
 
 
 def write_json(path, value):
@@ -307,6 +310,10 @@ class CompilerRouteTests(unittest.TestCase):
                 source.mkdir(parents=True)
                 for file in ('winemetal_unix.c', 'cache.c'):
                     (source / file).write_text('/* owned fixture */\n')
+                if getattr(self, 'with_shader', False):
+                    shader = source / 'src/airconv/shaders/air_tessellation.metal'
+                    shader.parent.mkdir(parents=True)
+                    shutil.copyfile(HERE / 'inputs/basis-overlay/src/airconv/shaders/air_tessellation.metal', shader)
             elif component.endswith('-configure'):
                 build, source = Path(argv[2]), Path(argv[3])
                 # Meson reports the native LLVM program as a build-system file (run 38501832021: the pinned prefix's llvm-config).
@@ -399,6 +406,18 @@ class CompilerRouteTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'foreign'):
             self.fake_pipeline('foreign-configure')
         self.assertFalse(any(component.endswith('-build') for component, argv in self.calls))
+
+    def test_native_scenarios_get_the_metal_fix_and_the_pe_subset_does_not(self):
+        self.with_shader = True
+        self.fake_pipeline()
+        result = json.loads((self.args.work / 'reports/RESULT.json').read_bytes())
+        self.assertEqual([row['scenario'] for row in result['source_fixes']], ['native-r2', 'native-pe'])
+        for name in ('native-r2', 'native-pe'):
+            data = (self.args.work / name / 'source/src/airconv/shaders/air_tessellation.metal').read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), builder.native_metal_fix.POST_SHA256)
+            self.assertTrue((self.args.work / 'reports' / (name + '-source-fix.json')).is_file())
+        pe = (self.args.work / 'pe/source/src/airconv/shaders/air_tessellation.metal').read_bytes()
+        self.assertEqual(hashlib.sha256(pe).hexdigest(), builder.native_metal_fix.PRE_SHA256)
 
     def test_pinned_prefix_llvm_config_is_an_owned_tool_but_another_one_is_not(self):
         self.fake_pipeline()  # both aarch64 and x86_64 configures list <prefix>/bin/llvm-config and pass

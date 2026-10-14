@@ -107,6 +107,7 @@ jobs:
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_repro109_dxmt_after_wine27.py"
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_dispatch_request.py"
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_build_dxmt.py"
+          python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_native_metal_fix.py"
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_wine_layout.py"
           python3 -I -B "$GITHUB_WORKSPACE/dxmt/build/repro109dxmt/test_llvm_prefix.py"
       - name: Use the same preparation for inputs and full
