@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -41,6 +42,21 @@ class SourceInputs(unittest.TestCase):
     def test_missing_static_native_dependency_refuses_before_build(self):
         with self.assertRaisesRegex(ValueError, 'native static library missing'):
             producer.native_link_options('native', self.root)
+
+    def test_ec_image_uses_amd64_machine_with_pinned_chpe_checker(self):
+        data = bytearray(128); data[:2] = b'MZ'
+        struct.pack_into('<I', data, 0x3c, 64)
+        data[64:68] = b'PE\0\0'; struct.pack_into('<H', data, 68, 0x8664)
+        path = self.root / 'own.dll'; path.write_bytes(data)
+        checker = self.root / 'own_checker.py'
+        checker.write_text('def pe_priznaki(path): return (True, True, True)\n')
+        self.assertEqual(producer.pe_identity(path, 'ec', checker)['machine'], '0x8664')
+        checker.write_text('def pe_priznaki(path): return (False, False, False)\n')
+        with self.assertRaisesRegex(ValueError, 'metadata incomplete'):
+            producer.pe_identity(path, 'ec', checker)
+        struct.pack_into('<H', data, 68, 0xa641); path.write_bytes(data)
+        with self.assertRaisesRegex(ValueError, 'PE image machine'):
+            producer.pe_identity(path, 'ec', checker)
 
     def test_public_git_blob_transport_checks_real_objects(self):
         subprocess.run(['git', 'init', '--quiet', self.root], check=True)

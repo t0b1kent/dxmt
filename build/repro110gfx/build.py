@@ -2,6 +2,7 @@
 """Build the selected c32 graphics modules from the exact retained source lines."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,23 @@ def native_link_options(variant, llvm):
     return ['-Dbuild.c_link_args=' + value, '-Dbuild.cpp_link_args=' + value]
 
 
+def pe_identity(path, variant, checker=None):
+    data = path.read_bytes()
+    pe = struct.unpack_from('<I', data, 0x3c)[0]
+    machine = struct.unpack_from('<H', data, pe + 4)[0]
+    if data[pe:pe + 4] != b'PE\0\0' or machine != 0x8664:
+        raise ValueError('Wrong output PE image machine: ' + hex(machine))
+    result = dict(machine=hex(machine))
+    if variant == 'ec':
+        spec = importlib.util.spec_from_file_location('graphics_ec_image_checker', checker)
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        flags = module.pe_priznaki(path)
+        if flags != (True, True, True):
+            raise ValueError('ARM64EC image metadata incomplete: ' + repr(flags))
+        result.update(chpe=True, hexpthk=True, a64xrm=True, checker_sha256=sha(checker))
+    return result
+
+
 def selected_inputs(args):
     if args.variant not in TARGETS:
         raise ValueError('Unknown graphics build variant')
@@ -66,6 +84,8 @@ def selected_inputs(args):
         if not path.is_file():
             raise ValueError('Required source-built input or tool missing: ' + str(path))
     native_link_options(args.variant, args.llvm)
+    if args.variant == 'ec' and (args.ec_checker is None or not args.ec_checker.is_file()):
+        raise ValueError('Required pinned Wine ARM64EC image checker missing')
 
 
 def build(args):
@@ -145,16 +165,14 @@ def build(args):
             if not path.is_file():
                 raise ValueError('Graphics output missing: ' + name)
             data = path.read_bytes()
+            architecture = None
             if args.variant != 'native':
-                pe = struct.unpack_from('<I', data, 0x3c)[0]
-                machine = struct.unpack_from('<H', data, pe + 4)[0]
-                if data[pe:pe + 4] != b'PE\0\0' or machine != (0x8664 if args.variant == 'x64' else 0xa641):
-                    raise ValueError('Wrong output PE architecture: ' + name)
+                architecture = pe_identity(path, args.variant, args.ec_checker)
             elif struct.unpack_from('<II', data) != (0xfeedfacf, 0x0100000c):
                 raise ValueError('Native output must be ARM64 Mach-O: ' + name)
             target = outputs / path.name
             target.write_bytes(data)
-            result['outputs'].append(dict(path=target.name, bytes=len(data), sha256=sha(target)))
+            result['outputs'].append(dict(path=target.name, bytes=len(data), sha256=sha(target), architecture=architecture))
         result['status'] = 'GRAPHICS_SOURCE_BUILT_NOT_RELEASE_ACCEPTED'
         return 0
     except Exception as error:
@@ -178,6 +196,7 @@ def main():
     parser.add_argument('--llvm', type=Path, default=Path('/MISSING_LLVM'))
     parser.add_argument('--meson', type=Path, default=Path('/MISSING_MESON'))
     parser.add_argument('--ninja', type=Path, default=Path('/MISSING_NINJA'))
+    parser.add_argument('--ec-checker', type=Path)
     parser.add_argument('--work', type=Path, required=True)
     raise SystemExit(build(parser.parse_args()))
 
