@@ -1,6 +1,7 @@
 """Inert source-transport and absent-tool checks; no renderer or Wine is executed."""
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -22,6 +23,24 @@ class SourceInputs(unittest.TestCase):
                                cwd=self.root, capture_output=True, text=True, timeout=10)
         self.assertEqual(child.returncode, 0, child.stderr)
         self.assertIn('--variant', child.stdout)
+
+    def test_native_link_closure_is_explicit_and_windows_variants_do_not_use_it(self):
+        for name in ['libzstd.a', 'libunwind.a']:
+            path = self.root / 'lib' / name
+            path.parent.mkdir(exist_ok=True)
+            path.write_bytes(b'own inert archive fixture')
+        options = producer.native_link_options('native', self.root)
+        self.assertEqual([value.split('=', 1)[0] for value in options],
+                         ['-Dbuild.c_link_args', '-Dbuild.cpp_link_args'])
+        expected = [str(self.root / 'lib' / name) for name in ['libzstd.a', 'libunwind.a']]
+        for value in options:
+            self.assertEqual(json.loads(value.split('=', 1)[1]), expected)
+        for variant in ['x64', 'ec']:
+            self.assertEqual(producer.native_link_options(variant, self.root / 'missing'), [])
+
+    def test_missing_static_native_dependency_refuses_before_build(self):
+        with self.assertRaisesRegex(ValueError, 'native static library missing'):
+            producer.native_link_options('native', self.root)
 
     def test_public_git_blob_transport_checks_real_objects(self):
         subprocess.run(['git', 'init', '--quiet', self.root], check=True)

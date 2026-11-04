@@ -15,9 +15,9 @@ sys.path.insert(0, str(HERE))
 import prepare_source
 
 TARGETS = {
-    'x64': ['src/d3d11/d3d11.dll', 'src/d3d10/d3d10core.dll.postproc',
-            'src/dxgi/dxgi.dll.postproc', 'src/winemetal/winemetal.dll.postproc'],
-    'ec': ['src/d3d12/d3d12.dll', 'src/dxgi/dxgi.dll.postproc', 'src/winemetal/winemetal.dll.postproc'],
+    'x64': ['src/d3d11/d3d11.dll', 'src/d3d10/d3d10core.dll',
+            'src/dxgi/dxgi.dll', 'src/winemetal/winemetal.dll.postproc'],
+    'ec': ['src/d3d12/d3d12.dll', 'src/dxgi/dxgi.dll', 'src/winemetal/winemetal.dll.postproc'],
     'native': ['src/winemetal/unix/winemetal.so', 'src/airconv/darwin/airconv'],
 }
 STACK_PROBE = bytes.fromhex('f0ed7cd3f1030091310640d1100640f13f0240f9acffff54c0035fd6')
@@ -39,6 +39,19 @@ def text_section(data):
     raise ValueError('Stack probe object has no text section')
 
 
+def native_link_options(variant, llvm):
+    if variant != 'native':
+        return []
+    libraries = [Path(llvm) / 'lib' / name for name in ['libzstd.a', 'libunwind.a']]
+    for path in libraries:
+        if not path.is_file() or path.is_symlink():
+            raise ValueError('Required source-built native static library missing: ' + str(path))
+    # These are build-machine targets in the cross build. Both C (winemetal)
+    # and C++ (airconv) consumers need LLVM's static dependency closure.
+    value = json.dumps([str(path) for path in libraries])
+    return ['-Dbuild.c_link_args=' + value, '-Dbuild.cpp_link_args=' + value]
+
+
 def selected_inputs(args):
     if args.variant not in TARGETS:
         raise ValueError('Unknown graphics build variant')
@@ -52,6 +65,7 @@ def selected_inputs(args):
     for path in required:
         if not path.is_file():
             raise ValueError('Required source-built input or tool missing: ' + str(path))
+    native_link_options(args.variant, args.llvm)
 
 
 def build(args):
@@ -105,6 +119,11 @@ def build(args):
         options = ['-Dbuildtype=release', '-Dwine_builtin_dll=false', '-Denable_d3d12=true',
                    '-Denable_tests=false', '-Denable_nvapi=false', '-Denable_nvngx=false', '--wrap-mode=nodownload',
                    '-Dnative_llvm_path=' + str(args.llvm), '-Dwine_install_path=' + str(args.wine)]
+        options += native_link_options(args.variant, args.llvm)
+        if args.variant == 'native':
+            result['native_link_inputs'] = [
+                dict(path=name, sha256=sha(args.llvm / 'lib' / name))
+                for name in ['libzstd.a', 'libunwind.a']]
         if args.variant != 'x64':
             stub = root / 'chkstk.obj'
             run('stack-probe', [tools['c'], '-c', HERE / 'chkstk_arm64ec.S', '-o', stub])
@@ -114,6 +133,7 @@ def build(args):
             options.append('-Dc_link_args=' + str(stub))
         builddir = root / 'build'
         run('meson', [args.meson, 'setup', builddir, source, '--cross-file', cross, *options])
+        run('ninja-targets', [args.ninja, '-C', builddir, '-n', *TARGETS[args.variant]])
         if args.stage == 'configure':
             result['status'] = 'GRAPHICS_CONFIGURED_NOT_COMPILED'
             return 0
