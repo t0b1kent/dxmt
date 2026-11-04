@@ -1,0 +1,356 @@
+/*
+ * Copyright 2026 Feifan He for CodeWeavers
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#pragma once
+#include "util_append_only.hpp"
+#include "Metal.hpp"
+#include "dxmt_deptrack.hpp"
+#include "dxmt_residency.hpp"
+#include "dxmt_allocation.hpp"
+#include "rc/util_rc_ptr.hpp"
+#include "thread.hpp"
+#include "util_flags.hpp"
+#include "util_svector.hpp"
+
+namespace dxmt {
+
+enum class TextureAllocationFlag : uint32_t {
+  GpuReadonly = 0,
+  NoTracking = 0,
+  GpuPrivate = 1,
+  CpuInvisible = 1,
+  CpuWriteCombined = 2,
+  OwnedByCommandList = 3,
+  GpuManaged = 4,
+  Shared = 5,
+  ShaderReadonly = 6,
+  AllocatedOnHeap = 7,
+};
+
+struct TextureViewDescriptor {
+  WMTPixelFormat format    : 24;
+  WMTTextureType type      : 8;
+  uint32_t firstMiplevel   : 4 = 0;
+  uint32_t miplevelCount   : 4 = 1;
+  uint32_t firstArraySlice : 12 = 0;
+  uint32_t arraySize       : 12 = 1;
+};
+
+struct TextureViewKey {
+  union {
+    struct {
+      uint64_t index       : 28;
+      uint64_t mip_count   : 4;
+      uint64_t mip_start   : 4;
+      uint64_t array_start : 12;
+      uint64_t mip_end     : 4;
+      uint64_t array_end   : 12;
+    };
+    uint64_t impl_;
+  };
+
+  TextureViewKey() {
+    impl_ = 0;
+  }
+  TextureViewKey(const TextureViewDescriptor &descriptor, unsigned index, unsigned total_mip_count) {
+    mip_start = descriptor.firstMiplevel;
+    array_start = descriptor.firstArraySlice;
+    mip_end = descriptor.firstMiplevel + descriptor.miplevelCount;
+    array_end = descriptor.firstArraySlice + descriptor.arraySize;
+    mip_count = total_mip_count;
+    this->index = index;
+  }
+  TextureViewKey(uint64_t impl) {
+    impl_ = impl;
+  }
+  operator uint64_t() const {
+    return impl_;
+  }
+};
+
+class Texture;
+class TextureAllocation;
+
+class TextureView {
+public:
+  virtual ~TextureView() {};
+
+  void incRef();
+  void decRef();
+
+  WMT::Reference<WMT::Texture> texture;
+  uint64_t gpuResourceID;
+  DXMT_RESOURCE_RESIDENCY_STATE residency{};
+  TextureAllocation *allocation; // `TextureAllocation` holds strong reference to `TextureView`
+  TextureViewKey key;
+
+  TextureView(const TextureView &) = delete;
+  TextureView(TextureView &&) = delete;
+  TextureView &operator=(const TextureView &) = delete;
+  TextureView &operator=(TextureView &&) = delete;
+  TextureView(TextureAllocation *allocation);
+  TextureView(TextureAllocation *allocation, unsigned index, TextureViewDescriptor descriptor);
+
+private:
+  std::atomic<uint32_t> refcount_ = {0u};
+};
+
+class TextureViewRef : public Rc<TextureView> {
+public:
+  using Rc<TextureView>::Rc;
+
+  WMT::Texture
+  texture() const {
+    if (!*this)
+      return {};
+    return ptr()->texture;
+  }
+
+  TextureViewRef &
+  operator=(TextureView &ref) {
+    return (*this = &ref);
+  }
+};
+
+class TextureAllocation final : public Allocation {
+  friend class Texture;
+
+  /**
+   * notes on thread-safety:
+   * all states in `TextureAllocation` is either immutable or only accessed by `dxmt-encode-thread`,
+   * except `cached_view_`: the D3D12 layer resolves views on application threads too (descriptor writes), so it is
+   * an append-only array (elements never move) read without a lock and appended under the texture's mutex_.
+   */
+
+public:
+
+  WMT::Texture texture() const {
+    return obj_;
+  }
+
+  Flags<TextureAllocationFlag>
+  flags() const {
+    return flags_;
+  }
+
+  Texture *descriptor;
+  void *mappedMemory;
+  uint64_t gpuResourceID;
+  mach_port_t machPort;
+  small_vector<GenericAccessTracker, 1> fenceTrackers;
+  // MacRunner HKGPU 03.11.2026, D1 (MACRUNNER_DXMT_D11_CLEAR_SKIP=1): the last GPU write to this allocation, if it was a
+  // full clear (encode thread only). Bits: 1 colour, 2 depth, 4 stencil; every access with Write resets it to 0.
+  uint8_t clear_state = 0;
+  uint64_t clear_view = 0;
+  WMTClearColor clear_color = {};
+  float clear_depth = 0.f;
+  uint8_t clear_stencil = 0;
+  // HKGPU PFV fallback: this allocation was created with PixelFormatView (RenamableTexturePool drops stale ones).
+  bool has_pfv = false;
+
+private:
+  TextureAllocation(
+      Texture *descriptor, WMT::Reference<WMT::Buffer> &&buffer, void *mapped_buffer, const WMTTextureInfo &info,
+      unsigned bytes_per_row, Flags<TextureAllocationFlag> flags
+  );
+  TextureAllocation(
+      Texture *descriptor, WMT::Reference<WMT::Texture> &&texture, const WMTTextureInfo &textureDescriptor,
+      Flags<TextureAllocationFlag> flags
+  );
+
+  void free();
+
+  TextureAllocation(const TextureAllocation &) = delete;
+  TextureAllocation(TextureAllocation &&) = delete;
+
+  WMT::Reference<WMT::Texture> obj_;
+  WMT::Reference<WMT::Buffer> buffer_;
+  uint32_t version_ = 0;
+  Flags<TextureAllocationFlag> flags_;
+  append_only_array<TextureViewRef, 4, 20> cached_view_;   // [i] = view of viewDescriptors_[i]
+};
+
+class Texture {
+
+public:
+  void incRef();
+  void decRef();
+
+  TextureViewKey createView(TextureViewDescriptor const &descriptor);
+
+  constexpr TextureAllocation *
+  current() {
+    return current_.ptr();
+  }
+
+  WMTTextureType
+  textureType() const {
+    return info_.type;
+  }
+
+  WMTPixelFormat
+  pixelFormat() const {
+    return info_.pixel_format;
+  }
+
+  WMTTextureType
+  textureType(TextureViewKey view) {
+    std::shared_lock<dxmt::shared_mutex> lock(mutex_);
+    return viewDescriptors_[view.index].type;
+  }
+
+  WMTPixelFormat
+  pixelFormat(TextureViewKey view) {
+    std::shared_lock<dxmt::shared_mutex> lock(mutex_);
+    return viewDescriptors_[view.index].format;
+  }
+
+  WMTTextureUsage
+  usage() const {
+    return info_.usage;
+  }
+
+  // HKGPU PFV fallback (encode thread): future allocations of this texture carry `extra` too.
+  void
+  addUsage(WMTTextureUsage extra) {
+    info_.usage = WMTTextureUsage(info_.usage | extra);
+  }
+
+  unsigned
+  sampleCount() const {
+    return info_.sample_count;
+  }
+
+  unsigned
+  width() const {
+    return info_.width;
+  }
+
+  unsigned
+  height() const {
+    return info_.height;
+  }
+
+  unsigned
+  depth() const {
+    return info_.depth;
+  }
+
+  unsigned
+  width(TextureViewKey view) {
+    return std::max(info_.width >> view.mip_start, 1u);
+  }
+
+  unsigned
+  height(TextureViewKey view) {
+    return std::max(info_.height >> view.mip_start, 1u);
+  }
+
+  unsigned
+  depth(TextureViewKey view) const {
+    return std::max(info_.depth >> view.mip_start, 1u);
+  }
+
+  /**
+  \warning for cube texture, this would be multiple of 6.
+  */
+  unsigned
+  arrayLength() const {
+    switch (info_.type) {
+    case WMTTextureTypeCubeArray:
+    case WMTTextureTypeCube:
+      return info_.array_length * 6;
+    default:
+      break;
+    }
+    return info_.array_length;
+  }
+
+  unsigned
+  arrayLength(TextureViewKey view) {
+    return view.array_end - view.array_start;
+  }
+
+  unsigned
+  miplevelCount() const {
+    return info_.mipmap_level_count;
+  }
+
+  TextureViewKey fullView;
+
+  Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags);
+  Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags, WMT::Heap heap, uint64_t heap_offset = 0);
+  Rc<TextureAllocation> import(mach_port_t mach_port);
+
+  TextureView &view(TextureViewKey key);
+  TextureView &view(TextureViewKey key, TextureAllocation *allocation);
+
+  TextureViewKey checkViewUseArray(TextureViewKey key, bool isArray);
+  TextureViewKey checkViewUseFormat(TextureViewKey key, WMTPixelFormat format);
+
+  Rc<TextureAllocation> rename(Rc<TextureAllocation> &&newAllocation);
+
+  Texture(const WMTTextureInfo &info, WMT::Device device);
+
+  Texture(unsigned bytes_per_image, unsigned bytes_per_row, const WMTTextureInfo &info, WMT::Device device);
+
+private:
+  void prepareAllocationViews(TextureAllocation* allocation);
+
+  WMTTextureInfo info_;
+  unsigned bytes_per_image_ = 0;
+  unsigned bytes_per_row_ = 0;
+
+  Rc<TextureAllocation> current_;
+  uint32_t version_ = 0;
+  std::atomic<uint32_t> refcount_ = {0u};
+
+  small_vector<TextureViewDescriptor, 4> viewDescriptors_;
+  dxmt::shared_mutex mutex_;
+  WMT::Device device_;
+};
+
+/*
+ * MacRunner HKGPU 03.11.2026 — fallback of MACRUNNER_DXMT_D11_PFV=1. A texture created without PixelFormatView that gets a
+ * view of another (non-sRGB-twin) format is queued here by Texture::createView; ArgumentEncodingContext re-allocates it
+ * WITH PixelFormatView and copies every subresource on the GPU at the start of the next encoded chunk, before any command
+ * of that chunk (a view is created before the application can bind it, so its first use is in a later chunk).
+ */
+bool PfvDropEnabled();
+void PfvRequestUpgrade(Texture *texture);
+bool PfvTakeUpgrades(std::vector<Rc<Texture>> &out);
+
+class RenamableTexturePool {
+public:
+  void incRef();
+  void decRef();
+  Rc<TextureAllocation> getNext(uint64_t frame_);
+
+  RenamableTexturePool(Texture *texture, size_t capacity,Flags<TextureAllocationFlag> allocation_flags);
+
+private:
+  Rc<Texture> texture_;
+  std::vector<Rc<TextureAllocation>> allocations_;
+  uint64_t last_frame_ = 0;
+  Flags<TextureAllocationFlag> allocation_flags_;
+  unsigned capacity_;
+  unsigned current_index_ = 0;
+  std::atomic<uint32_t> refcount_ = {0u};
+};
+
+} // namespace dxmt
