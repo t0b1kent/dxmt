@@ -1,0 +1,444 @@
+#include "d3d12_pso_work.hpp"
+/*
+ * Copyright 2026 Feifan He for CodeWeavers
+ * Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#include "d3d12_pso_cache.hpp"   // MacRunner pso-cache 17.10.2026: MTLBinaryArchive fields
+#include "Metal.hpp"
+#include "com/com_pointer.hpp"
+#include "d3d12_device.hpp"
+#include "d3d12_pageable.hpp"
+#include "d3d12_pipeline.hpp"
+#include "wave_native_bundle.hpp"
+#include "d3d12_shader_capture.hpp"
+#include "d3d12_shader_source.hpp"
+#include "d3d12_diagnostic_counters.hpp"
+#include "log/log.hpp"
+
+namespace dxmt {
+
+HRESULT
+PrepareAccelerationBuildPlan(MTLD3D12Device *device,const D3D12AccelerationBuildInput &input,
+    std::shared_ptr<const D3D12AccelerationBuildPlan> &out) {
+  out.reset();
+  if (!device || (input.kind!=WMTASBuildTriangles && input.kind!=WMTASBuildInstances)) return E_INVALIDARG;
+  try {
+    auto plan=std::make_shared<D3D12AccelerationBuildPlan>();
+    plan->device_identity=static_cast<ID3D12Device *>(device);plan->kind=input.kind;
+    auto buffer=[&](const D3D12DescriptorCapture &view,uint64_t relative,uint64_t bytes,
+                    obj_handle_t &handle,uint64_t &offset) {
+      handle=0;offset=0;
+      if (!view.resource || !view.resource->Live() || view.resource->device.ptr()!=plan->device_identity ||
+          view.counter || view.texture || view.texel || view.sampler ||
+          (view.type!=ShaderVisibleDescriptorType::SRVBuffer && view.type!=ShaderVisibleDescriptorType::UAVBuffer &&
+           view.type!=ShaderVisibleDescriptorType::ConstantBuffer)) return false;
+      const auto &native=view.resource->native;
+      if (!native || !native->buffer_allocation ||
+          !scene_build::Rebase(native->logical_length,view.buffer_offset,view.byte_length,relative,bytes,offset)) return false;
+      handle=native->buffer_allocation->buffer();
+      if (!handle) return false;
+      plan->inputs.push_back(native);
+      return true;
+    };
+    uint64_t bytes=0;
+    if (input.kind==WMTASBuildTriangles) {
+      if (input.geometries.empty() || input.geometries.size()>4096 || !input.children.empty() ||
+          input.instances.resource || input.instance_offset || input.instance_count || input.instance_stride) return E_INVALIDARG;
+      plan->geometries.reserve(input.geometries.size());
+      for (const auto &g:input.geometries) {
+        auto wire=g.geometry;
+        if (wire.vertex_buffer || wire.index_buffer || !wire.triangle_count || wire.triangle_count>UINT32_MAX/3 ||
+            !scene_build::ByteSpan(wire.vertex_count,wire.vertex_stride,12,bytes) ||
+            !buffer(g.vertices,wire.vertex_offset,bytes,wire.vertex_buffer,wire.vertex_offset)) return E_INVALIDARG;
+        if (wire.index_type==WMTASIndexNone) {
+          if (g.indices.resource || wire.index_offset || wire.vertex_count<wire.triangle_count*3) return E_INVALIDARG;
+        } else if (wire.index_type==WMTASIndexUInt16 || wire.index_type==WMTASIndexUInt32) {
+          const uint64_t width=wire.index_type==WMTASIndexUInt16?2:4;
+          bytes=wire.triangle_count*3*width;
+          if (!buffer(g.indices,wire.index_offset,bytes,wire.index_buffer,wire.index_offset)) return E_INVALIDARG;
+        } else return DXGI_ERROR_UNSUPPORTED;
+        plan->geometries.push_back(wire);
+      }
+    } else {
+      if (!input.geometries.empty() || input.children.empty() || input.children.size()>4096 ||
+          input.instance_count>UINT32_MAX || input.instance_stride%4 ||
+          !scene_build::ByteSpan(input.instance_count,input.instance_stride,sizeof(WMTASUserIDInstance),bytes) ||
+          !buffer(input.instances,input.instance_offset,bytes,plan->instance_buffer,plan->instance_offset)) return E_INVALIDARG;
+      plan->instance_count=input.instance_count;plan->instance_stride=input.instance_stride;
+      for (const auto &child:input.children) {
+        if (child.recorded_device!=plan->device_identity || child.acceleration_device.ptr()!=plan->device_identity ||
+            child.root_buffer || child.compiler_footprint || bool(child.acceleration)==bool(child.acceleration_producer))
+          return E_INVALIDARG;
+        if (child.acceleration_producer) {
+          if (child.acceleration_producer->device_identity!=plan->device_identity ||
+              child.acceleration_producer->kind!=WMTASBuildTriangles) return E_INVALIDARG;
+        } else if (child.acceleration->Type()!=D3D12NativeAccelerationCapture::Kind::Primitive) return E_INVALIDARG;
+        plan->children.push_back({child.acceleration,child.acceleration_producer});
+      }
+    }
+    // Remaining backend alignment/device/flag checks happen before any GPU encoding.
+    // GPU index/instance contents still follow the normalized internal producer contract.
+    out=std::move(plan);return S_OK;
+  } catch (const std::bad_alloc &) { return E_OUTOFMEMORY; }
+}
+
+HRESULT
+CaptureBuiltAccelerationStructure(MTLD3D12Device *device, WMTASBuildKind kind,
+    WMT::Reference<WMT::AccelerationStructure> resource,
+    std::vector<D3D12NativeAccelerationCapture::Ptr> children, D3D12RecordedDescriptorBinding &out) {
+  out = {};
+  if (!device || !resource || (kind != WMTASBuildTriangles && kind != WMTASBuildInstances) ||
+      (kind == WMTASBuildTriangles && !children.empty()) ||
+      (kind == WMTASBuildInstances && (children.empty() || children.size() > 4096))) return E_INVALIDARG;
+  using Scene = D3D12NativeAccelerationCapture;
+  auto validate = [&](obj_handle_t value, bool instance) {
+    WMTComputeBinding requirement{};
+    requirement.kind = instance ? WMTComputeBindingInstanceAccelerationStructure :
+        WMTComputeBindingPrimitiveAccelerationStructure;
+    WMTArgumentBinding binding{};
+    binding.kind = instance ? WMTArgumentKindInstanceAccelerationStructure :
+        WMTArgumentKindPrimitiveAccelerationStructure;
+    binding.resource = value;
+    return MTLDevice_validateComputeBindings(device->GetMTLDevice(), &requirement, &binding, 1);
+  };
+  if (validate(resource, kind == WMTASBuildInstances) != WMTArgumentStatusReady) return E_INVALIDARG;
+  for (const auto &child : children) {
+    if (!child || child->Type() != Scene::Kind::Primitive ||
+        child->Native().resource.handle == resource.handle ||
+        validate(child->Native().resource, false) != WMTArgumentStatusReady) return E_INVALIDARG;
+  }
+  try {
+    auto allocation = std::make_shared<D3D12NativeAccelerationAllocation>(std::move(resource), device->GetResidencyOwner());
+    Scene::Ptr native;
+    const auto status = Scene::Create(kind == WMTASBuildInstances ? Scene::Kind::Instance : Scene::Kind::Primitive,
+                                     std::move(allocation), std::move(children), native);
+    if (status != capture::Status::Ready) return CaptureResult(status);
+    out.recorded_device = static_cast<ID3D12Device *>(device);
+    out.acceleration_device = static_cast<ID3D12Device *>(device);
+    out.acceleration = std::move(native);
+    return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+}
+
+
+class MTLD3D12ComputePipelineStateImpl : public MTLD3D12Pageable<MTLD3D12ComputePipelineState> {
+
+  MTL_SHADER_REFLECTION ref_cs;
+
+public:
+  // What the shader source did with this object, for CreateComputePipelineState.
+  uint8_t provider_state = 0;            // 0 not asked, 1 declined (the legacy path builds), 2 in charge
+  const char *provider_reason = nullptr; // why it declined or failed (a name of stats::kReasons)
+  bool provider_fell_back = false;       // it failed and the legacy path was taken (fallback key)
+  HRESULT provider_hr = S_OK;            // its own result
+
+  MTLD3D12ComputePipelineStateImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12ComputePipelineState>(pDevice) {
+    IsComputePipelineState = 1;
+  }
+
+  // pso-cache (curator 17.10 15:19, (а)): a second D3D12 object over the same Metal pipeline; COM state stays its own.
+  void
+  CloneStateFrom(const MTLD3D12ComputePipelineStateImpl &source) {
+    static_cast<MTLD3D12ComputePipelineState &>(*this) = static_cast<const MTLD3D12ComputePipelineState &>(source);
+    ref_cs = source.ref_cs;
+    provider_state = source.provider_state;
+    provider_reason = source.provider_reason;
+    provider_fell_back = source.provider_fell_back;
+    provider_hr = source.provider_hr;
+  }
+
+  HRESULT InitializeNativeWave(const D3D12_COMPUTE_PIPELINE_STATE_DESC *desc) {
+    char enabled[4] = {};
+    const DWORD length = GetEnvironmentVariableA("MACRUNNER_DX12_NATIVE_WAVE", enabled, sizeof(enabled));
+    if (length != 1 || enabled[0] != '1') return S_FALSE;
+    const auto *entry = native_wave::MatchShader(native_wave::entries, native_wave::entry_count, desc->CS.pShaderBytecode, desc->CS.BytecodeLength);
+    if (!entry) return S_FALSE;
+    // This diagnostic candidate implements one verified ABI, not arbitrary roots.
+    if (!desc->pRootSignature) return E_NOTIMPL;
+    const void *root = nullptr;
+    const size_t root_size = static_cast<MTLD3D12RootSignature *>(desc->pRootSignature)->GetBlob(&root);
+    if (!native_wave::MatchesRoot(*entry, root, root_size)) return E_NOTIMPL;
+    auto metal = device_->GetMTLDevice();
+    WMT::Reference<WMT::Error> error;
+    auto data = WMT::MakeDispatchData(reinterpret_cast<uint64_t>(entry->library), entry->library_size);
+    auto library = PSO_BACKEND(metal.newLibrary(data, error));
+    if (!library) { ERR("Native Wave library rejected"); return E_FAIL; }
+    auto function = PSO_BACKEND(library.newFunction("cs_main"));
+    if (!function) { ERR("Native Wave entry missing"); return E_FAIL; }
+    WMTComputePipelineInfo info;
+    WMT::InitializeComputePipelineInfo(info);
+    info.compute_function = function;
+    info.support_indirect_command_buffers = true;
+    pso = PSO_BACKEND(metal.newComputePipelineState(info, error));
+    if (!pso) { ERR("Native Wave compute PSO rejected"); return E_FAIL; }
+    threadgroup_size = {8, 4, 1};
+    return S_OK;
+  }
+
+  // Builds the pipeline from a ready Metal library of the selected shader source.
+  // S_FALSE leaves it to the legacy path (the reason is already on stderr).
+  HRESULT
+  InitializeTranslated(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, const shader_source::Provider &source) {
+    auto root = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature);
+    shader_source::Shader cs;
+    const HRESULT hr = shader_source::Fetch(source, "compute", this, pDesc->CS, 5 /* D3D11_SB_COMPUTE_SHADER */, root, cs);
+    provider_reason = cs.reason;
+    if (hr != S_OK) return hr;
+    auto metal = device_->GetMTLDevice();
+    WMT::Error error; // NSError results are borrowed, not owned References.
+    const auto failed = [&](const char *step) {
+      provider_reason = step;
+      shader_source::Trace("dx12_shader_source pipeline=compute owner=%p source=%s failed=%s cs=%s error=%.300s\n",
+                           static_cast<void *>(this), source.name, step, cs.request.key,
+                           error.handle ? error.description().getUTF8String().c_str() : "none");
+      return E_FAIL;
+    };
+    const auto &threads = cs.response.threads;
+    // Description formats 2 and 3 carry the thread group size; format 1 binds nothing and has none.
+    if (cs.response.format < 2 || !threads[0] || !threads[1] || !threads[2]) return failed("thread_group_size");
+    auto library = PSO_BACKEND(shader_source::MakeLibrary(metal, cs.response, error));
+    if (!library) return failed("cs_library");
+    auto cs_function = PSO_BACKEND(library.newFunction(cs.response.entry));
+    if (!cs_function) return failed("cs_entry");
+    WMTComputePipelineInfo info;
+    WMT::InitializeComputePipelineInfo(info);
+    info.compute_function = cs_function;
+    info.support_indirect_command_buffers = true;
+    auto *cache = device_->GetPipelineCache();   // pso-cache: through the binary archives
+    pso = cache ? cache->CreateCompute(metal, info, error) : PSO_BACKEND(metal.newComputePipelineState(info, error));
+    if (!pso) return failed("compute_pipeline");
+    function = cs_function;
+    threadgroup_size = {threads[0], threads[1], threads[2]};
+    translated_by = &source;
+    char library_sha1[41];
+    const uint64_t library_bytes = shader_source::LibraryId(cs.response, library_sha1);
+    shader_source::Trace("dx12_shader_source pipeline=compute owner=%p source=%s cs=%s cs_entry=%s cs_library_sha1=%s "
+                         "cs_library_bytes=%llu native=%llx root=%s cs_resources=%u threads=%u,%u,%u kind=cs root_version=%u\n",
+                         static_cast<void *>(this), source.name, cs.request.key, cs.response.entry, library_sha1,
+                         (unsigned long long)library_bytes, (unsigned long long)pso.handle,
+                         cs.request.root ? cs.request.root_key : "none", cs.response.resources, threads[0],
+                         threads[1], threads[2], shader_source::RootVersion(cs.request.root, cs.request.root_size));
+    return S_OK;
+  }
+
+  HRESULT
+  Initialize(const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc) {
+
+    if (!pDesc) return E_INVALIDARG;
+    if (pDesc->pRootSignature && static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->IsLocal)
+      return E_INVALIDARG;
+    if (const auto *source = shader_source::Selected()) {
+      const HRESULT translated = InitializeTranslated(pDesc, *source);
+      provider_state = translated == S_FALSE ? 1 : 2;
+      provider_hr = translated;
+      if (translated == S_OK) return S_OK;
+      if (FAILED(translated)) {
+        if (!shader_source::FallbackEnabled()) return translated;
+        // Nothing of the failed attempt is kept (the pipeline state is assigned last): the legacy path goes on.
+        provider_fell_back = true;
+        pso = {};
+      }
+    }
+    const HRESULT native_wave_result = InitializeNativeWave(pDesc);
+    if (native_wave_result != S_FALSE) return native_wave_result;
+    std::vector<uint8_t> compiled_cs;
+    D3D12_SHADER_BYTECODE cs = pDesc->CS;
+    const HRESULT artifact = LoadDiagnosticComputeArtifact(this, pDesc->CS, compiled_cs, cs);
+    if (FAILED(artifact)) return artifact;
+    // The external artifact carries no root signature; retain the application's
+    // original layout and do not infer one from rewritten shader metadata.
+    if (artifact == S_OK && !pDesc->pRootSignature) return E_NOTIMPL;
+
+    SM50Shader shader_cs;
+    SM50Error sm50_err;
+
+    SM50_SHADER_ROOT_SIGNATURE_DATA rootsig;
+    rootsig.type = SM50_SHADER_ROOT_SIGNATURE;
+    if (pDesc->pRootSignature) {
+      rootsig.bytecode_length = static_cast<MTLD3D12RootSignature *>(pDesc->pRootSignature)->GetBlob(&rootsig.bytecode);
+    } else {
+      rootsig.bytecode = pDesc->CS.pShaderBytecode;
+      rootsig.bytecode_length = pDesc->CS.BytecodeLength;
+    }
+    rootsig.next = nullptr;
+
+    SM50_SHADER_COMMON_DATA common;
+    common.flags = {};
+    common.type = SM50_SHADER_COMMON;
+    common.metal_version = (SM50_SHADER_METAL_VERSION)device_->GetShaderMetalVersion();
+    common.next = &rootsig;
+
+    if (HRESULT hr = InitializeShader(cs, &shader_cs, &ref_cs, device_->GetPipelineCache()); FAILED(hr))
+      return hr;
+
+    threadgroup_size = {ref_cs.ThreadgroupSize[0], ref_cs.ThreadgroupSize[1], ref_cs.ThreadgroupSize[2]};
+
+    auto metal = device_->GetMTLDevice();
+    // pso-cache: translated stage on disk, keyed by the bytecode and the argument chain.
+    auto *air_cache = device_->GetPipelineCache();
+    Sha1Digest air_key;
+    std::vector<uint8_t> air;
+    const bool air_keyed = air_cache && air_cache->AirKey("cs_main", &cs, 1, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&common, air_key);
+    SM50ShaderBitcode cs_bitcode;
+    WMT::Reference<WMT::Library> cs_lib = air_keyed ? air_cache->LoadLibrary(air_key, metal) : WMT::Reference<WMT::Library>{};
+    WMT::Reference<WMT::Error> err;
+    if (!cs_lib) {
+      if (FAILED(EnsureShader(cs, &shader_cs))) return E_FAIL;
+      diagnostic::Add(diagnostic::Counter::CompileCS);
+      if (PSO_XLAT(SM50Compile(shader_cs, (SM50_SHADER_COMPILATION_ARGUMENT_DATA *)&common, "cs_main", &cs_bitcode, &sm50_err))) {
+        ERR("Failed to compile cs shader: ", SM50GetErrorMessageString(sm50_err));
+        return E_FAIL;
+      }
+      SM50_COMPILED_BITCODE cs_bitcode_compiled;
+      SM50GetCompiledBitcode(cs_bitcode, &cs_bitcode_compiled);
+      auto cs_data = WMT::MakeDispatchData(cs_bitcode_compiled.Data, cs_bitcode_compiled.Size);
+      cs_lib = PSO_BACKEND(metal.newLibrary(cs_data, err));
+      if (air_keyed && cs_lib) air_cache->StoreAir(air_key, cs_bitcode_compiled.Data, cs_bitcode_compiled.Size, cs_lib);
+    }
+
+    if (!cs_lib) {
+      ERR("Failed to create compute library: ", err ? err.description().getUTF8String() : "");
+      return E_FAIL;
+    }
+    WMT::Reference<WMT::Function> cs_func;
+    { pso_cache::TimingScope fn_scope(pso_cache::TimingSlot::Function); cs_func = PSO_BACKEND(cs_lib.newFunction("cs_main")); }
+    function = cs_func;
+
+    // PSO
+    {
+      WMTComputePipelineInfo info;
+      WMT::InitializeComputePipelineInfo(info);
+      info.compute_function = cs_func;
+      info.support_indirect_command_buffers = true;
+      auto *cache = device_->GetPipelineCache();   // pso-cache: through the binary archives
+      pso = cache ? cache->CreateCompute(metal, info, err) : PSO_BACKEND(metal.newComputePipelineState(info, err));
+      if (!pso) {
+        ERR("Failed to create compute PSO: ", err.description().getUTF8String());
+        return E_FAIL;
+      }
+    }
+
+    return S_OK;
+  }
+
+  HRESULT
+  STDMETHODCALLTYPE
+  QueryInterface(REFIID riid, void **ppvObject) {
+    if (ppvObject == nullptr)
+      return E_POINTER;
+
+    *ppvObject = nullptr;
+
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
+        riid == __uuidof(ID3D12Pageable) || riid == __uuidof(ID3D12PipelineState)) {
+      *ppvObject = ref(this);
+      return S_OK;
+    }
+
+    if (logQueryInterfaceError(__uuidof(ID3D12PipelineState), riid)) {
+      WARN("D3D12ComputePipelineState: Unknown interface query ", str::format(riid));
+    }
+
+    return E_NOINTERFACE;
+  }
+
+  virtual HRESULT STDMETHODCALLTYPE
+  GetCachedBlob(ID3DBlob **blob) {
+    IMPLEMENT_ME
+    return E_NOTIMPL;
+  }
+};
+
+HRESULT
+CloneComputePipelineState(MTLD3D12Device *pDevice, ID3D12PipelineState *source, REFIID riid, void **ppPipelineState) {
+  if (ppPipelineState) *ppPipelineState = nullptr;
+  if (!source) return E_INVALIDARG;
+  auto clone = Com(new MTLD3D12ComputePipelineStateImpl(pDevice));
+  clone->CloneStateFrom(*static_cast<MTLD3D12ComputePipelineStateImpl *>(static_cast<MTLD3D12ComputePipelineState *>(source)));
+  return clone->QueryInterface(riid, ppPipelineState);
+}
+
+HRESULT
+CreateComputePipelineState(
+    MTLD3D12Device *pDevice, const D3D12_COMPUTE_PIPELINE_STATE_DESC *pDesc, REFIID riid, void **ppPipelineState
+) {
+  shader_capture::Scope originals("compute", pDevice, pDesc);
+  auto pso = Com(new MTLD3D12ComputePipelineStateImpl(pDevice));
+  const uint32_t capture = BeginComputePipelineCapture(pso.ptr(), pDesc);
+  HRESULT hr = pso->Initialize(pDesc);
+  if (shader_source::Selected() && pso->provider_state) {
+    namespace stats = shader_source::stats;
+    const char *reason = pso->provider_reason ? pso->provider_reason : "pipeline_state";
+    if (pso->provider_fell_back) {
+      shader_source::FallbackLine("compute", pso.ptr(), "failed", reason, pso->provider_hr, hr);
+      stats::Count(stats::Compute, FAILED(hr) ? stats::LegacyFailed : stats::Fallback, reason);
+    } else if (pso->provider_state == 2) {
+      stats::Count(stats::Compute, FAILED(hr) ? stats::Failed : stats::Own, reason);
+    } else {
+      shader_source::FallbackLine("compute", pso.ptr(), "declined", reason, S_FALSE, hr);
+      stats::Count(stats::Compute, FAILED(hr) ? stats::LegacyFailed : stats::Declined, reason);
+    }
+    stats::Tick();
+  }
+  if (FAILED(hr)) {
+    if (pDesc) TraceRejectedComputeBytecode(pso.ptr(), pDesc->CS, hr);
+  } else hr = pso->QueryInterface(riid, ppPipelineState);
+  EndComputePipelineCapture(capture, pso.ptr(), hr,
+      SUCCEEDED(hr) && ppPipelineState ? *ppPipelineState : nullptr, uint64_t(pso->pso.handle));
+  return originals.finish(hr);
+};
+
+
+HRESULT
+CreateCompiledComputeProgram(MTLD3D12Device *device, const void *bytes, size_t size,
+    std::string_view entry, WMTSize threads, std::shared_ptr<const D3D12CompiledComputeProgram> &out) {
+  out.reset();
+  if (!device || !bytes || size < 16 || size > 64 * 1024 * 1024 ||
+      memcmp(bytes, "MTLB", 4) || entry.empty() || entry.size() > 255 ||
+      entry.find('\0') != std::string_view::npos || !threads.width || !threads.height || !threads.depth)
+    return E_INVALIDARG;
+  try {
+    auto program = std::shared_ptr<D3D12CompiledComputeProgram>(new D3D12CompiledComputeProgram);
+    program->owner_ = static_cast<ID3D12Device *>(device);
+    auto metal = device->GetMTLDevice();
+    WMT::Error error; // newLibrary's NSError is borrowed, not an owned Reference.
+    program->library_ = PSO_BACKEND(metal.newLibrary(bytes, size, error));
+    if (!program->library_) return E_FAIL;
+    const std::string name(entry);
+    program->function_ = PSO_BACKEND(program->library_.newFunction(name.c_str()));
+    if (!program->function_) return E_INVALIDARG;
+    WMTArgumentStatus status = WMTArgumentStatusFailed;
+    program->pipeline_ = WMT::Reference<WMT::ComputePipelineState>(
+        MTLDevice_newReflectedComputePipeline(metal, program->function_, &program->layout_, &status));
+    if (!program->pipeline_ || status != WMTArgumentStatusReady)
+      return status == WMTArgumentStatusUnsupported ? DXGI_ERROR_UNSUPPORTED :
+          status == WMTArgumentStatusInvalid ? E_INVALIDARG :
+          status == WMTArgumentStatusOutOfMemory ? E_OUTOFMEMORY : E_FAIL;
+    if (!metal_argument::Threads(threads, program->layout_.max_threads)) return E_INVALIDARG;
+    // The compiler supplies the semantic local size. Reflection proves hardware bounds only.
+    program->threads_ = threads;
+    out = std::move(program);
+    return S_OK;
+  } catch (const std::bad_alloc &) {
+    return E_OUTOFMEMORY;
+  }
+}
+
+} // namespace dxmt

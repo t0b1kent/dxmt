@@ -1,0 +1,575 @@
+// Modified 2026 by the MacRunner project (D3D12 extensions); see README-MACRUNNER.md
+#pragma once
+
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <variant>
+#include <vector>
+
+#include "DXBCParser/DXBCUtils.h"
+#include "air_signature.hpp"
+#include "air_type.hpp"
+#include "dxbc_constants.hpp"
+#include "dxbc_instructions.hpp"
+#include "dxil_metadata.hpp"
+#include "nt/air_builder.hpp"
+#include "nt/dxbc_binding_map.hpp"
+#include "nt/dxbc_io_helper.hpp"
+#include "shader_common.hpp"
+
+#include "airconv_public.h"
+
+namespace dxmt::dxbc {
+
+struct ResourceRange {
+  uint32_t range_id;
+  uint32_t lower_bound;
+  uint32_t size;
+  uint32_t space;
+};
+
+struct ShaderResourceViewInfo {
+  ResourceRange range;
+  shader::common::ScalerDataType scaler_type;
+  shader::common::ResourceType resource_type;
+  bool read = false;
+  bool sampled = false;
+  bool compared = false; // therefore we use depth texture!
+
+  uint32_t structure_stride = 0;
+  uint32_t arg_index;
+  uint32_t arg_metadata_index;
+};
+struct UnorderedAccessViewInfo {
+  ResourceRange range;
+  shader::common::ScalerDataType scaler_type;
+  shader::common::ResourceType resource_type;
+  bool read = false;
+  bool written = false;
+  bool global_coherent = false;
+  bool rasterizer_order = false;
+  bool with_counter = false;
+
+  uint32_t structure_stride = 0;
+  uint32_t arg_index;
+  uint32_t arg_metadata_index;
+  uint32_t arg_counter_index;
+};
+struct ConstantBufferInfo {
+  ResourceRange range;
+  uint32_t size_in_vec4;
+  uint32_t arg_index;
+};
+struct SamplerInfo {
+  ResourceRange range;
+  uint32_t arg_index;
+  uint32_t arg_cube_index;
+  uint32_t arg_metadata_index;
+};
+
+struct ThreadgroupBufferInfo {
+  uint32_t size_in_uint;
+  uint32_t size;
+  uint32_t stride;
+  bool structured;
+};
+
+struct PhaseInfo {
+  uint32_t tempRegisterCount = 0;
+  std::map<
+    uint32_t, std::pair<uint32_t /* count */, uint32_t /* mask */>>
+    indexableTempRegisterCounts;
+};
+
+class ShaderInfo {
+public:
+  std::vector<std::array<uint32_t, 4>> immConstantBufferData;
+  std::map<uint32_t, ShaderResourceViewInfo> srvMap;
+  std::map<uint32_t, UnorderedAccessViewInfo> uavMap;
+  std::map<uint32_t, ConstantBufferInfo> cbufferMap;
+  std::map<uint32_t, SamplerInfo> samplerMap;
+  std::map<uint32_t, ThreadgroupBufferInfo> tgsmMap;
+  uint32_t tempRegisterCount = 0;
+  std::map<
+    uint32_t, std::pair<uint32_t /* count */, uint32_t /* mask */>>
+    indexableTempRegisterCounts;
+  air::ArgumentBufferBuilder binding_table_cbuffer;
+  air::ArgumentBufferBuilder binding_table;
+  bool skipOptimization = false;
+  bool refactoringAllowed = false;
+  bool use_cmp_exch = false;
+  bool no_control_point_phase_passthrough = false;
+  bool output_control_point_read = false;
+  bool use_msad = false;
+  bool use_samplepos = false;
+  std::vector<PhaseInfo> phases;
+  uint32_t pull_mode_reg_mask = 0;
+};
+
+Instruction readInstruction(
+  const microsoft::D3D10ShaderBinary::CInstruction &Inst,
+  ShaderInfo &shader_info, uint32_t phase
+);
+
+using pvalue = llvm::Value *;
+using epvalue = llvm::Expected<pvalue>;
+using dxbc::Swizzle;
+using dxbc::swizzle_identity;
+
+struct context;
+
+struct register_file {
+  llvm::Value *ptr_int4 = nullptr;
+  llvm::Value *ptr_float4 = nullptr;
+};
+
+struct indexable_register_file {
+  llvm::Value *ptr_int_vec = nullptr;
+  llvm::Value *ptr_float_vec = nullptr;
+  uint32_t vec_size = 0;
+};
+
+struct phase_temp {
+  register_file temp{};
+  std::unordered_map<uint32_t, indexable_register_file> indexable_temp_map{};
+};
+
+struct interpolant_descriptor {
+  uint32_t arg_index;
+  bool perspective;
+};
+
+struct io_binding_map {
+  llvm::GlobalVariable *icb = nullptr;
+  llvm::Value *icb_float = nullptr;
+  std::unordered_map<uint32_t, std::pair<uint32_t, llvm::GlobalVariable *>>
+    tgsm_map{};
+  std::unordered_map<uint32_t, interpolant_descriptor> interpolant_map{};
+
+  register_file input{};
+  register_file output{};
+  register_file temp{};
+  std::unordered_map<uint32_t, indexable_register_file> indexable_temp_map{};
+  std::vector<phase_temp> phases;
+  register_file patch_constant_output{};
+  uint32_t input_element_count = 0;
+  uint32_t output_element_count = 0;
+
+  // special registers (input)
+  llvm::Value *thread_id_arg = nullptr;
+  llvm::Value *thread_group_id_arg = nullptr;
+  llvm::Value *thread_id_in_group_arg = nullptr;
+  llvm::Value *thread_id_in_group_flat_arg = nullptr;
+  llvm::Value *coverage_mask_arg = nullptr;
+
+  llvm::Value *domain = nullptr;
+  llvm::Value *patch_id = nullptr;
+
+  llvm::Value *thread_id_in_patch = nullptr;
+
+  llvm::Value *gs_instance_id = nullptr;
+
+  // special registers (output)
+  llvm::AllocaInst *depth_output_reg = nullptr;
+  llvm::AllocaInst *stencil_ref_reg = nullptr;
+  llvm::AllocaInst *coverage_mask_reg = nullptr;
+
+  llvm::AllocaInst *cmp_exch_temp = nullptr;
+
+  // special buffers for tessellation
+  llvm::Type *hull_cp_passthrough_type = nullptr;
+  llvm::Value *hull_cp_passthrough_src = nullptr;
+  llvm::Value *hull_cp_passthrough_dst = nullptr;
+  llvm::Value *tess_factor_buffer;    // half*
+
+  // temp for fast look-up
+  llvm::Value *vertex_id = nullptr;
+  llvm::Value *vertex_id_with_base = nullptr;
+  llvm::Value *instance_id = nullptr;
+  llvm::Value *instance_id_with_base = nullptr;
+  llvm::Value *base_vertex_id = nullptr;
+  llvm::Value *base_instance_id = nullptr;
+  llvm::Value *vertex_buffer_table = nullptr;
+
+  // geometry shader ops
+  llvm::Value *mesh = nullptr;
+  std::function<void()> call_emit;
+  std::function<void()> call_cut;
+};
+
+struct context {
+  llvm::IRBuilder<> &builder;
+  llvm::air::AIRBuilder &air;
+  BindingMap &binding;
+  llvm::LLVMContext &llvm;
+  llvm::Module &module;
+  llvm::Function *function;
+  io_binding_map &resource;
+  air::AirType &types; // hmmm
+  uint32_t pso_sample_mask;
+  microsoft::D3D10_SB_TOKENIZED_PROGRAM_TYPE shader_type;
+  SM50_SHADER_METAL_VERSION metal_version;
+};
+
+llvm::Expected<llvm::BasicBlock *> convert_basicblocks(
+  BasicBlock *entry, context &ctx, llvm::BasicBlock *return_bb
+);
+
+constexpr air::MSLScalerOrVectorType to_msl_type(RegisterComponentType type) {
+  switch (type) {
+  default:
+  case RegisterComponentType::Unknown: {
+    assert(0 && "unknown component type");
+    break;
+  }
+  case RegisterComponentType::Uint:
+    return air::msl_uint4;
+  case RegisterComponentType::Int:
+    return air::msl_int4;
+  case RegisterComponentType::Float:
+    return air::msl_float4;
+    break;
+  }
+}
+
+struct ScalarInfo {
+  uint8_t component : 2;
+  uint8_t reg : 6;
+};
+
+struct PatchConstantScalarInfo {
+  uint8_t component : 2;
+  uint8_t reg : 6;
+  int8_t tess_factor_index;
+};
+
+class PixelInputLinkage {
+  const SM50_SHADER_PS_INPUT_LINKAGE_DATA *data_ = nullptr;
+  uint32_t seen_ = 0;
+  uint32_t signatures_ = 0;
+  uint32_t required_[32] = {};
+  uint32_t declared_[32] = {};
+  bool valid_ = true;
+public:
+  PixelInputLinkage() = default;
+  explicit PixelInputLinkage(const SM50_SHADER_PS_INPUT_LINKAGE_DATA *data) : data_(data) {
+    if (!data_) return;
+    if (data_->count > 32) { valid_ = false; return; }
+    for (uint32_t i = 0; i < data_->count; ++i) {
+      const auto &a = data_->entries[i];
+      if (a.input_register >= 32 || a.output_register >= 32 || !a.input_mask ||
+          (a.input_mask & ~15u) || a.input_mask != a.output_mask) valid_ = false;
+      for (uint32_t j = 0; j < i; ++j) {
+        const auto &b = data_->entries[j];
+        if ((a.input_register == b.input_register && (a.input_mask & b.input_mask)) ||
+            (a.output_register == b.output_register && (a.output_mask & b.output_mask))) valid_ = false;
+      }
+    }
+  }
+  bool valid() const { return valid_; }
+  bool active() const { return data_ != nullptr; }
+  void signature(uint32_t reg, uint32_t mask, uint32_t reads) {
+    if (!data_ || !valid_) return;
+    if (reads & ~mask) { valid_ = false; return; }
+    for (uint32_t i = 0; i < data_->count; ++i) {
+      const auto &entry = data_->entries[i];
+      if (entry.input_register != reg || entry.input_mask != mask) continue;
+      if (signatures_ & (1u << i)) { valid_ = false; return; }
+      signatures_ |= 1u << i;
+      required_[i] = reads;
+      return;
+    }
+    valid_ = false;
+  }
+  void invalidate() { valid_ = false; }
+  bool complete() const {
+    if (!valid_) return false;
+    if (!data_) return true;
+    if (signatures_ != (data_->count == 32 ? ~0u : (1u << data_->count) - 1)) return false;
+    for (uint32_t i = 0; i < data_->count; ++i)
+      if (required_[i] & ~declared_[i]) return false;
+    return true;
+  }
+  std::string attribute(uint32_t reg, uint32_t mask, uint32_t signature_mask, bool system, std::string name) {
+    if (!data_) return name;
+    if (!valid_ || system || !mask || (mask & ~signature_mask)) { valid_ = false; return name; }
+    for (uint32_t i = 0; i < data_->count; ++i) {
+      const auto &entry = data_->entries[i];
+      if (entry.input_register != reg || entry.input_mask != signature_mask) continue;
+      if (seen_ & (1u << i)) { valid_ = false; return name; }
+      seen_ |= 1u << i;
+      declared_[i] = mask;
+      return "reg" + std::to_string(entry.output_register) + "_" + std::to_string(std::countr_zero(entry.output_mask));
+    }
+    valid_ = false;
+    return name;
+  }
+};
+
+struct SignatureContext {
+  Prologues &prologue;
+  Epilogues &epilogue;
+  air::FunctionSignatureBuilder &func_signature;
+  io_binding_map &resource;
+  SM50_SHADER_IA_INPUT_LAYOUT_DATA *ia_layout;
+  PixelInputLinkage pixel_input_linkage;
+  bool dual_source_blending;
+  bool disable_depth_output;
+  bool skip_vertex_output;
+  // MacRunner POST-CS 25.10.2026: the uv-map fragment function keeps the input declarations of the pixel shader and
+  // defines its own colour outputs; the pixel shader's render target / depth outputs are not declared.
+  bool skip_pixel_output = false;
+  uint32_t pull_mode_reg_mask;
+  uint32_t unorm_output_reg_mask;
+  uint32_t pso_sample_mask;
+  // it is considered optional (as a hint)
+  air::MTLPixelFormat pixel_formats[8];
+
+  SignatureContext(
+      Prologues &prologue, Epilogues &epilogue, air::FunctionSignatureBuilder &func_signature, io_binding_map &resource
+  ) :
+      prologue(prologue),
+      epilogue(epilogue),
+      func_signature(func_signature),
+      resource(resource),
+      ia_layout(nullptr),
+      dual_source_blending(false),
+      disable_depth_output(false),
+      skip_vertex_output(false),
+      pull_mode_reg_mask(0),
+      unorm_output_reg_mask(0),
+      pso_sample_mask(0xffffffff) {
+    memset(pixel_formats, 0, sizeof(pixel_formats));
+  };
+};
+
+RegisterComponentType component_type_from_pixel_format(air::MTLPixelFormat format);
+
+struct MeshOutputContext {
+  llvm::Value *vertex_id;
+  llvm::Value *primitive_id;
+};
+
+class Signature {
+
+public:
+  Signature(const microsoft::D3D11_SIGNATURE_PARAMETER &parameter) :
+      semantic_name_(parameter.SemanticName),
+      semantic_index_(parameter.SemanticIndex),
+      stream_(parameter.Stream),
+      mask_(parameter.Mask),
+      usage_mask_(parameter.AlwaysReads_Mask),
+      register_(parameter.Register),
+      precision_(parameter.MinPrecision),
+      system_value_(parameter.SystemValue),
+      component_type_((RegisterComponentType)parameter.ComponentType) {
+    std::transform(semantic_name_.begin(), semantic_name_.end(), semantic_name_.begin(), [](auto c) {
+      return std::tolower(c);
+    });
+  }
+
+  Signature()
+      : semantic_name_("INVALID"), semantic_index_(0), stream_(0), mask_(0), usage_mask_(0),
+        register_(0), precision_(0), system_value_(microsoft::D3D10_SB_NAME_UNDEFINED),
+        component_type_(RegisterComponentType::Unknown) {}
+
+  std::string_view semanticName() const { return semantic_name_; }
+
+  uint32_t semanticIndex() const { return semantic_index_; }
+
+  std::string fullSemanticString() const {
+    return semantic_name_ + std::to_string(semantic_index_);
+  }
+
+  std::string consistentAttributeName() const {
+    return "reg" + std::to_string(register_) + "_" + std::to_string(std::countr_zero(mask_ & 0xFu));
+  }
+
+  uint32_t stream() const { return stream_; }
+
+  uint32_t mask() const { return mask_; }
+  uint32_t usageMask() const { return usage_mask_; }
+  uint32_t precision() const { return precision_; }
+
+  uint32_t reg() const { return register_; }
+
+  bool isSystemValue() const {
+    return system_value_ != microsoft::D3D10_SB_NAME_UNDEFINED;
+  }
+
+  microsoft::D3D10_SB_NAME systemValue() const { return system_value_; }
+
+  RegisterComponentType componentType() const {
+    return (RegisterComponentType)component_type_;
+  }
+
+private:
+  std::string semantic_name_;
+  uint32_t semantic_index_;
+  uint32_t stream_;
+  uint32_t mask_;
+  uint32_t usage_mask_;
+  uint32_t register_;
+  uint32_t precision_;
+  microsoft::D3D10_SB_NAME system_value_;
+  RegisterComponentType component_type_;
+};
+
+class SM50ShaderInternal {
+public:
+  dxmt::dxbc::ShaderInfo shader_info;
+  dxmt::air::FunctionSignatureBuilder func_signature;
+  std::vector<Signature> output_signature;
+  std::vector<Signature> input_signature;
+  std::vector<std::unique_ptr<BasicBlock>> bbs;
+  std::unique_ptr<llvm::LLVMContext> dxil_context;
+  std::unique_ptr<llvm::Module> dxil;
+  dxil::EntryPoint dxil_entry;
+  // MacRunner module-meta 17.10: условия куратора для модульных флагов AIR, считаются по DXIL при initialize
+  bool dxil_all_fast = false;            // все fp-инструкции с полным fast и нет !dx.precise
+  std::string dxil_denorm_mode;          // атрибут "fp32-denorm-mode" функции (пусто = нет атрибута, по DXIL.rst умолчание any)
+  dxil::EntryPoint dxil_patch_constant_entry; // MacRunner dxil-tess: функция patch-constant HS (та же подпись, другая функция)
+  std::vector<std::function<void(SignatureContext &)>> signature_handlers;
+  microsoft::D3D10_SB_TOKENIZED_PROGRAM_TYPE shader_type;
+  /* for domain shader, it refers to patch constant input count */
+  uint32_t max_input_register = 0;
+  uint32_t max_output_register = 0;
+  uint32_t pso_valid_output_reg_mask = 0;
+  std::vector<uint8_t> fragment_translation_probe_dxbc;
+  uint32_t max_patch_constant_output_register = 0;
+  std::vector<MTL_SM50_SHADER_ARGUMENT> args_reflection_cbuffer;
+  std::vector<MTL_SM50_SHADER_ARGUMENT> args_reflection;
+  uint32_t threadgroup_size[3] = {0};
+  uint32_t input_control_point_count = ~0u;
+  uint32_t output_control_point_count = ~0u;
+  microsoft::D3D11_SB_TESSELLATOR_PARTITIONING tessellation_partition = {};
+  float max_tesselation_factor = 64.0f;
+  microsoft::D3D11_SB_TESSELLATOR_OUTPUT_PRIMITIVE tessellator_output_primitive = {};
+  microsoft::D3D11_SB_TESSELLATOR_DOMAIN tessellation_domain = {};
+  std::vector<PatchConstantScalarInfo> patch_constant_scalars;
+  uint32_t hull_maximum_threads_per_patch = 0;
+  std::vector<ScalarInfo> clip_distance_scalars;
+  std::vector<ScalarInfo> cull_distance_scalars;
+  microsoft::D3D10_SB_PRIMITIVE gs_input_primitive = {};
+  std::vector<std::function<void(MeshOutputContext &, IOHelper &)>> mesh_output_handlers;
+  uint32_t num_mesh_vertex_data = 0;
+  microsoft::D3D10_SB_PRIMITIVE_TOPOLOGY gs_output_topology = {};
+  uint32_t gs_max_vertex_output = 0;
+  uint32_t gs_instance_count = 1;
+  uint32_t ps_has_coverage_output = 0;
+
+  BasicBlock *entry() const {
+    return bbs.front().get();
+  }
+};
+
+class SM50ErrorInternal {
+public:
+  llvm::SmallVector<char, 0> buf;
+};
+
+#define SM50_RETURN_ERROR(errorObj, ppError, errorCode) \
+  do { \
+    if (ppError) \
+      *(ppError) = (sm50_error_t)(errorObj).release(); \
+    return errorCode; \
+  } while (0)
+
+void handle_signature(
+  microsoft::CSignatureParser &inputParser,
+  microsoft::CSignatureParser5 &outputParser,
+  microsoft::D3D10ShaderBinary::CInstruction &Inst, SM50ShaderInternal *sm50_shader,
+  uint32_t phase
+);
+
+std::vector<std::unique_ptr<BasicBlock>> read_control_flow(
+    microsoft::D3D10ShaderBinary::CShaderCodeParser &Parser, SM50ShaderInternal *sm50_shader,
+    microsoft::CSignatureParser &inputParser, microsoft::CSignatureParser5 &outputParser
+);
+
+uint32_t next_pow2(uint32_t x);
+
+size_t estimate_payload_size(SM50ShaderInternal *pHullStage, float factor, uint32_t patch_per_group);
+
+size_t estimate_mesh_size(SM50ShaderInternal *pDomainStage, uint32_t max_potential_factor_int);
+
+std::unique_ptr<BindingMap> setup_binding_table2(
+    const ShaderInfo *shader_info, air::FunctionSignatureBuilder &func_signature, llvm::Module &module,
+    uint32_t argbuffer_constant_slot = SM50_BINDING_INDEX_CONSTANT_BUFFER, uint32_t argbuffer_slot = SM50_BINDING_INDEX_ARGUMENT_TABLE
+);
+
+std::unique_ptr<BindingMap> setup_binding_rootsig(
+    const ShaderInfo *shader_info, air::FunctionSignatureBuilder &func_signature, llvm::Module &module,
+    microsoft::D3D10_SB_TOKENIZED_PROGRAM_TYPE shader_type, const void *bytecode, size_t bytecode_length,
+    uint32_t root_sig_slot = SM50_BINDING_INDEX_ROOT_ARGUMENTS,
+    uint32_t static_sampler_slot = SM50_BINDING_INDEX_STATIC_SAMPLERS
+);
+
+void setup_metal_version(llvm::Module &module, SM50_SHADER_METAL_VERSION metal_version);
+// MacRunner module-meta 17.10: !air.compile_options / fp-атрибуты точки входа / air.version по MACRUNNER_AIRCONV_MODULE_META
+void setup_module_meta(llvm::Module &module, llvm::Function *function, const dxmt::dxbc::SM50ShaderInternal *shader);
+
+void setup_temp_register(
+  const ShaderInfo *shader_info, io_binding_map &resource_map,
+  air::AirType &types, llvm::Module &module, llvm::IRBuilder<> &builder
+);
+
+void setup_immediate_constant_buffer(
+  const ShaderInfo *shader_info, io_binding_map &resource_map,
+  air::AirType &types, llvm::Module &module, llvm::IRBuilder<> &builder
+);
+
+llvm::Error convert_dxbc_geometry_shader(
+  SM50ShaderInternal *pShaderInternal, const char *name,
+  SM50ShaderInternal *pVertexStage, llvm::LLVMContext &context,
+  llvm::Module &module, SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs
+);
+
+llvm::Error convert_dxbc_vertex_for_geometry_shader(
+  const SM50ShaderInternal *pShaderInternal, const char *name,
+  const SM50ShaderInternal *pGeometryStage,
+  llvm::LLVMContext &context, llvm::Module &module,
+  SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs
+);
+
+llvm::Error convert_dxbc_vertex_hull_shader(
+    SM50ShaderInternal *pVertexStage, SM50ShaderInternal *pHullStage, const char *name, llvm::LLVMContext &context,
+    llvm::Module &module, SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs
+);
+
+llvm::Error convert_dxbc_tesselator_domain_shader(
+    SM50ShaderInternal *pShaderInternal, const char *name, SM50ShaderInternal *pHullStage, llvm::LLVMContext &context,
+    llvm::Module &module, SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs
+);
+
+// MacRunner POST-CS 25.10.2026 (post_cs.cpp): a DXIL pixel shader as the compute kernel / uv-map fragment function of
+// a one-target post-process pass, and the content-key query of its vertex shader (airconv_public.h).
+llvm::Error convert_post_cs(
+  SM50ShaderInternal *pShaderInternal, const char *name, llvm::LLVMContext &context, llvm::Module &module,
+  SM50_SHADER_COMPILATION_ARGUMENT_DATA *pArgs, SM50_SHADER_PS_AS_COMPUTE_DATA *post_cs
+);
+void post_cs_vertex_key(const SM50ShaderInternal &shader, SM50_SHADER_POST_CS_VS_KEY_DATA &key);
+
+template <SM50_SHADER_COMPILATION_ARGUMENT_TYPE data_e, typename data_t>
+bool
+args_get_data(const struct SM50_SHADER_COMPILATION_ARGUMENT_DATA *data, data_t **out) {
+  const SM50_SHADER_COMPILATION_ARGUMENT_DATA *arg = data;
+  while (arg) {
+    switch (arg->type) {
+    case data_e:
+      *out = (data_t *)arg;
+      return true;
+    default:
+      break;
+    }
+    arg = (const SM50_SHADER_COMPILATION_ARGUMENT_DATA *)arg->next;
+  }
+  *out = NULL;
+  return false;
+}
+
+} // namespace dxmt::dxbc
