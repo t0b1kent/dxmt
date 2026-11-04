@@ -9,9 +9,11 @@ import struct
 import subprocess
 import sys
 import time
-import prepare_source
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import prepare_source
+
 TARGETS = {
     'x64': ['src/d3d11/d3d11.dll', 'src/d3d10/d3d10core.dll.postproc',
             'src/dxgi/dxgi.dll.postproc', 'src/winemetal/winemetal.dll.postproc'],

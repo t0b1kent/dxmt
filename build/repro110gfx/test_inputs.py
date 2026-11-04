@@ -4,6 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 import build as producer
@@ -15,6 +16,12 @@ class SourceInputs(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(dir=os.environ['REPRO109_TEST_TMP'])
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+
+    def test_entrypoint_loads_its_sibling_in_isolated_python_from_another_directory(self):
+        child = subprocess.run([sys.executable, '-I', '-B', str(Path(producer.__file__).resolve()), '--help'],
+                               cwd=self.root, capture_output=True, text=True, timeout=10)
+        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertIn('--variant', child.stdout)
 
     def test_public_git_blob_transport_checks_real_objects(self):
         subprocess.run(['git', 'init', '--quiet', self.root], check=True)
