@@ -1,0 +1,16 @@
+; SPDX-License-Identifier: LGPL-2.1-or-later. HyperBridge DX9, MacRunner fork of DXMT. Copyright (c) 2026 Timur Ravilov.
+LIBRARY D3D9.DLL
+EXPORTS
+  Direct3DShaderValidatorCreate9 @24
+  D3DPERF_BeginEvent @27
+  D3DPERF_EndEvent @28
+  D3DPERF_GetStatus @29
+  D3DPERF_QueryRepeatFrame @30
+  D3DPERF_SetMarker @31
+  D3DPERF_SetOptions @32
+  D3DPERF_SetRegion @33
+  DebugSetLevel @34
+  DebugSetMute @35
+  Direct3D9EnableMaximizedWindowedModeShim @36
+  Direct3DCreate9 @37
+  Direct3DCreate9Ex @38
