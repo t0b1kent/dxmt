@@ -74,7 +74,7 @@ def native_compile_commands(args, source, builddir, output, wrapper):
 def selected_inputs(args):
     if args.stage == 'source':
         return
-    target = 'i686-w64-mingw32-' if args.kind == 'pe' else 'x86_64-w64-mingw32-'
+    target = ('i686' if args.kind == 'pe' else graphics.TRIPLES['native']) + '-w64-mingw32-'
     required = [args.compiler / 'bin' / (target + name) for name in ['clang', 'clang++']]
     if args.kind == 'pe':
         required += [args.wine / 'bin/winebuild', *[args.wine / 'lib/wine/i386-windows' / name
@@ -133,15 +133,15 @@ def build(args):
         else:
             phase = 'CONFIGURE'
             cross = root / 'cross.ini'
-            # The project enables its native AIR/DXBCParser targets in an x64/EC
-            # cross context, not an i386 one. These libraries still use the native
-            # ARM64 Apple compiler; no PE target is built in this phase.
-            tools = {key: str(args.compiler / 'bin' / ('x86_64-w64-mingw32-' + value))
+            # Match the working ARM64EC context: the project uses its host CPU
+            # family to select -arch arm64 for the native AIR/DXBCParser libraries.
+            # No PE target is built here; these libraries use unwrapped Apple clang.
+            tools = {key: str(args.compiler / 'bin' / (graphics.TRIPLES['native'] + '-w64-mingw32-' + value))
                 for key, value in [('c', 'clang'), ('cpp', 'clang++'), ('ar', 'ar'), ('strip', 'strip'),
                                    ('windres', 'windres'), ('widl', 'widl')]}
             cross.write_text('[binaries]\n' + ''.join(k + ' = ' + repr(v) + '\n' for k, v in tools.items()) +
                 "\n[properties]\nneeds_exe_wrapper = true\n\n[host_machine]\nsystem = 'windows'\n"
-                "cpu_family = 'x86_64'\ncpu = 'x86_64'\nendian = 'little'\n")
+                "cpu_family = 'aarch64'\ncpu = 'aarch64'\nendian = 'little'\n")
             builddir = root / 'build'
             run('meson', [args.meson, 'setup', builddir, source, '--cross-file', cross, '-Dbuildtype=release',
                 '-Dnative_llvm_path=' + str(args.llvm), '-Dwine_install_path=' + str(args.wine),
