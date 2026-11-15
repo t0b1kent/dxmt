@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Build the selected c32 graphics modules from the exact retained source lines."""
+"""Build selected c33r graphics modules from sealed inputs with LLVM23 and the pinned TSO filter."""
 import argparse
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import struct
 import subprocess
 import sys
@@ -20,7 +22,11 @@ TARGETS = {
             'src/dxgi/dxgi.dll', 'src/winemetal/winemetal.dll.postproc'],
     'ec': ['src/d3d12/d3d12.dll', 'src/dxgi/dxgi.dll', 'src/winemetal/winemetal.dll.postproc'],
     'native': ['src/winemetal/unix/winemetal.so', 'src/airconv/darwin/airconv'],
+    'i386': ['src/d3d11/d3d11.dll', 'src/d3d10/d3d10core.dll',
+             'src/dxgi/dxgi.dll', 'src/winemetal/winemetal.dll.postproc'],
 }
+SOURCE_VARIANTS = {'x64': 'c17', 'ec': 'native', 'native': 'native', 'i386': 'hbdx9'}
+TRIPLES = {'x64': 'x86_64', 'ec': 'arm64ec', 'native': 'arm64ec', 'i386': 'i686'}
 STACK_PROBE = bytes.fromhex('f0ed7cd3f1030091310640d1100640f13f0240f9acffff54c0035fd6')
 
 
@@ -57,7 +63,8 @@ def pe_identity(path, variant, checker=None):
     data = path.read_bytes()
     pe = struct.unpack_from('<I', data, 0x3c)[0]
     machine = struct.unpack_from('<H', data, pe + 4)[0]
-    if data[pe:pe + 4] != b'PE\0\0' or machine != 0x8664:
+    expected = 0x14c if variant == 'i386' else 0x8664
+    if data[pe:pe + 4] != b'PE\0\0' or machine != expected:
         raise ValueError('Wrong output PE image machine: ' + hex(machine))
     result = dict(machine=hex(machine))
     if variant == 'ec':
@@ -77,12 +84,17 @@ def selected_inputs(args):
         return
     required = [args.meson, args.ninja, args.llvm / 'include/llvm/Config/llvm-config.h',
                 args.wine / 'include/wine/windows/windef.h']
-    triple = 'x86_64' if args.variant == 'x64' else 'arm64ec'
+    triple = TRIPLES[args.variant]
     required += [args.compiler / 'bin' / (triple + '-w64-mingw32-' + tool)
                  for tool in ['clang', 'clang++', 'ar', 'strip', 'windres', 'widl']]
     for path in required:
         if not path.is_file():
             raise ValueError('Required source-built input or tool missing: ' + str(path))
+    banner = subprocess.check_output([str(args.compiler / 'bin' / (triple + '-w64-mingw32-clang')), '--version'],
+                                     text=True, timeout=15)
+    if not re.search(r'^clang version 23\.1\.1(?:\s|$)', banner, re.M):
+        raise ValueError('Pinned LLVM23.1.1 compiler required')
+    prepare_source.build_tool('ldpfilter23')
     native_link_options(args.variant, args.llvm)
     if args.variant == 'ec' and (args.ec_checker is None or not args.ec_checker.is_file()):
         raise ValueError('Required pinned Wine ARM64EC image checker missing')
@@ -99,8 +111,14 @@ def build(args):
                   first_failure=None, outputs=[], commands=[], games='NOT_ENABLED',
                   signing='NOT_ENABLED', stands='NOT_ENABLED', install='skipped')
     phase = 'SOURCE'
-    env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET='14.0', PYTHONDONTWRITEBYTECODE='1')
+    env = {key: value for key, value in os.environ.items()
+           if key in ['HOME', 'TMPDIR', 'DEVELOPER_DIR', 'LANG', 'LC_ALL', 'PATH', 'SDKROOT']}
+    env.update(MACOSX_DEPLOYMENT_TARGET='26.5', PYTHONDONTWRITEBYTECODE='1', TSO64_LDPFILTER='1')
     env['PATH'] = str(args.ninja.parent) + os.pathsep + env.get('PATH', '')
+    wrapper = prepare_source.build_tool('ldpfilter23')
+    if args.variant in ['ec', 'native']:
+        env['CC'] = shlex.join([sys.executable, str(wrapper), str(getattr(args, 'native_clang', '/usr/bin/clang'))])
+        env['CXX'] = shlex.join([sys.executable, str(wrapper), str(getattr(args, 'native_clangxx', '/usr/bin/clang++'))])
     def run(name, argv, cwd=root):
         started = time.monotonic()
         path = reports / (name + '.log')
@@ -115,7 +133,7 @@ def build(args):
         return path
     try:
         source = root / 'source'
-        result['source'] = prepare_source.prepare('native' if args.variant == 'native' else 'c17', args.headers, source, zlib=args.zlib)
+        result['source'] = prepare_source.prepare(SOURCE_VARIANTS[args.variant], args.headers, source, zlib=args.zlib)
         if args.stage == 'source':
             result['status'] = 'EXACT_PRODUCT_SOURCE_PREPARED'
             return 0
@@ -128,15 +146,19 @@ def build(args):
         run('git-commit', identity + ['commit', '--quiet', '-m', 'Exact graphics compilation inputs'], source)
         run('git-tag', identity + ['tag', '-a', result['source']['git_describe'], '-m', 'Retained build version'], source)
         phase = 'CONFIGURE'
-        triple = 'x86_64' if args.variant == 'x64' else 'arm64ec'
+        triple = TRIPLES[args.variant]
         tools = {key: str(args.compiler / 'bin' / (triple + '-w64-mingw32-' + val)) for key, val in
                  [('c', 'clang'), ('cpp', 'clang++'), ('ar', 'ar'), ('strip', 'strip'), ('windres', 'windres'), ('widl', 'widl')]}
+        if args.variant in ['ec', 'native']:
+            for language in ['c', 'cpp']:
+                tools[language] = [sys.executable, str(wrapper), tools[language]]
         cross = root / 'cross.ini'
         cross.write_text('[binaries]\n' + ''.join(k + ' = ' + repr(v) + '\n' for k, v in tools.items()) +
                          "\n[properties]\nneeds_exe_wrapper = true\n\n[host_machine]\nsystem = 'windows'\n" +
-                         "cpu_family = '" + ('x86_64' if args.variant == 'x64' else 'aarch64') + "'\n" +
-                         "cpu = '" + ('x86_64' if args.variant == 'x64' else 'aarch64') + "'\nendian = 'little'\n")
-        options = ['-Dbuildtype=release', '-Dwine_builtin_dll=false', '-Denable_d3d12=true',
+                         "cpu_family = '" + ('x86' if args.variant == 'i386' else 'x86_64' if args.variant == 'x64' else 'aarch64') + "'\n" +
+                         "cpu = '" + ('i686' if args.variant == 'i386' else 'x86_64' if args.variant == 'x64' else 'aarch64') + "'\nendian = 'little'\n")
+        options = ['-Dbuildtype=release', '-Dwine_builtin_dll=false',
+                   '-Denable_d3d12=' + ('false' if args.variant == 'i386' else 'true'),
                    '-Denable_tests=false', '-Denable_nvapi=false', '-Denable_nvngx=false', '--wrap-mode=nodownload',
                    '-Dnative_llvm_path=' + str(args.llvm), '-Dwine_install_path=' + str(args.wine)]
         options += native_link_options(args.variant, args.llvm)
@@ -144,13 +166,8 @@ def build(args):
             result['native_link_inputs'] = [
                 dict(path=name, sha256=sha(args.llvm / 'lib' / name))
                 for name in ['libzstd.a', 'libunwind.a']]
-        if args.variant != 'x64':
-            stub = root / 'chkstk.obj'
-            run('stack-probe', [tools['c'], '-c', HERE / 'chkstk_arm64ec.S', '-o', stub])
-            if text_section(stub.read_bytes()) != STACK_PROBE:
-                raise ValueError('Rebuilt stack probe differs from the accepted c17 text')
-            result['stack_probe_text'] = hashlib.sha256(STACK_PROBE).hexdigest()
-            options.append('-Dc_link_args=' + str(stub))
+        # LLVM23 supplies the startup/probe objects used by the accepted build.
+        # The historical LLVM22 supplemental chkstk object is not linked here.
         builddir = root / 'build'
         run('meson', [args.meson, 'setup', builddir, source, '--cross-file', cross, *options])
         run('ninja-targets', [args.ninja, '-C', builddir, '-n', *TARGETS[args.variant]])
@@ -197,6 +214,8 @@ def main():
     parser.add_argument('--meson', type=Path, default=Path('/MISSING_MESON'))
     parser.add_argument('--ninja', type=Path, default=Path('/MISSING_NINJA'))
     parser.add_argument('--ec-checker', type=Path)
+    parser.add_argument('--native-clang', type=Path, default=Path('/usr/bin/clang'))
+    parser.add_argument('--native-clangxx', type=Path, default=Path('/usr/bin/clang++'))
     parser.add_argument('--work', type=Path, required=True)
     raise SystemExit(build(parser.parse_args()))
 

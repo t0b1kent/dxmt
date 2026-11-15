@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reconstruct the c32 graphics compilation inputs from public Git and sealed text postimages."""
+"""Reconstruct the candidate graphics inputs from public Git and sealed postimages."""
 import argparse
 import hashlib
 import io
@@ -66,6 +66,13 @@ def file_bytes(row, blobs, headers, here=HERE, zlib=None):
             if not data.endswith(b'\n'):
                 raise ValueError('Source transport LF missing')
             data = data[:-1]
+    elif 'public_source' in row:
+        name = relative(row['public_source'])
+        repository = Path(here).resolve().parents[1]
+        path = repository.joinpath(*name.parts)
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(repository):
+            raise ValueError('Missing or foreign public source postimage: ' + row['path'])
+        data = path.read_bytes()
     elif 'zlib' in row:
         if zlib is None:
             raise ValueError('Pinned upstream zlib source checkout required')
@@ -89,10 +96,26 @@ def file_bytes(row, blobs, headers, here=HERE, zlib=None):
     return data
 
 
+def build_tool(name, here=HERE):
+    here = Path(here).resolve()
+    lock = json.loads((here / 'source.lock.json').read_bytes())
+    row = lock.get('build_tools', {}).get(name)
+    if row is None:
+        raise ValueError('Pinned graphics build tool missing: ' + name)
+    path = here.joinpath(*relative(row['path']).parts)
+    if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(here):
+        raise ValueError('Missing or foreign graphics build tool: ' + name)
+    if identity(path.read_bytes()) != {key: row[key] for key in ['bytes', 'sha256']}:
+        raise ValueError('Pinned graphics build tool bytes differ: ' + name)
+    return path
+
+
 def prepare(variant, headers, output=None, *, zlib=None, here=HERE, repository=REPOSITORY):
     lock = json.loads((here / 'source.lock.json').read_bytes())
     if lock['schema'] != 1 or variant not in lock['variants']:
         raise ValueError('Unknown graphics source variant')
+    for name in lock.get('build_tools', {}):
+        build_tool(name, here)
     rows = lock['variants'][variant]['files']
     if len({r['path'] for r in rows}) != len(rows):
         raise ValueError('Duplicate source path')
@@ -131,7 +154,7 @@ def prepare(variant, headers, output=None, *, zlib=None, here=HERE, repository=R
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--variant', choices=['c17', 'native'], required=True)
+    parser.add_argument('--variant', choices=['c17', 'native', 'hbdx9'], required=True)
     parser.add_argument('--headers', type=Path, required=True)
     parser.add_argument('--zlib', type=Path, required=True)
     parser.add_argument('--out', type=Path)

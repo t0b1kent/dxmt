@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import build as producer
+import build_hbdx9 as hbdx9
 import prepare_source as source
 
 
@@ -36,7 +37,7 @@ class SourceInputs(unittest.TestCase):
         expected = [str(self.root / 'lib' / name) for name in ['libzstd.a', 'libunwind.a']]
         for value in options:
             self.assertEqual(json.loads(value.split('=', 1)[1]), expected)
-        for variant in ['x64', 'ec']:
+        for variant in ['x64', 'ec', 'i386']:
             self.assertEqual(producer.native_link_options(variant, self.root / 'missing'), [])
 
     def test_missing_static_native_dependency_refuses_before_build(self):
@@ -85,7 +86,7 @@ class SourceInputs(unittest.TestCase):
             source.file_bytes(row, {}, None, self.root)
 
     def test_missing_tools_refuse_before_creating_build_output_for_all_variants(self):
-        for variant in ['x64', 'ec', 'native']:
+        for variant in ['x64', 'ec', 'native', 'i386']:
             with self.subTest(variant=variant):
                 missing = self.root / 'absent'
                 args = argparse.Namespace(variant=variant, stage='configure',
@@ -94,6 +95,75 @@ class SourceInputs(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'Required source-built input or tool missing'):
                     producer.build(args)
                 self.assertFalse(args.work.exists())
+
+    def test_public_source_transport_checks_contents_and_refuses_symlinks(self):
+        here = self.root / 'build/repro110gfx'
+        here.mkdir(parents=True)
+        path = self.root / 'src/hbdx9/own.cpp'
+        path.parent.mkdir(parents=True)
+        data = b'// own inert source fixture\n'
+        path.write_bytes(data)
+        row = dict(path='src/hbdx9/own.cpp', public_source='src/hbdx9/own.cpp', **source.identity(data))
+        self.assertEqual(source.file_bytes(row, {}, None, here), data)
+        path.write_bytes(data + b'// corruption\n')
+        with self.assertRaisesRegex(ValueError, 'Product source differs'):
+            source.file_bytes(row, {}, None, here)
+        path.unlink(); path.symlink_to('/etc/hosts')
+        with self.assertRaisesRegex(ValueError, 'Missing or foreign public source'):
+            source.file_bytes(row, {}, None, here)
+
+    def test_build_tool_pin_refuses_changed_compiler_filter(self):
+        path = self.root / 'filter.py'
+        data = b'# own inert tool fixture\n'
+        path.write_bytes(data)
+        lock = dict(build_tools=dict(ldpfilter23=dict(path=path.name, **source.identity(data))))
+        (self.root / 'source.lock.json').write_text(json.dumps(lock))
+        self.assertEqual(source.build_tool('ldpfilter23', self.root), path)
+        path.write_bytes(data + b'# changed\n')
+        with self.assertRaisesRegex(ValueError, 'build tool bytes differ'):
+            source.build_tool('ldpfilter23', self.root)
+
+    def test_hbdx9_missing_inputs_refuse_before_creating_output(self):
+        for kind in ['pe', 'native']:
+            absent = self.root / 'missing'
+            args = argparse.Namespace(kind=kind, stage='compile', compiler=absent, wine=absent,
+                meson=absent, ninja=absent, llvm=absent, native_clang=absent, native_clangxx=absent,
+                native_ar=absent, work=self.root / kind)
+            with self.assertRaisesRegex(ValueError, 'Required source-built input or tool missing'):
+                hbdx9.build(args)
+            self.assertFalse(args.work.exists())
+
+    def test_hbdx9_commands_keep_filter_scope_and_sse_guest_contract(self):
+        args = argparse.Namespace(compiler=self.root / 'compiler', wine=self.root / 'wine',
+            native_clangxx=self.root / 'clang++', native_ar=self.root / 'ar', llvm=self.root / 'llvm')
+        commands = hbdx9.pe_commands(args, self.root / 'source', self.root / 'output')
+        shim = commands[-1][1]
+        self.assertIn('-msse2', shim)
+        self.assertIn('-mfpmath=sse', shim)
+        self.assertIn('-Wl,--no-insert-timestamp', shim)
+        self.assertIn('i686-w64-mingw32-clang++', str(shim[0]))
+        wrapper = self.root / 'pinned-filter.py'
+        commands = hbdx9.native_compile_commands(args, self.root / 'source', self.root / 'build',
+                                                self.root / 'output', wrapper)
+        compilations = [argv for name, argv in commands if '-c' in argv]
+        self.assertEqual(len(compilations), 6)
+        for argv in compilations:
+            self.assertEqual(argv[:3], [sys.executable, wrapper, args.native_clangxx])
+            self.assertIn('-mmacosx-version-min=26.5', argv)
+        link = commands[-1][1]
+        self.assertEqual(link[0], args.native_clangxx)
+        self.assertNotIn(wrapper, link)
+        self.assertNotIn('-lLLVMX86CodeGen', link)
+
+    def test_i386_image_checker_rejects_amd64(self):
+        data = bytearray(128); data[:2] = b'MZ'
+        struct.pack_into('<I', data, 0x3c, 64)
+        data[64:68] = b'PE\0\0'; struct.pack_into('<H', data, 68, 0x14c)
+        path = self.root / 'own.dll'; path.write_bytes(data)
+        self.assertEqual(producer.pe_identity(path, 'i386')['machine'], '0x14c')
+        struct.pack_into('<H', data, 68, 0x8664); path.write_bytes(data)
+        with self.assertRaisesRegex(ValueError, 'PE image machine'):
+            producer.pe_identity(path, 'i386')
 
 
 if __name__ == '__main__':

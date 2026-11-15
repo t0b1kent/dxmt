@@ -1,0 +1,4 @@
+; SPDX-License-Identifier: LGPL-2.1-or-later. HyperBridge DX9, MacRunner fork of DXMT. Copyright (c) 2026 Timur Ravilov.
+LIBRARY hbdx9.dll
+EXPORTS
+  HBDX9Call
