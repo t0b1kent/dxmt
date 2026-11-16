@@ -13120,8 +13120,8 @@
         },
         {
           "path": "src/hbdx9/d3d9_shim.cpp",
-          "bytes": 255639,
-          "sha256": "838202bf4ea21fdc359444b3692fd926713acbc30a8b4f95f324b7ebd8ef33db",
+          "bytes": 259413,
+          "sha256": "cf48dccc55690e07e2a606ec96e6695d60eee4b81399c1fe22eec2d0b054d5d2",
           "executable": false,
           "public_source": "src/hbdx9/d3d9_shim.cpp"
         },
@@ -13932,7 +13932,7 @@
           "git_blob": "192299e969c8fc3f732e6ed82b0c66cc296daace"
         }
       ],
-      "total_bytes": 10222336
+      "total_bytes": 10226110
     }
   },
   "directx": {
