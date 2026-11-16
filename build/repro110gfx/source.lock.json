@@ -13958,9 +13958,15 @@
   "build_tools": {
     "ldpfilter23": {
       "path": "ldpfilter23.py",
-      "bytes": 6986,
-      "sha256": "597fb73900a21eac9b00985e0879c7b0f9184f6e68d23db3d5c1ac2757b46515",
-      "upstream_source_sha256": "903c52e459b5cdc179283ee74a56d4743fbbac5a0036b0ba18ce30e9c62e677f"
+      "bytes": 6076,
+      "sha256": "3091402bb2fa69b10ce47540473e1fb3ce2c830c04441a60287dbdcbaccda00a",
+      "executable": true
+    },
+    "arm64ec_public_abi": {
+      "path": "arm64ec_public_abi.py",
+      "bytes": 5672,
+      "sha256": "7ae40a44fa2f61fe199d400add7976a7d5c280ff390dd2f7d73ab540c009cefd",
+      "executable": false
     }
   },
   "compiler": {
