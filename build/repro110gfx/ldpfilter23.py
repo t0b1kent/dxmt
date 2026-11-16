@@ -14,16 +14,9 @@ import os, re, subprocess, sys
 real, args = sys.argv[1], sys.argv[2:]
 SRC = ('.c', '.cc', '.cpp', '.cxx', '.m', '.mm')
 srcs = [a for a in args if a.endswith(SRC) and not a.startswith('-')]
-if '-c' not in args and '-shared' in args and 'arm64ec-w64-mingw32' in os.path.basename(real) and '-nostartfiles' not in args \
-        and os.environ.get('TSO64_LDPFILTER', '1') != '0':
-    # Link of an ARM64EC DLL: the driver puts dllcrt2.o BEFORE the user's objects, and its (prebuilt, pair-loading) copies of the COMDAT
-    # entry thunks ($ientry_thunk$cdecl$i8$i8, ...i8i8i8) win over ours. Same inputs, startup objects moved after the user's objects.
-    lib = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(real))), 'arm64ec-w64-mingw32', 'lib')
-    if not os.path.isdir(lib):   # INTEGRATE111 12.11: llvm-mingw 20260908 keeps the (hybrid) ARM64EC startup objects in aarch64-w64-mingw32/lib
-        lib = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(real))), 'aarch64-w64-mingw32', 'lib')
-    last = max(i for i, a in enumerate(args) if a.endswith(('.obj', '.o')) and not a.startswith('-'))
-    args = args[:last + 1] + [os.path.join(lib, 'dllcrt2.o'), os.path.join(lib, 'crtbegin.o')] + args[last + 1:] + [os.path.join(lib, 'crtend.o'), '-nostartfiles']
-    os.execv(real, [real] + args)
+# Keep the compiler's standard CRT/startup-object order. Reordering it to
+# prefer filtered user COMDATs can select an aggregate-return entry thunk
+# for ordinary Windows COM methods with the same canonical thunk name.
 if '-c' not in args or '-o' not in args or len(srcs) != 1 or '-E' in args or '-S' in args:
     os.execv(real, [real] + args)
 out = args[args.index('-o') + 1]; tmp = out + '.tso64.s'
