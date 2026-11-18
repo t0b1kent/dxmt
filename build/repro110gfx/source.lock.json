@@ -13120,8 +13120,8 @@
         },
         {
           "path": "src/hbdx9/d3d9_shim.cpp",
-          "bytes": 259413,
-          "sha256": "cf48dccc55690e07e2a606ec96e6695d60eee4b81399c1fe22eec2d0b054d5d2",
+          "bytes": 263231,
+          "sha256": "db00b82dd595b94e563807ff39bcc5f9f7edbd6c5fc7153289770545c51fd5e1",
           "executable": false,
           "public_source": "src/hbdx9/d3d9_shim.cpp"
         },
