@@ -241,11 +241,8 @@ struct hb_cache {
   sqlite3 *db = nullptr; sqlite3_stmt *get = nullptr, *put = nullptr;
   uint32_t hits = 0, misses = 0, writes = 0;
   std::string dir;
-  /* Pipeline cache: Metal binary archive of render PSOs (GPU code, no compile on a hit). */
-  id<MTLBinaryArchive> archive = nil;
-  std::string archive_path;
-  bool archive_dirty = false;
-  std::vector<MTLRenderPipelineDescriptor *> archive_entries;
+  /* pipeline cache: Metal binary archive of every PSO this exe created (GPU code, no compile on a hit) */
+  id<MTLBinaryArchive> archive = nil; std::string archive_path; bool archive_dirty = false;
   uint32_t pso_hits = 0, pso_misses = 0;
 };
 
@@ -808,19 +805,6 @@ static const char k_build_stamp[] = "hbdx9 " __DATE__ " " __TIME__;
 struct hb_cache_hdr { uint32_t magic, vb_slot_mask, ncbufs, nargs, lib_size, pad; char fname[64]; };
 static const uint32_t kCacheMagic = 0x43394248; /* 'HB9C' */
 
-static NSURL *hb_archive_url(const char *path) {
-  return [NSClassFromString(@"NSURL") fileURLWithPath:[NSString stringWithUTF8String:path]];
-}
-
-static id<MTLBinaryArchive> hb_archive_open(hb_device *d, const char *path, NSError **error) {
-  /* Direct class references to these classes made hbdx9.so fail to load under Wine. */
-  MTLBinaryArchiveDescriptor *ad = [[NSClassFromString(@"MTLBinaryArchiveDescriptor") alloc] init];
-  if (path) ad.url = hb_archive_url(path);
-  id<MTLBinaryArchive> archive = [d->device newBinaryArchiveWithDescriptor:ad error:error];
-  [ad release];
-  return archive;
-}
-
 static void hb_cache_open(hb_device *d, const char *exe) {
   const char *off = getenv("DXMT_SHADER_CACHE");
   if (off && !strcmp(off, "0")) return;
@@ -862,97 +846,29 @@ static void hb_cache_open(hb_device *d, const char *exe) {
   /* pipeline archive next to it (DXMT's D3D12 pipeline cache does the same with MTLBinaryArchive) */
   d->cache.archive_path = dir + "hbdx9_pso_" + std::to_string(d->metal_version) + ".metalarchive";
   @autoreleasepool {
+    /* classes looked up at run time: direct class references to these made hbdx9.so fail to load under Wine (07.11) */
+    MTLBinaryArchiveDescriptor *ad = [[NSClassFromString(@"MTLBinaryArchiveDescriptor") alloc] init];
     struct stat sb;
     if (stat(d->cache.archive_path.c_str(), &sb) == 0 && sb.st_size > 0)
-      d->cache.archive = hb_archive_open(d, d->cache.archive_path.c_str(), nullptr);
-    bool loaded = d->cache.archive != nil;
-    if (!d->cache.archive) d->cache.archive = hb_archive_open(d, nullptr, nullptr);
+      ad.url = [NSClassFromString(@"NSURL") fileURLWithPath:[NSString stringWithUTF8String:d->cache.archive_path.c_str()]];
+    NSError *err = nil;
+    d->cache.archive = [d->device newBinaryArchiveWithDescriptor:ad error:&err];
+    if (!d->cache.archive && ad.url) { ad.url = nil; d->cache.archive = [d->device newBinaryArchiveWithDescriptor:ad error:&err]; }
+    [ad release];
     fprintf(stderr, "hbdx9-core: pipeline archive %s %s\n", d->cache.archive_path.c_str(),
-            d->cache.archive ? (loaded ? "loaded" : "new") : "unavailable");
+            d->cache.archive ? (stat(d->cache.archive_path.c_str(), &sb) == 0 ? "loaded" : "new") : "unavailable");
   }
 }
 
-/* Metal can reject an append to a loaded archive even if the same PSO
-   serializes in a fresh one. Rebuild from this device's hits and misses.
-   On failure, bisect the untested range and replay the accepted entries in
-   a fresh trial each time. Keep the original file until a trial succeeds. */
-static bool hb_archive_recover(hb_device *d, const std::string &dir, const char *trial_path) {
-  auto &cache = d->cache;
-  const std::string checkpoint = dir + "/accepted";
-  std::vector<MTLRenderPipelineDescriptor *> accepted;
-  size_t rejected = 0;
-  unsigned trials = 0;
-  constexpr unsigned max_trials = 32;  /* Bound save-time work if many descriptors fail. */
-  auto retry = [&](auto &self, size_t first, size_t last) -> bool {
-    if (trials == max_trials) return true;
-    ++trials;
-    @autoreleasepool {
-      NSError *err = nil;
-      id<MTLBinaryArchive> archive = hb_archive_open(d, nullptr, &err);
-      if (!archive) {
-        WARN("pipeline archive recovery open failed: %s\n", err ? [[err description] UTF8String] : "?");
-        return false;
-      }
-      for (auto *pd : accepted) {
-        if (![archive addRenderPipelineFunctionsWithDescriptor:pd error:&err]) {
-          WARN("pipeline archive recovery replay failed: %s\n", err ? [[err description] UTF8String] : "?");
-          [archive release];
-          return false;
-        }
-      }
-      size_t i = first;
-      for (; i < last; ++i) {
-        if (![archive addRenderPipelineFunctionsWithDescriptor:cache.archive_entries[i] error:&err]) break;
-      }
-      bool serialized = i == last && [archive serializeToURL:hb_archive_url(trial_path) error:&err];
-      [archive release];
-      if (serialized) {
-        if (rename(trial_path, checkpoint.c_str()) != 0) return false;
-        accepted.insert(accepted.end(), cache.archive_entries.begin() + first, cache.archive_entries.begin() + last);
-        return true;
-      }
-      unlink(trial_path);
-      if (last - first == 1) {
-        ++rejected;
-        TRACE("pipeline archive entry rejected: %s\n", err ? [[err description] UTF8String] : "?");
-        return true;
-      }
-    }
-    size_t middle = first + (last - first) / 2;
-    return self(self, first, middle) && self(self, middle, last);
-  };
-
-  bool ok = retry(retry, 0, cache.archive_entries.size());
-  if (ok && !accepted.empty()) {
-    ok = rename(checkpoint.c_str(), cache.archive_path.c_str()) == 0;
-  }
-  unlink(checkpoint.c_str());
-  if (ok) WARN("pipeline archive recovery: kept=%zu rejected=%zu untested=%zu trials=%u\n",
-               accepted.size(), rejected, cache.archive_entries.size() - accepted.size() - rejected, trials);
-  return ok;
-}
-
-/* Keep the last on-disk archive intact until Metal produces a replacement. */
+/* write the archive to a temporary file and rename it over (an archive loaded from the file keeps it mapped) */
 static void hb_archive_save(hb_device *d) {
-  auto &cache = d->cache;
-  if (!cache.archive_dirty) return;
+  if (!d->cache.archive || !d->cache.archive_dirty) return;
   @autoreleasepool {
-    std::string dir = cache.archive_path + ".tmp-XXXXXX";
-    bool saved = false;
-    if (mkdtemp(dir.data())) {
-      const std::string trial = dir + "/trial";
-      NSError *err = nil;
-      if ([cache.archive serializeToURL:hb_archive_url(trial.c_str()) error:&err]) {
-        saved = rename(trial.c_str(), cache.archive_path.c_str()) == 0;
-      } else {
-        WARN("pipeline archive serialization failed, trying recovery: %s\n", err ? [[err description] UTF8String] : "?");
-        unlink(trial.c_str());
-        saved = hb_archive_recover(d, dir, trial.c_str());
-      }
-      unlink(trial.c_str());
-      rmdir(dir.c_str());
-    }
-    if (!saved) WARN("pipeline archive save failed: %s\n", cache.archive_path.c_str());
+    std::string tmp = d->cache.archive_path + ".tmp-" + std::to_string(getpid());
+    NSError *err = nil;
+    NSURL *url = [NSClassFromString(@"NSURL") fileURLWithPath:[NSString stringWithUTF8String:tmp.c_str()]];
+    if ([d->cache.archive serializeToURL:url error:&err] && rename(tmp.c_str(), d->cache.archive_path.c_str()) == 0) d->cache.archive_dirty = false;
+    else { WARN("pipeline archive save failed: %s\n", err ? [[err description] UTF8String] : "rename"); unlink(tmp.c_str()); }
   }
 }
 
@@ -1982,7 +1898,6 @@ static void hb_draw(hb_device *d, uint32_t pt, uint32_t prims, uint32_t start_ve
     pd.vertexFunction = vv->function; pd.fragmentFunction = pv->function;
     pd.rasterSampleCount = samples;
     if (atoc) pd.alphaToCoverageEnabled = YES;   /* (DX9FULL) */
-    bool writes_color = false;
     for (int i = 0; i < 4; i++) {
       if (!st.rt[i] || !st.rt[i]->texture || (d->enc_detach >> i & 1)) continue;
       auto *ca = pd.colorAttachments[i];
@@ -1993,7 +1908,6 @@ static void hb_draw(hb_device *d, uint32_t pt, uint32_t prims, uint32_t start_ve
       if (!d->feedback_off && !(ps->info.rt_mask >> i & 1)) wm = 0;
       ca.writeMask = (wm & 1 ? MTLColorWriteMaskRed : 0) | (wm & 2 ? MTLColorWriteMaskGreen : 0) | (wm & 4 ? MTLColorWriteMaskBlue : 0) |
                      (wm & 8 ? MTLColorWriteMaskAlpha : 0);
-      writes_color |= ca.pixelFormat != MTLPixelFormatInvalid && ca.writeMask != MTLColorWriteMaskNone;
       if (rs[RS_ALPHABLENDENABLE]) {
         ca.blendingEnabled = YES;
         ca.sourceRGBBlendFactor = blend_factor(sb); ca.destinationRGBBlendFactor = blend_factor(db);
@@ -2008,28 +1922,23 @@ static void hb_draw(hb_device *d, uint32_t pt, uint32_t prims, uint32_t start_ve
       pd.depthAttachmentPixelFormat = st.ds->fi.pf;
       if (st.ds->fi.stencil) pd.stencilAttachmentPixelFormat = st.ds->fi.pf;
     }
-    /* Metal can omit the fragment stage when no color attachment is written. */
-    id<MTLBinaryArchive> archive = writes_color && pd.fragmentFunction && pd.rasterizationEnabled
-                                ? d->cache.archive : nil;
     NSError *err = nil;
-    if (archive) {
+    if (d->cache.archive) {
       /* archive first: a hit creates the pipeline from stored GPU code; a miss compiles and adds it */
-      pd.binaryArchives = [NSClassFromString(@"NSArray") arrayWithObject:archive];
+      pd.binaryArchives = [NSClassFromString(@"NSArray") arrayWithObject:d->cache.archive];
       pso = [d->device newRenderPipelineStateWithDescriptor:pd options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:&err];
-      pd.binaryArchives = nil;  /* Compilation and recovery must not use the failed lookup. */
       if (pso) d->cache.pso_hits++;   /* new...: +1 already */
       err = nil;
     }
     if (!pso) {
       pso = [d->device newRenderPipelineStateWithDescriptor:pd error:&err];
-      if (pso && archive) {
+      if (pso && d->cache.archive) {
         d->cache.pso_misses++;
         NSError *aerr = nil;
-        if ([archive addRenderPipelineFunctionsWithDescriptor:pd error:&aerr]) d->cache.archive_dirty = true;
+        if ([d->cache.archive addRenderPipelineFunctionsWithDescriptor:pd error:&aerr]) d->cache.archive_dirty = true;
         else TRACE("archive add failed: %s\n", aerr ? [[aerr description] UTF8String] : "?");
       }
     }
-    if (pso && archive) d->cache.archive_entries.push_back([pd retain]);
     [pd release];
     if (!pso) { WARN("pipeline failed: %s\n", err ? [[err description] UTF8String] : "?"); }
     hb_pso_entry pe; memcpy(pe.key, pkey, sizeof(pkey)); pe.pso = pso;
@@ -3069,10 +2978,6 @@ static NTSTATUS hb_stats(void *args) {
   p->cache_rows_written = d->cache.writes; p->cache_ready = d->cache.db != nullptr;
   p->pad[0] = d->cache.pso_hits; p->pad[1] = d->cache.pso_misses;
   hb_archive_save(d);
-  /* The shim requests stats when it releases the device. */
-  for (auto *pd : d->cache.archive_entries) [pd release];
-  d->cache.archive_entries.clear();
-  d->cache.archive_dirty = false;
   fprintf(stderr, "hbdx9-core: stats variants_compiled=%u variants_cached=%u cache_writes=%u psos=%u pso_archive_hits=%u pso_archive_misses=%u draws=%u cache=%s\n",
           p->variants_compiled, p->variants_cached, p->cache_rows_written, p->psos_created, d->cache.pso_hits, d->cache.pso_misses,
           p->draws, p->cache_ready ? "on" : "off");

@@ -185,6 +185,11 @@ def build(args):
             architecture = None
             if args.variant != 'native':
                 architecture = pe_identity(path, args.variant, args.ec_checker)
+                if args.variant == 'ec' and path.name.lower() in ['dxgi.dll', 'd3d12.dll']:
+                    gate = prepare_source.build_tool('arm64ec_public_abi')
+                    spec = importlib.util.spec_from_file_location('graphics_public_com_abi', gate)
+                    abi = importlib.util.module_from_spec(spec); spec.loader.exec_module(abi)
+                    architecture['public_com_entry_contract'] = abi.check_image(path)
             elif struct.unpack_from('<II', data) != (0xfeedfacf, 0x0100000c):
                 raise ValueError('Native output must be ARM64 Mach-O: ' + name)
             target = outputs / path.name

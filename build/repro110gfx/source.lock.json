@@ -13120,8 +13120,8 @@
         },
         {
           "path": "src/hbdx9/d3d9_shim.cpp",
-          "bytes": 255639,
-          "sha256": "838202bf4ea21fdc359444b3692fd926713acbc30a8b4f95f324b7ebd8ef33db",
+          "bytes": 259413,
+          "sha256": "cf48dccc55690e07e2a606ec96e6695d60eee4b81399c1fe22eec2d0b054d5d2",
           "executable": false,
           "public_source": "src/hbdx9/d3d9_shim.cpp"
         },
@@ -13197,8 +13197,8 @@
         },
         {
           "path": "src/hbdx9/unix/hbdx9_unix.mm",
-          "bytes": 195555,
-          "sha256": "e2df8ad33ba7987d6207716224cea71850f4818fa2f2990ab95aa0506088b8ae",
+          "bytes": 191785,
+          "sha256": "e1af43d613896dca83a43108c288663ad5d828d6c25f781deb292628bc69e845",
           "executable": false,
           "public_source": "src/hbdx9/unix/hbdx9_unix.mm"
         },
@@ -13932,7 +13932,7 @@
           "git_blob": "192299e969c8fc3f732e6ed82b0c66cc296daace"
         }
       ],
-      "total_bytes": 10222336
+      "total_bytes": 10226110
     }
   },
   "directx": {
@@ -13958,9 +13958,15 @@
   "build_tools": {
     "ldpfilter23": {
       "path": "ldpfilter23.py",
-      "bytes": 6986,
-      "sha256": "597fb73900a21eac9b00985e0879c7b0f9184f6e68d23db3d5c1ac2757b46515",
-      "upstream_source_sha256": "903c52e459b5cdc179283ee74a56d4743fbbac5a0036b0ba18ce30e9c62e677f"
+      "bytes": 6076,
+      "sha256": "3091402bb2fa69b10ce47540473e1fb3ce2c830c04441a60287dbdcbaccda00a",
+      "executable": true
+    },
+    "arm64ec_public_abi": {
+      "path": "arm64ec_public_abi.py",
+      "bytes": 5672,
+      "sha256": "7ae40a44fa2f61fe199d400add7976a7d5c280ff390dd2f7d73ab540c009cefd",
+      "executable": false
     }
   },
   "compiler": {

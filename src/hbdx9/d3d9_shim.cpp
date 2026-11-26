@@ -38,6 +38,55 @@ void hbdx9_log(const char *fmt, ...) {
   if (m < 0) m = 0; n += std::min<int>(m, (int)sizeof(b) - n - 2); b[n++] = '\n';
   err_line(b, n);
 }
+
+/* Match wined3d's fullscreen setup: select the back-buffer mode and cover
+   the monitor with the device window. With EmulateModeset, win32u maps that
+   window from the emulated monitor to the physical display. Restore the
+   display mode and window state on exit. HBDX9_FS_MODESET=0 disables this. */
+struct Hbdx9FsState { bool on = false, mode_changed = false; HWND wnd = nullptr; LONG style = 0, exstyle = 0; RECT rect{}; };
+static int fs_modeset_on() {
+  static int v = -1;
+  if (v < 0) { char b[8]; DWORD n = GetEnvironmentVariableA("HBDX9_FS_MODESET", b, sizeof(b)); v = !(n && n < sizeof(b) && b[0] == '0'); }
+  return v;
+}
+static void hbdx9_fs_enter(Hbdx9FsState &fs, HWND wnd, UINT w, UINT h, UINT hz) {
+  if (!wnd || !w || !h || !fs_modeset_on()) return;
+  DEVMODEW cur{}; cur.dmSize = sizeof(cur);
+  bool have = EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &cur);
+  if (!have || cur.dmPelsWidth != w || cur.dmPelsHeight != h) {
+    DEVMODEW dm{}; dm.dmSize = sizeof(dm); dm.dmPelsWidth = w; dm.dmPelsHeight = h; dm.dmBitsPerPel = 32;
+    dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL;
+    if (hz > 1 && hz < 1000) { dm.dmDisplayFrequency = hz; dm.dmFields |= DM_DISPLAYFREQUENCY; }
+    LONG r = ChangeDisplaySettingsExW(nullptr, &dm, nullptr, CDS_FULLSCREEN, nullptr);
+    if (r != DISP_CHANGE_SUCCESSFUL && (dm.dmFields & DM_DISPLAYFREQUENCY)) {   /* the rate is a hint: try the mode alone */
+      dm.dmFields &= ~DM_DISPLAYFREQUENCY; dm.dmDisplayFrequency = 0; r = ChangeDisplaySettingsExW(nullptr, &dm, nullptr, CDS_FULLSCREEN, nullptr);
+    }
+    hbdx9_log("fullscreen: mode %lux%lu -> %ux%u: ChangeDisplaySettings = %ld", have ? cur.dmPelsWidth : 0, have ? cur.dmPelsHeight : 0, w, h, (long)r);
+    if (r == DISP_CHANGE_SUCCESSFUL) fs.mode_changed = true;
+  }
+  if (!fs.on) { fs.wnd = wnd; fs.style = GetWindowLongW(wnd, GWL_STYLE); fs.exstyle = GetWindowLongW(wnd, GWL_EXSTYLE); GetWindowRect(wnd, &fs.rect); }
+  MONITORINFO mi{}; mi.cbSize = sizeof(mi); POINT o = {0, 0};
+  RECT mr = {0, 0, (LONG)w, (LONG)h};
+  if (GetMonitorInfoW(MonitorFromPoint(o, MONITOR_DEFAULTTOPRIMARY), &mi)) mr = mi.rcMonitor;
+  LONG st = (fs.style & ~(WS_OVERLAPPEDWINDOW | WS_CHILD)) | WS_POPUP | WS_SYSMENU | WS_VISIBLE;
+  LONG ex = (fs.exstyle & ~(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_STATICEDGE)) | WS_EX_TOPMOST;
+  SetWindowLongW(wnd, GWL_STYLE, st); SetWindowLongW(wnd, GWL_EXSTYLE, ex);
+  SetWindowPos(wnd, HWND_TOPMOST, mr.left, mr.top, (int)w, (int)h, SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+  RECT wr; GetWindowRect(wnd, &wr);
+  hbdx9_log("fullscreen: window %p -> [%ld,%ld,%ld,%ld] (monitor [%ld,%ld,%ld,%ld], was [%ld,%ld,%ld,%ld])", (void *)wnd, wr.left, wr.top, wr.right, wr.bottom,
+            mr.left, mr.top, mr.right, mr.bottom, fs.rect.left, fs.rect.top, fs.rect.right, fs.rect.bottom);
+  fs.on = true;
+}
+static void hbdx9_fs_leave(Hbdx9FsState &fs) {
+  if (!fs.on) return;
+  fs.on = false;
+  if (fs.mode_changed) { LONG r = ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr); hbdx9_log("fullscreen: mode restored = %ld", (long)r); fs.mode_changed = false; }
+  if (IsWindow(fs.wnd)) {
+    SetWindowLongW(fs.wnd, GWL_STYLE, fs.style); SetWindowLongW(fs.wnd, GWL_EXSTYLE, fs.exstyle);
+    SetWindowPos(fs.wnd, (fs.exstyle & WS_EX_TOPMOST) ? HWND_TOPMOST : HWND_NOTOPMOST, fs.rect.left, fs.rect.top, fs.rect.right - fs.rect.left, fs.rect.bottom - fs.rect.top,
+                 SWP_FRAMECHANGED | SWP_NOACTIVATE);
+  }
+}
 /* (CRYSIS 12.11.2026) "format not supported" once per (call, format): Crysis retried one refused format 124 799 times in a
    7-minute run, one stderr line each. */
 static void hbdx9_unsupported_format(const char *call, unsigned long fmt) {
@@ -760,6 +809,7 @@ public:
   D3DMATERIAL9 material{};
   float clip_planes[6][4] = {};
   BOOL sw_vp = FALSE;
+  Hbdx9FsState fs;   /* (FULLSCREEN) display mode / window placement of a full-screen device */
   DWORD create_flags = 0;   /* (DX9FULL v13) for Reset: the real d3d9 applies its FPU setup again (measured), ResetEx does not */
   /* (DX9FULL v13, curator: Apply of a D3DSBT_ALL block 35.6k host instructions -> ~10k and less) the state-block change journal.
      Every write of a state a block can hold is noted here, at the one place it happens: the journal position of each category's
@@ -956,6 +1006,7 @@ public:
                 (unsigned long long)up.seq_waits, (unsigned long long)(up.seq_wait_ticks * 1000 / (uint64_t)f.QuadPart)); }
   }
   void teardown() {
+    hbdx9_fs_leave(fs);   /* (FULLSCREEN) */
     for (auto &t : tex) if (t) t->Release();
     for (auto &s : streams) if (s.vb) s.vb->Release();
     if (ib) ib->Release();
@@ -2488,6 +2539,7 @@ HRESULT Hbdx9Device::init(HWND focus, D3DPRESENT_PARAMETERS *params) {
   if (pp.BackBufferFormat == D3DFMT_UNKNOWN) pp.BackBufferFormat = D3DFMT_X8R8G8B8;
   if (!pp.BackBufferCount) pp.BackBufferCount = 1;
   *params = pp;
+  if (!pp.Windowed) hbdx9_fs_enter(fs, window, pp.BackBufferWidth, pp.BackBufferHeight, pp.FullScreen_RefreshRateInHz); else hbdx9_fs_leave(fs);   /* (FULLSCREEN) */
   hbdx9_swapchain_params sc{};
   sc.device = native_device; sc.hwnd = (uint64_t)(uintptr_t)window;
   sc.width = pp.BackBufferWidth; sc.height = pp.BackBufferHeight; sc.format = pp.BackBufferFormat;
@@ -3531,7 +3583,43 @@ public:
   hbdx9_init_params info{};
   volatile uint32_t *fence_page = nullptr;
 
-  explicit Hbdx9Interface(bool is_ex) : ex(is_ex) {}
+  // D3D9 snapshots the adapter's available modes when the interface is created.
+  // Returning only the current desktop mode makes a game's saved fullscreen
+  // resolution disappear whenever the desktop/Retina mode differs.
+  std::vector<D3DDISPLAYMODE> display_modes;
+  std::vector<D3DDISPLAYMODEEX> display_modes_ex;
+
+  explicit Hbdx9Interface(bool is_ex) : ex(is_ex) {
+    for (DWORD index = 0; ; ++index) {
+      DEVMODEW dm{}; dm.dmSize = sizeof(dm);
+      if (!EnumDisplaySettingsW(nullptr, index, &dm)) break;
+      if (dm.dmBitsPerPel != 32 || !dm.dmPelsWidth || !dm.dmPelsHeight) continue;
+      D3DDISPLAYMODEEX mode{}; mode.Size = sizeof(mode);
+      mode.Width = dm.dmPelsWidth; mode.Height = dm.dmPelsHeight;
+      mode.RefreshRate = dm.dmDisplayFrequency; mode.Format = D3DFMT_X8R8G8B8;
+      mode.ScanLineOrdering = (dm.dmDisplayFlags & DM_INTERLACED)
+          ? D3DSCANLINEORDERING_INTERLACED : D3DSCANLINEORDERING_PROGRESSIVE;
+      display_modes_ex.push_back(mode);
+    }
+    auto less = [](const D3DDISPLAYMODEEX &a, const D3DDISPLAYMODEEX &b) {
+      if (a.Width != b.Width) return a.Width < b.Width;
+      if (a.Height != b.Height) return a.Height < b.Height;
+      if (a.RefreshRate != b.RefreshRate) return a.RefreshRate < b.RefreshRate;
+      return a.ScanLineOrdering < b.ScanLineOrdering;
+    };
+    std::sort(display_modes_ex.begin(), display_modes_ex.end(), less);
+    display_modes_ex.erase(std::unique(display_modes_ex.begin(), display_modes_ex.end(),
+        [&less](const D3DDISPLAYMODEEX &a, const D3DDISPLAYMODEEX &b) {
+          return !less(a, b) && !less(b, a);
+        }), display_modes_ex.end());
+    for (const auto &mode : display_modes_ex) {
+      if (!display_modes.empty()) {
+        const auto &last = display_modes.back();
+        if (last.Width == mode.Width && last.Height == mode.Height && last.RefreshRate == mode.RefreshRate) continue;
+      }
+      display_modes.push_back({mode.Width, mode.Height, mode.RefreshRate, mode.Format});
+    }
+  }
 
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void **out) override {
     if (!out) return E_POINTER;
@@ -3556,18 +3644,36 @@ public:
     return D3D_OK;
   }
   static bool mode_format_ok(D3DFORMAT f) { return f == D3DFMT_X8R8G8B8; }
-  UINT STDMETHODCALLTYPE GetAdapterModeCount(UINT adapter, D3DFORMAT f) override { return (!adapter && mode_format_ok(f)) ? 1 : 0; }
+  static bool mode_filter_ok(const D3DDISPLAYMODEFILTER *filter) {
+    return filter && filter->Size == sizeof(*filter) && mode_format_ok(filter->Format)
+        && (filter->ScanLineOrdering == D3DSCANLINEORDERING_UNKNOWN
+            || filter->ScanLineOrdering == D3DSCANLINEORDERING_PROGRESSIVE
+            || filter->ScanLineOrdering == D3DSCANLINEORDERING_INTERLACED);
+  }
+  static bool mode_matches(const D3DDISPLAYMODEEX &mode, const D3DDISPLAYMODEFILTER &filter) {
+    return filter.ScanLineOrdering == D3DSCANLINEORDERING_UNKNOWN
+        || mode.ScanLineOrdering == filter.ScanLineOrdering;
+  }
+  static HRESULT current_display_mode(DEVMODEW &dm) {
+    dm = {}; dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm)
+        || !dm.dmPelsWidth || !dm.dmPelsHeight || dm.dmBitsPerPel != 32) return D3DERR_NOTAVAILABLE;
+    return D3D_OK;
+  }
+  UINT STDMETHODCALLTYPE GetAdapterModeCount(UINT adapter, D3DFORMAT f) override {
+    return (!adapter && mode_format_ok(f)) ? (UINT)display_modes.size() : 0;
+  }
   HRESULT STDMETHODCALLTYPE GetAdapterDisplayMode(UINT adapter, D3DDISPLAYMODE *mode) override {
     if (adapter || !mode) return D3DERR_INVALIDCALL;
-    DEVMODEW dm{}; dm.dmSize = sizeof(dm);
-    EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &dm);
-    mode->Width = dm.dmPelsWidth; mode->Height = dm.dmPelsHeight;
-    mode->RefreshRate = dm.dmDisplayFrequency; mode->Format = D3DFMT_X8R8G8B8;
+    DEVMODEW dm{}; HRESULT hr = current_display_mode(dm);
+    if (FAILED(hr)) return hr;
+    *mode = {dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency, D3DFMT_X8R8G8B8};
     return D3D_OK;
   }
   HRESULT STDMETHODCALLTYPE EnumAdapterModes(UINT adapter, D3DFORMAT f, UINT index, D3DDISPLAYMODE *mode) override {
-    if (adapter || index || !mode_format_ok(f)) return D3DERR_INVALIDCALL;
-    return GetAdapterDisplayMode(0, mode);
+    if (adapter || !mode || !mode_format_ok(f) || index >= display_modes.size()) return D3DERR_INVALIDCALL;
+    *mode = display_modes[index];
+    return D3D_OK;
   }
   HRESULT STDMETHODCALLTYPE CheckDeviceType(UINT adapter, D3DDEVTYPE type, D3DFORMAT display, D3DFORMAT bb, BOOL windowed) override {
     (void)windowed;
@@ -3803,16 +3909,39 @@ public:
     if (out) *out = d;
     return hr;
   }
-  UINT STDMETHODCALLTYPE GetAdapterModeCountEx(UINT adapter, const D3DDISPLAYMODEFILTER *) override { return adapter ? 0 : 1; }
-  HRESULT STDMETHODCALLTYPE EnumAdapterModesEx(UINT adapter, const D3DDISPLAYMODEFILTER *, UINT index, D3DDISPLAYMODEEX *m) override {
-    if (adapter || index || !m) return D3DERR_INVALIDCALL;
-    D3DDISPLAYMODE d; GetAdapterDisplayMode(0, &d);
-    m->Width = d.Width; m->Height = d.Height; m->RefreshRate = d.RefreshRate; m->Format = d.Format; m->ScanLineOrdering = D3DSCANLINEORDERING_PROGRESSIVE;
-    return D3D_OK;
+  UINT STDMETHODCALLTYPE GetAdapterModeCountEx(UINT adapter, const D3DDISPLAYMODEFILTER *filter) override {
+    if (adapter || !mode_filter_ok(filter)) return 0;
+    return (UINT)std::count_if(display_modes_ex.begin(), display_modes_ex.end(),
+        [filter](const D3DDISPLAYMODEEX &mode) { return mode_matches(mode, *filter); });
+  }
+  HRESULT STDMETHODCALLTYPE EnumAdapterModesEx(UINT adapter, const D3DDISPLAYMODEFILTER *filter, UINT index, D3DDISPLAYMODEEX *m) override {
+    if (adapter || !mode_filter_ok(filter) || !m || m->Size != sizeof(*m)) return D3DERR_INVALIDCALL;
+    for (const auto &mode : display_modes_ex) {
+      if (!mode_matches(mode, *filter)) continue;
+      if (index-- == 0) { *m = mode; return D3D_OK; }
+    }
+    return D3DERR_INVALIDCALL;
   }
   HRESULT STDMETHODCALLTYPE GetAdapterDisplayModeEx(UINT adapter, D3DDISPLAYMODEEX *m, D3DDISPLAYROTATION *rot) override {
-    if (rot) *rot = D3DDISPLAYROTATION_IDENTITY;
-    return EnumAdapterModesEx(adapter, nullptr, 0, m);
+    if (adapter || (m && m->Size != sizeof(*m))) return D3DERR_INVALIDCALL;
+    DEVMODEW dm{}; HRESULT hr = current_display_mode(dm);
+    if (FAILED(hr)) return hr;
+    if (m) {
+      *m = {}; m->Size = sizeof(*m);
+      m->Width = dm.dmPelsWidth; m->Height = dm.dmPelsHeight;
+      m->RefreshRate = dm.dmDisplayFrequency; m->Format = D3DFMT_X8R8G8B8;
+      m->ScanLineOrdering = (dm.dmDisplayFlags & DM_INTERLACED)
+          ? D3DSCANLINEORDERING_INTERLACED : D3DSCANLINEORDERING_PROGRESSIVE;
+    }
+    if (rot) {
+      switch (dm.dmDisplayOrientation) {
+        case DMDO_90: *rot = D3DDISPLAYROTATION_90; break;
+        case DMDO_180: *rot = D3DDISPLAYROTATION_180; break;
+        case DMDO_270: *rot = D3DDISPLAYROTATION_270; break;
+        default: *rot = D3DDISPLAYROTATION_IDENTITY; break;
+      }
+    }
+    return D3D_OK;
   }
   HRESULT STDMETHODCALLTYPE CreateDeviceEx(UINT adapter, D3DDEVTYPE type, HWND focus, DWORD flags, D3DPRESENT_PARAMETERS *pp,
                                            D3DDISPLAYMODEEX *, IDirect3DDevice9Ex **out) override {
